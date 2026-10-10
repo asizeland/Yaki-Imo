@@ -1,0 +1,23 @@
+[package]
+name = "pkg-repo"
+version = "0.1.0"
+edition = "2021"
+description = "Repository trust chain, sync, recipe manifest, and source fetch for pkg (SPEC.md: pkg-repo)"
+
+# Dependency pins per SPEC.md "Crate layout & dependency pins".
+# Two additions beyond the SPEC list, both required by code the SPEC itself
+# mandates (flagged in the wave report):
+#  - serde (derive): recipe_manifest.rs / trust.rs documents are TOML/JSON;
+#    `toml` and `serde_json` are pinned but neither is usable for `derive`
+#    without naming serde directly (Cargo only exposes direct deps).
+#  - sha2: fetch.rs must verify SHA-256 of fetched tarballs (v12 §2) and
+#    trust.rs fingerprints keys by SHA-256. Same pin as pkg-core, so no new
+#    transitive weight.
+[dependencies]
+pkg-core = { path = "../pkg-core" }
+ed25519-dalek = "2"
+ureq = "2" # rustls by default (SPEC pin); no native-tls
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+sha2 = "0.10"

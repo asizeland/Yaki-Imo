@@ -1,0 +1,10 @@
+[package]
+name = "pkg-sandbox"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Sandbox profiles and execution via bwrap + cgroup v2 limits"
+
+[dependencies]
+pkg-core = { path = "../pkg-core" }

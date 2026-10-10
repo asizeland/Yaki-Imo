@@ -1,0 +1,36 @@
+[package]
+name = "pkg-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "pkg command-line interface (clap 4 derive)"
+
+[dependencies]
+pkg-core = { path = "../pkg-core" }
+pkg-resolver = { path = "../pkg-resolver" }
+pkg-db = { path = "../pkg-db" }
+pkg-sandbox = { path = "../pkg-sandbox" }
+pkg-scanner = { path = "../pkg-scanner" }
+pkg-repo = { path = "../pkg-repo" }
+pkg-build = { path = "../pkg-build" }
+pkg-audit = { path = "../pkg-audit" }
+# NOTE: pkg-init is deliberately NOT a dependency — it is a bin-only
+# musl-static crate (no lib target), so a path dep on it cannot build.
+clap.workspace = true
+sha2.workspace = true
+# NOTE (deviation from SPEC's pin list): rusqlite is needed only to
+# *name* `rusqlite::Connection` in helper signatures that call pkg-db's
+# query API — pkg-db exposes the type but does not re-export it. Same
+# workspace pin; pulls in no code pkg-db doesn't already build.
+rusqlite.workspace = true
+
+# Release profile notes for musl-static builds (panic abort, lto,
+# codegen-units=1, strip). Profiles only take effect at the workspace
+# root, where this same [profile.release] block is mirrored in
+# ./Cargo.toml; it is duplicated here as the crate-local contract.
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+strip = true

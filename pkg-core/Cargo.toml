@@ -1,0 +1,16 @@
+[package]
+name = "pkg-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "pkg shared types: package identities, manifests, virtuals, errors"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_derive.workspace = true
+toml.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

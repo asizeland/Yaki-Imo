@@ -1,0 +1,19 @@
+[package]
+name = "pkg-init"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "glibc-apply: musl-static, std-only atomic glibc swapper run from initramfs"
+
+# NOTE: NO dependencies — std-only, musl-static (SPEC: pkg-init).
+
+# Release profile notes for musl-static builds (panic abort, lto,
+# codegen-units=1, strip). Profiles only take effect at the workspace
+# root, where this same [profile.release] block is mirrored in
+# ./Cargo.toml; it is duplicated here as the crate-local contract.
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+strip = true

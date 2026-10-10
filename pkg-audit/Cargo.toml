@@ -1,0 +1,19 @@
+[package]
+name = "pkg-audit"
+version = "0.1.0"
+edition = "2021"
+description = "pkg audit: advisories, deleted-inode process scan, supply-chain report (SPEC.md: pkg-audit)"
+
+# Pins per SPEC.md; two additions the SPEC's own requirements force:
+#  - serde (derive): serde_json is pinned but derive needs serde named.
+#  - rusqlite: supply_chain.rs queries the provenance/acknowledgements
+#    tables *directly on pkg-db's connection* (SPEC pkg-audit wording),
+#    which requires naming rusqlite types in signatures. Same pin as
+#    pkg-db (0.31, bundled).
+[dependencies]
+pkg-core = { path = "../pkg-core" }
+pkg-db = { path = "../pkg-db" }
+pkg-repo = { path = "../pkg-repo" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }

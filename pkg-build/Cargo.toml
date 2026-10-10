@@ -1,0 +1,25 @@
+[package]
+name = "pkg-build"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Source-build orchestration: recipes, cache, cascades, staging, glibc"
+
+[dependencies]
+pkg-core = { path = "../pkg-core" }
+pkg-db = { path = "../pkg-db" }
+pkg-sandbox = { path = "../pkg-sandbox" }
+pkg-scanner = { path = "../pkg-scanner" }
+pkg-resolver = { path = "../pkg-resolver" }
+pkg-repo = { path = "../pkg-repo" }
+sha2.workspace = true
+flate2.workspace = true
+tar.workspace = true
+zstd.workspace = true
+tempfile.workspace = true
+# NOTE (deviation from SPEC's pin list): rusqlite is needed only to
+# *name* `rusqlite::Connection` in signatures that call pkg-db's query
+# API — pkg-db exposes the type but does not re-export it. Same
+# workspace pin; pulls in no code pkg-db doesn't already build.
+rusqlite.workspace = true
