@@ -27,10 +27,6 @@ rusqlite.workspace = true
 
 # Release profile notes for musl-static builds (panic abort, lto,
 # codegen-units=1, strip). Profiles only take effect at the workspace
-# root, where this same [profile.release] block is mirrored in
-# ./Cargo.toml; it is duplicated here as the crate-local contract.
-[profile.release]
-panic = "abort"
-lto = true
-codegen-units = 1
-strip = true
+# root, where this same [profile.release] block lives in ./Cargo.toml;
+# this file carries no [profile] section (cargo warns on ignored
+# member profiles) — the workspace root is the single source.

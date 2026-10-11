@@ -359,6 +359,10 @@ impl ArtifactCache {
 /// paths to delete — least-recently-used first — so the survivors fit
 /// under `cap_bytes`. Split out of `evict_to_cap` so the policy is
 /// unit-testable without a filesystem.
+///
+/// The single most-recently-used entry is never evicted: it is usually
+/// the artifact a build just produced, and deleting it to satisfy a cap
+/// smaller than one artifact would empty the cache on every build.
 pub fn plan_eviction(entries: &[CacheEntryMeta], cap_bytes: u64) -> Vec<PathBuf> {
     let total: u64 = entries.iter().map(|e| e.size).sum();
     if total <= cap_bytes {
@@ -373,8 +377,9 @@ pub fn plan_eviction(entries: &[CacheEntryMeta], cap_bytes: u64) -> Vec<PathBuf>
     });
     let mut remaining = total;
     let mut doomed = Vec::new();
-    for entry in by_age {
-        if remaining <= cap_bytes {
+    let last_idx = by_age.len().saturating_sub(1);
+    for (idx, entry) in by_age.into_iter().enumerate() {
+        if remaining <= cap_bytes || idx == last_idx {
             break;
         }
         remaining -= entry.size;
@@ -512,9 +517,19 @@ fn pack_tar_zst(src: &Path, dest: &Path) -> PkgResult<()> {
         let entry = entry.map_err(PkgError::Io)?;
         let path = entry.path();
         let name = entry.file_name();
-        builder
-            .append_path_with_name(&path, Path::new(&name))
-            .map_err(PkgError::Io)?;
+        let file_type = entry.file_type().map_err(PkgError::Io)?;
+        if file_type.is_dir() {
+            // append_path_with_name archives only the directory entry
+            // itself; recursion is append_dir_all's job (and it honors
+            // follow_symlinks(false) for everything below).
+            builder
+                .append_dir_all(Path::new(&name), &path)
+                .map_err(PkgError::Io)?;
+        } else {
+            builder
+                .append_path_with_name(&path, Path::new(&name))
+                .map_err(PkgError::Io)?;
+        }
     }
     let encoder = builder.into_inner().map_err(PkgError::Io)?;
     encoder.finish().map_err(PkgError::Io)?;

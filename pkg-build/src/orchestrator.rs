@@ -39,22 +39,48 @@
 //!   each node's runtime deps to `pkg_scanner::DeclaredDep`s for the
 //!   post-build gate; deps being built in the same cascade are skipped
 //!   (partial view — see `gate_deps_for`).
+//!
+//! ## v3
+//!
+//! - [MAJOR] `SchedConfig.compiler_wrapper` now comes from `[cache]
+//!   compiler` in `/etc/pkg/config.toml` (§7.9.6) instead of a hardcoded
+//!   `ccache` — see [`parse_compiler_wrapper`]. The recipe's `[build]
+//!   compiler_cache = false` opt-out still wins (recipe.rs).
+//! - [MAJOR] Critical-set double-build (§10.5.6): a node whose recipe
+//!   manifest marks `[build] critical = true` is built a second time
+//!   (sequential, sandboxed, same pinned `SOURCE_DATE_EPOCH`) and the
+//!   two output trees are hash-compared — `repro::double_build`, gated
+//!   by the new `SchedConfig::repro_check` (default true;
+//!   `--no-repro-check` clears it).
+//! - [MAJOR] Post-activation recording (§9.2.1, §7.7.2): after the
+//!   activation transaction commits, the scheduler thread records the
+//!   measured link interface (`insert_link_interface`) and the
+//!   provenance row (`insert_provenance`). Best-effort: the DB commit
+//!   already happened, so failures warn rather than abort.
+//! - [MAJOR] Post-build cascade pruning (Issue 4.1.1): when a rebuilt
+//!   node's freshly measured `link_interface_hash` equals
+//!   `PlanNode::consumed_hash_at_plan`, pending cascade-driven
+//!   dependents are pruned (`NodeState::Pruned`) — see
+//!   `prune_unchanged_dependents`.
+//! - [MINOR] `build_history.peak_rss` is recorded from
+//!   `getrusage(RUSAGE_CHILDREN)` (§7.9.3).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use pkg_core::{AbiTag, OptTag, PkgError, PkgResult, Version};
+use pkg_core::{AbiTag, Identity, OptTag, PkgError, PkgResult, Version};
 use pkg_db::queries::{self, BuildRecord};
+use pkg_db::{LinkInterfaceRow, ProvenanceRow};
 use pkg_sandbox::{apply_cgroup, CgroupLimits};
 use pkg_scanner::DeclaredDep;
 use rusqlite::Connection;
 
 use crate::cache::ArtifactCache;
-use crate::recipe::{run_recipe_phases, BuildContext, Phase, Recipe};
+use crate::recipe::{children_peak_rss_kib, run_recipe_phases, BuildContext, Phase, Recipe};
 use crate::staging;
 
 /// Where the build cgroup subtree lives (Issue 4.2.2). Matches
@@ -197,8 +223,14 @@ pub struct SchedConfig {
     pub repo_cache: PathBuf,
     /// Running glibc for the post-build gate, when known.
     pub host_glibc: Option<Version>,
-    /// Compiler-cache wrapper from config (Issue 4.3.1).
+    /// Compiler-cache wrapper from config (Issue 4.3.1): `[cache]
+    /// compiler` in `/etc/pkg/config.toml` (§7.9.6) — `off`/absent →
+    /// `None`. See [`compiler_wrapper_from_config`].
     pub compiler_wrapper: Option<String>,
+    /// Run the §10.5.6 double-build for critical-set packages (default
+    /// true; `--no-repro-check` clears it). Opt-out, not opt-in: the
+    /// default must be the safe direction.
+    pub repro_check: bool,
     /// The invoking command line, recorded on each generation row.
     pub command_line: String,
     /// Shared by every per-package generation of this cascade (Issue
@@ -220,7 +252,20 @@ impl SchedConfig {
             source_cache: PathBuf::from("/var/cache/pkg/sources"),
             repo_cache: pkg_repo::sync::default_cache_dir(),
             host_glibc: None,
-            compiler_wrapper: Some("ccache".into()),
+            // with_defaults cannot fail (its callers build one
+            // unconditionally), so an unreadable/invalid config degrades
+            // to no wrapper with a loud warning — the safe direction for
+            // a cache. Callers that can propagate errors should prefer
+            // `compiler_wrapper_from_config` directly (hard error per
+            // §4.3's unknown-values philosophy).
+            compiler_wrapper: match compiler_wrapper_from_config(std::path::Path::new(CONFIG_PATH)) {
+                Ok(wrapper) => wrapper,
+                Err(e) => {
+                    eprintln!("pkg: warning: ignoring {CONFIG_PATH}: {e}");
+                    None
+                }
+            },
+            repro_check: true,
             command_line: String::new(),
             cascade_id: None,
             store_roots: vec![PathBuf::from("/usr/lib/pkg/.store")],
@@ -232,6 +277,50 @@ fn available_parallelism() -> u32 {
     thread::available_parallelism()
         .map(|n| n.get() as u32)
         .unwrap_or(1)
+}
+
+// ---------------------------------------------------------------------
+// [cache] compiler config (§7.9.6)
+// ---------------------------------------------------------------------
+
+/// The system config file the scheduler reads for the compiler-cache
+/// wrapper (§7.9.6). Only `[cache] compiler` is consumed here; other
+/// sections belong to other subsystems.
+pub const CONFIG_PATH: &str = "/etc/pkg/config.toml";
+
+/// Parses `[cache] compiler` from config TOML text: absent or `"off"` →
+/// `None` (no wrapper); `"ccache"`/`"sccache"` → that wrapper. Unknown
+/// values — including a non-string value — are hard errors, per §4.3's
+/// "unknown config is loud, never silently ignored" philosophy.
+pub fn parse_compiler_wrapper(config_text: &str) -> PkgResult<Option<String>> {
+    let value: toml::Value =
+        toml::from_str(config_text).map_err(|e| PkgError::Parse(format!("config TOML: {e}")))?;
+    let Some(compiler) = value.get("cache").and_then(|c| c.get("compiler")) else {
+        return Ok(None);
+    };
+    let Some(s) = compiler.as_str() else {
+        return Err(PkgError::Parse(
+            "[cache] compiler must be a string (off | ccache | sccache)".into(),
+        ));
+    };
+    match s {
+        "off" => Ok(None),
+        "ccache" | "sccache" => Ok(Some(s.to_string())),
+        other => Err(PkgError::Parse(format!(
+            "unknown [cache] compiler value `{other}` (expected off, ccache or sccache)"
+        ))),
+    }
+}
+
+/// Reads `[cache] compiler` from the config file at `path`. A missing
+/// file means no setting (no wrapper); an unreadable or invalid file is
+/// a hard error.
+pub fn compiler_wrapper_from_config(path: &std::path::Path) -> PkgResult<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => parse_compiler_wrapper(&text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(PkgError::Io(e)),
+    }
 }
 
 /// What happened to one node.
@@ -475,6 +564,11 @@ enum NodeState {
     Failed,
     Blocked,
     CacheHitActivated,
+    /// Rebuilt byte-identical link interface: node itself is done and
+    /// its dependents may proceed against the *old* build (their own
+    /// re-measurement decides whether they still need to build). Set by
+    /// post-build pruning; treated as satisfied for readiness.
+    Pruned,
 }
 
 /// Message a worker sends back when its build attempt finishes.
@@ -491,6 +585,11 @@ struct WorkerDone {
 
 struct WorkerOk {
     pkgdir: PathBuf,
+    /// The §10.5.6 double-build ran and both trees matched — only ever
+    /// true for critical-set packages built (not cache-fetched) with
+    /// `SchedConfig::repro_check` on. Recorded as
+    /// `reproducibility='self-match'` in the provenance row.
+    repro_match: bool,
 }
 
 /// Executes a build plan (Issue 4.2.1): DAG-level parallel builds under
@@ -537,13 +636,49 @@ pub fn execute_plan(
 
     let (tx, rx) = channel::<WorkerDone>();
     let mut running: BTreeMap<String, u32> = BTreeMap::new(); // name → tokens held
+    // Nodes whose post-build re-measurement proved the link interface
+    // unchanged (§7.7.2) — the pruning step below consults this.
+    let mut iface_unchanged: BTreeSet<String> = BTreeSet::new();
 
     loop {
         // -- collect finished workers --------------------------------
         while let Ok(done) = rx.try_recv() {
             pool.release(done.tokens_held);
             running.remove(&done.name);
-            handle_worker_done(conn, plan, cfg, &mut states, &mut report, done)?;
+            handle_worker_done(conn, plan, cfg, &mut states, &mut report, done, &mut iface_unchanged)?;
+        }
+
+        // -- prune unchanged subtrees (§7.7.2) ------------------------
+        // A pending node whose in-cascade deps ALL completed with an
+        // unchanged measured interface no longer needs its rebuild:
+        // the interface it consumes is byte-identical. Roots (no
+        // in-cascade deps) and explicitly requested nodes are never
+        // pruned. Unmeasured/failed deps never satisfy this — widening
+        // is the safe direction.
+        let prunable: Vec<String> = plan
+            .nodes
+            .iter()
+            .filter(|(name, node)| {
+                states.get(*name) == Some(&NodeState::Pending)
+                    && !node.requested
+                    && !node.deps_in_cascade.is_empty()
+                    && node.deps_in_cascade.iter().all(|d| {
+                        match states.get(d) {
+                            // Deps outside the plan weren't rebuilt —
+                            // unchanged by definition.
+                            None => true,
+                            Some(NodeState::Activated)
+                            | Some(NodeState::CacheHitActivated)
+                            | Some(NodeState::Pruned) => iface_unchanged.contains(d),
+                            _ => false,
+                        }
+                    })
+            })
+            .map(|(n, _)| n.clone())
+            .collect();
+        for name in prunable {
+            states.insert(name.clone(), NodeState::Pruned);
+            report.pruned.push(name);
         }
 
         // -- launch ready nodes --------------------------------------
@@ -602,7 +737,7 @@ pub fn execute_plan(
                 Ok(done) => {
                     pool.release(done.tokens_held);
                     running.remove(&done.name);
-                    handle_worker_done(conn, plan, cfg, &mut states, &mut report, done)?;
+                    handle_worker_done(conn, plan, cfg, &mut states, &mut report, done, &mut iface_unchanged)?;
                 }
                 Err(_) => break, // all senders dropped; nothing more can finish
             }
@@ -730,7 +865,10 @@ fn build_node(
                 return WorkerDone {
                     name: node.name.clone(),
                     tokens_held: tokens,
-                    result: Ok(WorkerOk { pkgdir }),
+                    // A cache hit is byte-identical to what a source
+                    // build would produce (content-addressed, §7.9.5);
+                    // the double-build did not run, so no self-match.
+                    result: Ok(WorkerOk { pkgdir, repro_match: false }),
                     log_tail: String::new(),
                     duration: clock.elapsed(),
                     cache_hit: true,
@@ -779,6 +917,37 @@ fn build_node(
         tail = retry.1;
     }
 
+    // -- critical-set double-build (§10.5.6) --------------------------
+    // A successful critical build is built a second time (sequential,
+    // sandboxed, same pinned SOURCE_DATE_EPOCH) and the trees compared;
+    // a mismatch aborts here, quarantining both trees. Opt-out via
+    // `SchedConfig::repro_check` (`--no-repro-check`), never the default.
+    let mut repro_match = false;
+    if result.is_ok() && cfg.repro_check && node.recipe.manifest.critical {
+        let first_ctx = BuildContext {
+            scratch_dir: scratch.clone(),
+            pkgdir: pkgdir.clone(),
+            selection: node.selection.clone(),
+            inner_jobs: tokens,
+            source_cache: cfg.source_cache.clone(),
+            compiler_wrapper: cfg.compiler_wrapper.clone(),
+            host_glibc: cfg.host_glibc.clone(),
+            recipe_manifest: recipe_manifest.clone(),
+            gate_deps: gate_deps.clone(),
+        };
+        match crate::repro::double_build(
+            &node.recipe,
+            &first_ctx,
+            &cfg.build_root.join(crate::repro::QUARANTINE_DIR_NAME),
+        ) {
+            Ok(()) => repro_match = true,
+            Err(e) => {
+                result = Err(e);
+                tail = String::new();
+            }
+        }
+    }
+
     let duration = clock.elapsed();
 
     // -- populate the cache on success (Issue 4.5) --------------------
@@ -800,7 +969,7 @@ fn build_node(
     WorkerDone {
         name: node.name.clone(),
         tokens_held: tokens,
-        result: result.map(|_| WorkerOk { pkgdir }).map_err(|e| e.to_string()),
+        result: result.map(|_| WorkerOk { pkgdir, repro_match }).map_err(|e| e.to_string()),
         log_tail: tail,
         duration,
         cache_hit: false,
@@ -817,6 +986,7 @@ fn handle_worker_done(
     states: &mut BTreeMap<String, NodeState>,
     report: &mut Report,
     done: WorkerDone,
+    iface_unchanged: &mut BTreeSet<String>,
 ) -> PkgResult<()> {
     let node = plan.nodes.get(&done.name).expect("node exists");
 
@@ -832,6 +1002,10 @@ fn handle_worker_done(
             success: done.result.is_ok(),
             started_at: done.started_at,
             cc_hit_rate: None,
+            // Process-wide running maximum of reaped build children
+            // (see recipe::children_peak_rss_kib) — an upper bound, never
+            // a correctness input.
+            peak_rss: children_peak_rss_kib(),
             host_jobs: done.tokens_held,
         };
         if let Err(e) = queries::record_build(conn, &record) {
@@ -864,6 +1038,46 @@ fn handle_worker_done(
             );
             match outcome {
                 Ok(()) => {
+                    // Post-activation recording (§9.2.1, §7.7.2) and
+                    // cascade narrowing both read the ACTIVATED tree:
+                    // staging moved the pkgdir into the store.
+                    let store_dir = staging::store_root_for(node.arch, &cfg.store_roots).map(|r| {
+                        r.join(
+                            Identity {
+                                name: node.name.clone(),
+                                version: node.version.clone(),
+                                abi_tag: node.abi_tag,
+                                opt_tag: node.opt_tag.clone(),
+                                arch: node.arch,
+                            }
+                            .store_dir_name(),
+                        )
+                    });
+                    // Best-effort: the activation commit already
+                    // happened, so failures warn rather than abort.
+                    if let Ok(dir) = &store_dir {
+                        record_build_metadata(conn, node, dir, done.started_at, ok.repro_match, cfg);
+                    }
+                    // Post-build cascade narrowing (§7.7.2): compare the
+                    // freshly measured interface hash against what the
+                    // plan assumed; a match means dependents don't need
+                    // their cascade rebuilds.
+                    let measured = store_dir
+                        .as_ref()
+                        .ok()
+                        .and_then(|d| measure_package_interface(d));
+                    match measured {
+                        Some(new_hash) => {
+                            if node.consumed_hash_at_plan.as_deref() == Some(new_hash.as_str()) {
+                                iface_unchanged.insert(done.name.clone());
+                            }
+                        }
+                        None => {
+                            // No measurable interface (or scan failure):
+                            // treat as changed — uncertainty always
+                            // widens the cascade (§7.7.3).
+                        }
+                    }
                     states.insert(
                         done.name.clone(),
                         if done.cache_hit {
@@ -900,6 +1114,157 @@ fn handle_worker_done(
             );
         }
     }
+    Ok(())
+}
+
+/// Walks an activated store tree and returns the package's aggregate
+/// `link_interface_hash` (§7.7.2; empty header fingerprint until header
+/// fingerprinting lands). `None` when the tree exports no sonames at
+/// all — the hash of an empty set would be a constant shared by every
+/// non-library package, useless as a pruning comparison.
+fn measure_package_interface(tree: &Path) -> Option<String> {
+    let interfaces = collect_link_interfaces(tree)?;
+    if interfaces.is_empty() {
+        return None;
+    }
+    Some(pkg_scanner::link_interface_hash(&interfaces, ""))
+}
+
+/// Every link interface exported by ELF members of `tree`, recursively.
+/// Unparseable files are skipped (a data file is not a scan failure).
+fn collect_link_interfaces(tree: &Path) -> Option<Vec<pkg_scanner::LinkInterface>> {
+    let mut interfaces = Vec::new();
+    let mut stack = vec![tree.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).ok()?.flatten() {
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            if ft.is_dir() {
+                stack.push(path);
+            } else if ft.is_file() {
+                if let Ok(mut found) = pkg_scanner::extract_link_interface(&path) {
+                    interfaces.append(&mut found);
+                }
+            }
+        }
+    }
+    Some(interfaces)
+}
+
+/// Post-activation recording (§9.2.1, §7.7.2): the measured link
+/// interface rows and the provenance row for a just-activated build.
+/// Best-effort — the activation commit already happened, so failures
+/// warn rather than abort.
+fn record_build_metadata(
+    conn: &Connection,
+    node: &PlanNode,
+    store_dir: &Path,
+    started_at: i64,
+    repro_match: bool,
+    cfg: &SchedConfig,
+) {
+    if let Err(e) =
+        record_build_metadata_inner(conn, node, store_dir, started_at, repro_match, cfg)
+    {
+        eprintln!(
+            "pkg: warning: failed to record build metadata for {}: {e}",
+            node.name
+        );
+    }
+}
+
+fn record_build_metadata_inner(
+    conn: &Connection,
+    node: &PlanNode,
+    store_dir: &Path,
+    started_at: i64,
+    repro_match: bool,
+    cfg: &SchedConfig,
+) -> PkgResult<()> {
+    let package_id = pkg_core::PackageId {
+        name: node.name.clone(),
+        version: node.version.clone(),
+        abi_tag: node.abi_tag,
+        arch: node.arch,
+    };
+    let Some(row) = queries::find_package_by_identity_opt(conn, &package_id, node.opt_tag.as_str())?
+    else {
+        return Err(PkgError::NotFound(format!(
+            "activated package {} not found in DB",
+            node.name
+        )));
+    };
+
+    // Every row of a package carries the same aggregate hash — the
+    // cascade compares interfaces per package, not per soname (see
+    // queries::link_interface_hash).
+    let interfaces = collect_link_interfaces(store_dir).unwrap_or_default();
+    let aggregate = if interfaces.is_empty() {
+        String::new()
+    } else {
+        pkg_scanner::link_interface_hash(&interfaces, "")
+    };
+    for li in &interfaces {
+        queries::insert_link_interface(
+            conn,
+            &LinkInterfaceRow {
+                package_id: row.id,
+                soname: li.soname.clone(),
+                symbol_versions: li.symbol_versions.iter().cloned().collect::<Vec<_>>().join("\n"),
+                header_fingerprint: String::new(),
+                link_interface_hash: aggregate.clone(),
+            },
+        )?;
+    }
+
+    // Provenance (§9.2.1): from the signed recipe manifest where
+    // available; unknown fields are recorded as empty/0, never
+    // fabricated.
+    let entry = pkg_repo::load_cached_recipe_manifest(&cfg.repo_cache)
+        .ok()
+        .and_then(|m| m.find(&node.name, &node.version.to_string()).cloned());
+    let source_hashes = entry
+        .as_ref()
+        .map(|e| serde_json::to_string(&e.sources).unwrap_or_else(|_| "[]".to_string()))
+        .unwrap_or_else(|| "[]".to_string());
+    let attestations = entry.as_ref().map(|e| {
+        let fps: Vec<&str> = e.attestations.iter().map(|a| a.key_fingerprint.as_str()).collect();
+        serde_json::to_string(&fps).unwrap_or_else(|_| "[]".to_string())
+    });
+    let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let osrelease = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    queries::insert_provenance(
+        conn,
+        &ProvenanceRow {
+            package_id: row.id,
+            recipe_commit: node.recipe.recipe_commit.clone(),
+            source_hashes,
+            index_version: 0,
+            attestations,
+            build_host: format!("{hostname} (linux {osrelease})"),
+            builder_version: format!(
+                "pkg {} / build.profile v{}",
+                env!("CARGO_PKG_VERSION"),
+                pkg_sandbox::BUILTIN_PROFILE_VERSION
+            ),
+            started_at,
+            finished_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+            reproducibility: if repro_match {
+                Some("self-match".to_string())
+            } else {
+                None
+            },
+        },
+    )?;
     Ok(())
 }
 

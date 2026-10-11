@@ -236,8 +236,13 @@ pub fn stage_major_bump(
     })
 }
 
-/// The protocol-1 pending-flag format (v13 §2), one field per line.
-/// Kept as a pure function so the exact byte format is unit-testable.
+/// The protocol-1 pending-flag format (spec §7.6.2), one field per
+/// line: exactly `protocol`, `target`, `manifest_sha256`, `created`
+/// (RFC 3339). `glibc_apply_sha256` is deliberately NOT in the flag —
+/// §7.6.3 records it in the DB pending row only (see
+/// `queries::set_pending_glibc`); the boot-time reader treats it as an
+/// optional extension. Kept as a pure function so the exact byte format
+/// is unit-testable.
 pub fn format_pending_flag(pending: &PendingGlibc) -> String {
     format!(
         "protocol = {}\ntarget = {}\nmanifest_sha256 = {}\ncreated = {}\n",
@@ -368,7 +373,8 @@ mod tests {
 
     #[test]
     fn pending_flag_protocol1_format() {
-        // v13 §2: exact one-field-per-line layout, protocol first.
+        // Spec §7.6.2: exact one-field-per-line layout, protocol first,
+        // exactly the four spec fields in spec order.
         let pending = PendingGlibc {
             protocol: 1,
             target_version: "2.40".parse().unwrap(),
@@ -378,11 +384,13 @@ mod tests {
         };
         let text = format_pending_flag(&pending);
         let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 4, "spec §7.6.2 flag has exactly four fields");
         assert_eq!(lines[0], "protocol = 1");
         assert_eq!(lines[1], "target = 2.40");
         assert_eq!(lines[2], format!("manifest_sha256 = {}", "ab".repeat(32)));
-        assert!(lines[3].starts_with("created = "));
-        assert!(lines[3].ends_with('Z'));
+        assert_eq!(lines[3], "created = 2024-07-03T09:46:40Z");
+        // The DB-only drift hash never leaks into the flag (§7.6.2/§7.6.3).
+        assert!(!text.contains("glibc_apply_sha256"));
     }
 
     #[test]
@@ -405,6 +413,19 @@ mod tests {
             created_at: 1_720_000_000,
         };
         write_pending_flag(&flag, &pending).unwrap();
+        // The on-disk bytes round-trip the spec §7.6.2 field names, so
+        // the boot-time glibc-apply (pkg-init) parser accepts them.
+        let text = fs::read_to_string(&flag).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                "protocol = 1".to_string(),
+                "target = 2.40".to_string(),
+                format!("manifest_sha256 = {}", "ff".repeat(32)),
+                "created = 2024-07-03T09:46:40Z".to_string(),
+            ]
+        );
         let (protocol, target) = read_pending_flag(&flag).unwrap().unwrap();
         assert_eq!(protocol, 1);
         assert_eq!(target, "2.40");

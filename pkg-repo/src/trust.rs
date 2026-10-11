@@ -201,6 +201,17 @@ pub struct RoleDelegation {
     pub keys: BTreeMap<String, String>,
 }
 
+/// Default for the `#[serde(default)]` reviewer field on pre-v14 root
+/// manifests: an empty key set with threshold 1 — a delegation that
+/// exists but authorizes nothing. (A derived `Default` would give
+/// threshold 0, which under "count >= threshold" verification would let
+/// *zero* signatures satisfy the role.)
+impl Default for RoleDelegation {
+    fn default() -> Self {
+        RoleDelegation { threshold: 1, keys: BTreeMap::new() }
+    }
+}
+
 impl RoleDelegation {
     pub fn single(key: &VerifyingKey) -> Self {
         let mut keys = BTreeMap::new();
@@ -986,6 +997,43 @@ impl TrustStore {
         std::fs::rename(&tmp, dir.join("state.json"))?;
         Ok(())
     }
+
+    /// Parses a root-manifest document (the `pkg key trust-root <file>`
+    /// input, §10.5.4) WITHOUT verifying or persisting it — this is the
+    /// out-of-band recovery path for a broken delegation chain, so by
+    /// design there is no trusted chain left to verify against. The
+    /// caller displays the returned manifest's fingerprints and obtains
+    /// interactive confirmation before calling [`TrustStore::import_root_manifest`].
+    pub fn parse_root_manifest_doc(bytes: &[u8]) -> PkgResult<RootManifest> {
+        let env: SignedDocument<serde_json::Value> = serde_json::from_slice(bytes)
+            .map_err(|e| PkgError::Parse(format!("root manifest document: {e}")))?;
+        serde_json::from_value(env.signed.clone())
+            .map_err(|e| PkgError::Parse(format!("root manifest payload: {e}")))
+    }
+
+    /// Imports a root anchor out of band (§10.5.4): writes the document
+    /// verbatim as `root.json` and resets the persisted state so the new
+    /// manifest's own root delegation authorizes the *next* rotation
+    /// (the old chain is definitionally broken — that's why this path
+    /// exists). Returns the imported manifest.
+    pub fn import_root_manifest(dir: &Path, bytes: &[u8]) -> PkgResult<RootManifest> {
+        let manifest = Self::parse_root_manifest_doc(bytes)?;
+        std::fs::create_dir_all(dir)?;
+        let tmp = dir.join("root.json.tmp");
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, dir.join("root.json"))?;
+        let state = PersistedState {
+            root_version: manifest.version,
+            root_signers: Some(manifest.root.clone()),
+            ..PersistedState::default()
+        };
+        let state_bytes = serde_json::to_vec_pretty(&state)
+            .map_err(|e| PkgError::Parse(format!("trust: state serialize: {e}")))?;
+        let tmp = dir.join("state.json.tmp");
+        std::fs::write(&tmp, state_bytes)?;
+        std::fs::rename(&tmp, dir.join("state.json"))?;
+        Ok(manifest)
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1225,8 +1273,17 @@ mod tests {
     #[test]
     fn root_rotation_requires_strictly_greater_version() {
         let f = fixture(NOW);
-        let mk =
-            |version: u64| sign_doc(root_payload(&f, version), &[&f.root_keys[0], &f.root_keys[1]]);
+        // Snapshot the payload template and clone the signing keys BEFORE
+        // moving `store` out of the fixture — a closure borrowing `f`
+        // would make the move illegal.
+        let template = root_payload(&f, 0);
+        let k0 = f.root_keys[0].clone();
+        let k1 = f.root_keys[1].clone();
+        let mk = |version: u64| {
+            let mut v = template.clone();
+            v["version"] = serde_json::json!(version);
+            sign_doc(v, &[&k0, &k1])
+        };
         let mut store = f.store;
         // v2 accepted.
         let report = store.apply_root_manifest(&mk(2)).unwrap();
@@ -1243,14 +1300,14 @@ mod tests {
         let mut new_root_payload = root_payload(&f, 2);
         new_root_payload["repository"] =
             serde_json::to_value(delegation_of(&[&new_repo], 1)).unwrap();
+        // Build everything that borrows `f` before moving `store` out.
+        let rotation_doc = sign_doc(new_root_payload, &[&f.root_keys[0], &f.root_keys[1]]);
+        let bundle = index_bundle(&f, 9, NOW + 3600, &[&f.ts_key]);
         let mut store = f.store;
-        let report = store
-            .apply_root_manifest(&sign_doc(new_root_payload, &[&f.root_keys[0], &f.root_keys[1]]))
-            .unwrap();
+        let report = store.apply_root_manifest(&rotation_doc).unwrap();
         assert_eq!(report.added_keys.len(), 1);
         assert_eq!(report.removed_keys.len(), 1); // old repo key gone
         // Old repo key no longer verifies an index.
-        let bundle = index_bundle(&f, 9, NOW + 3600, &[&f.ts_key]);
         assert!(store.verify_index_at(&bundle, NOW, VerifyPolicy::default()).is_err());
     }
 

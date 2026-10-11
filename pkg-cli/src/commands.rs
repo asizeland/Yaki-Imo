@@ -41,22 +41,29 @@ use std::time::Duration;
 
 use pkg_build::cache::ArtifactCache;
 use pkg_build::cascade::{self, BumpedPackage};
+use pkg_build::glibc::InlinePatchFile;
 use pkg_build::orchestrator::{
     self, BuildPlan, PlanNode, SchedConfig,
 };
 use pkg_build::{recipe::Recipe, staging};
 use pkg_core::manifest::PackageManifest;
-use pkg_core::{AbiTag, Arch, Dependency, OptTag, PkgError, PkgResult, Track, Version};
+use pkg_core::{
+    AbiTag, Arch, Dependency, Identity, PkgError, PkgResult, Track, Version,
+    VersionConstraint, VirtualName,
+};
 use pkg_db::queries;
 use pkg_db::schema;
 use pkg_resolver::{
-    effective_constraints, explain_from_tree, Catalog, EffectiveConstraints, Pin, PinMode, PinSet,
-    ProfileSet, ResolveError,
+    effective_constraints, explain_from_tree, Catalog, EffectiveConstraints, PackageGraph, Pin,
+    PinMode, PinSet, ProfileSet, ResolveError, ResolvedGraph,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
-use crate::cli::{Cli, Command, DbAction, EnvAction, KeyAction, TransactionFlags};
+use crate::cli::{
+    AlternativesAction, Cli, Command, DbAction, EnvAction, KeyAction, ProfileAction,
+    TransactionFlags,
+};
 use crate::preview::{format_dry_run_preview, DryRunPlan};
 
 // ---------------------------------------------------------------------
@@ -71,6 +78,16 @@ pub const SOURCE_CACHE: &str = "/var/cache/pkg/sources";
 pub const INDEX_CACHE: &str = "/var/cache/pkg/index";
 pub const SECURITY_JSON: &str = "/var/cache/pkg/index/security.json";
 pub const PENDING_BUILD_STATE: &str = "/var/lib/pkg/pending-build.json";
+/// The synced `profiles.toml` (§10.3), part of the signed index bundle.
+pub const PROFILES_PATH: &str = "/var/cache/pkg/index/profiles.toml";
+/// Name of the active resolution profile (`pkg profile apply`, §16.1).
+pub const ACTIVE_PROFILE_PATH: &str = "/var/lib/pkg/config/active-profile";
+/// The installed glibc-apply binary, hashed into the pending row for
+/// the v13 §3 drift self-check at boot.
+pub const GLIBC_APPLY_BIN: &str = "/usr/lib/pkg/glibc-apply";
+/// §10.6 default cache TTL: 24h, matching the timestamp role's
+/// re-signing cadence.
+pub const REPO_CACHE_TTL: Duration = Duration::from_secs(24 * 3600);
 
 pub fn store_roots() -> Vec<PathBuf> {
     vec![
@@ -118,6 +135,55 @@ fn save_pins(pins: &PinSet) -> PkgResult<()> {
         fs::create_dir_all(parent).map_err(PkgError::Io)?;
     }
     fs::write(PINS_PATH, pins.to_toml_string()?).map_err(PkgError::Io)
+}
+
+// ---------------------------------------------------------------------
+// Resolution profiles (§10.3, §16.1 `pkg profile`)
+// ---------------------------------------------------------------------
+
+/// The synced profile set (`profiles.toml`, part of the signed index
+/// bundle, §10.6). A missing file is an error naming `pkg sync`, the
+/// same contract `catalog_from_recipes` uses for the recipe checkout.
+pub fn load_profiles() -> PkgResult<ProfileSet> {
+    match fs::read_to_string(PROFILES_PATH) {
+        Ok(text) => ProfileSet::from_toml_str(&text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(PkgError::NotFound(
+            "no profiles.toml in the sync cache — run `pkg sync` first".into(),
+        )),
+        Err(e) => Err(PkgError::Io(e)),
+    }
+}
+
+/// The active profile's pin-filtered constraints for a transaction.
+/// No active profile means no constraints; an active profile the synced
+/// set no longer carries degrades to no constraints with a loud warning
+/// — silently dropping a constraint source the user opted into would be
+/// the wrong kind of implicit (§2), but so would bricking every
+/// transaction because the repo retired a profile.
+fn active_profile_constraints(pins: &PinSet) -> EffectiveConstraints {
+    let Ok(text) = fs::read_to_string(ACTIVE_PROFILE_PATH) else {
+        return EffectiveConstraints::new();
+    };
+    let name = text.trim();
+    if name.is_empty() {
+        return EffectiveConstraints::new();
+    }
+    match load_profiles() {
+        Ok(set) => match set.get(name) {
+            Some(profile) => effective_constraints(profile, pins),
+            None => {
+                eprintln!(
+                    "warning: active profile {name:?} is no longer in the synced profiles; \
+                     proceeding without profile constraints"
+                );
+                EffectiveConstraints::new()
+            }
+        },
+        Err(e) => {
+            eprintln!("warning: cannot load profiles for active profile {name:?}: {e}");
+            EffectiveConstraints::new()
+        }
+    }
 }
 
 /// Interactive confirmation (§16.3). `--assume-yes` short-circuits.
@@ -209,9 +275,65 @@ pub fn catalog_from_recipes(recipes_dir: &Path) -> PkgResult<Catalog> {
     Ok(catalog)
 }
 
+// ---------------------------------------------------------------------
+// Alternative provider preferences (§16.1 `pkg alternatives`)
+// ---------------------------------------------------------------------
+
+/// Reads the `alternative_prefs` table (schema v4) as the
+/// virtual → provider map the resolver's `PackageGraph::finalize`
+/// expects. pkg-db defines the table but no query helpers for it yet,
+/// so the SQL lives here against its documented shape.
+pub fn load_alternative_prefs(conn: &Connection) -> PkgResult<BTreeMap<String, String>> {
+    let mut stmt = conn
+        .prepare("SELECT virtual_name, provider FROM alternative_prefs")
+        .map_err(|e| PkgError::Db(e.to_string()))?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| PkgError::Db(e.to_string()))?;
+    let mut out = BTreeMap::new();
+    for row in rows {
+        let (virt, provider) = row.map_err(|e| PkgError::Db(e.to_string()))?;
+        out.insert(virt, provider);
+    }
+    Ok(out)
+}
+
+/// Builds the resolver graph by scanning the recipe-repo checkout,
+/// registering each manifest's `provides` list and full dependency set
+/// (virtuals and OR-groups included — `finalize` materializes them,
+/// applying the user's preferred-provider bias from `alternative_prefs`).
+/// Unlike `catalog_from_recipes`, nothing is pre-flattened away, so a
+/// virtual with no registered provider fails here with a named error
+/// instead of being silently dropped from resolution.
+pub fn graph_from_recipes(
+    recipes_dir: &Path,
+    preferred_providers: &BTreeMap<String, String>,
+) -> PkgResult<ResolvedGraph> {
+    let mut graph = PackageGraph::new();
+    if !recipes_dir.is_dir() {
+        return Err(PkgError::NotFound(format!(
+            "recipe repository {} not found — run `pkg sync` first",
+            recipes_dir.display()
+        )));
+    }
+    for entry in fs::read_dir(recipes_dir).map_err(PkgError::Io)? {
+        let entry = entry.map_err(PkgError::Io)?;
+        let meta = entry.path().join("pkg-meta.toml");
+        if !meta.is_file() {
+            continue;
+        }
+        let text = fs::read_to_string(&meta).map_err(PkgError::Io)?;
+        let manifest = PackageManifest::from_toml_str(&text)?;
+        let deps = manifest
+            .dep_set(&BTreeMap::new()) // base deps: catalog shape (Issue 1 §2.3)
+            .map_err(PkgError::from)?;
+        graph.add_package(manifest.name.clone(), manifest.version.clone(), &manifest.provides, deps);
+    }
+    graph.finalize(preferred_providers)
+}
+
 /// Loads a package's recipe from the recipe repo.
-pub fn load_recipe(name: &str) -> PkgResult<Recipe> {
-    let dir = Path::new(RECIPES_DIR).join(name);
+pub fn load_recipe(name: &str) -> PkgResult<Recipe> {    let dir = Path::new(RECIPES_DIR).join(name);
     if !dir.is_dir() {
         return Err(PkgError::NotFound(format!("no recipe for {name}")));
     }
@@ -304,13 +426,16 @@ pub fn dispatch(cli: Cli) -> PkgResult<()> {
         Command::Remove { name, recursive, force, assume_yes } => {
             cmd_remove(&name, recursive, force, assume_yes)
         }
-        Command::Sync => cmd_sync(),
+        Command::Sync { force, status } => cmd_sync(force, status),
         Command::Search { query } => cmd_search(&query),
         Command::Info { name } => cmd_info(&name),
         Command::Why { name } => cmd_why(&name),
         Command::Explain { constraint } => cmd_explain(&constraint),
         Command::Pin { package, version, mode } => cmd_pin(&package, version, mode),
         Command::Unpin { package } => cmd_unpin(&package),
+        Command::Alternatives { action } => cmd_alternatives(action),
+        Command::Profile { action } => cmd_profile(action),
+        Command::Rebuild { affected, assume_yes } => cmd_rebuild(affected, assume_yes),
         Command::Check { target, verbose, depth, nss, suggest } => {
             cmd_check(target, verbose, depth, nss, suggest)
         }
@@ -322,8 +447,8 @@ pub fn dispatch(cli: Cli) -> PkgResult<()> {
         }
         Command::Env { action } => cmd_env(action),
         Command::BuildEnv { name, resolve } => cmd_build_env(&name, resolve),
-        Command::Audit { json, glibc, supply_chain, critical, acknowledge } => {
-            cmd_audit(json, glibc, supply_chain, critical, acknowledge)
+        Command::Audit { json, glibc, supply_chain, critical, acknowledge, env } => {
+            cmd_audit(json, glibc, supply_chain, critical, acknowledge, env)
         }
         Command::Isolate { path, args } => cmd_isolate(&path, args),
         Command::Fetch { name } => cmd_fetch(&name),
@@ -362,9 +487,13 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
     let selection = parse_opts(&flags.opts)?;
     let _lock = lock_exclusive()?;
     let conn = open_db()?;
+    // §10.5.6/§16.4: unacknowledged supply-chain hard findings block
+    // install/upgrade outright.
+    enforce_supply_chain_gate(&conn)?;
     let pins = load_pins()?;
     let recipes_dir = PathBuf::from(RECIPES_DIR);
-    let catalog = catalog_from_recipes(&recipes_dir)?;
+    let preferred_providers = load_alternative_prefs(&conn)?;
+    let graph = graph_from_recipes(&recipes_dir, &preferred_providers)?;
     let installed = installed_versions(&conn)?;
 
     // `upgrade` with no names targets every explicitly installed pkg.
@@ -392,9 +521,8 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
         // Option validation happens against the recipe's manifest:
         // unknown keys are hard errors (Issue 1 §5).
         let _dep_set = recipe.manifest.dep_set(&selection).map_err(PkgError::from)?;
-        let profile_constraints = EffectiveConstraints::new();
-        match pkg_resolver::resolve_with_constraints(
-            &catalog,
+        let profile_constraints = active_profile_constraints(&pins);
+        match graph.resolve_with_constraints(
             &name,
             root_version.clone(),
             &pins,
@@ -404,6 +532,16 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
             Ok(solution) => selected.extend(solution),
             Err(ResolveError::NoSolution(tree)) => return Err(explain_from_tree(&tree)),
             Err(other) => return Err(PkgError::Resolution(other.to_string())),
+        }
+    }
+
+    // §7.6.4(d) pre-build gate: a package requiring glibc ≥ the
+    // staged-pending target is rejected here, not after a multi-hour
+    // build produced binaries the running libc can't execute.
+    for (name, version) in &selected {
+        let recipe = load_recipe(name)?;
+        if let Some(floor) = glibc_floor_of(&recipe.manifest, &selection)? {
+            enforce_glibc_pending_gate(&conn, name, version, &floor)?;
         }
     }
 
@@ -535,17 +673,269 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
     // stage's T7 guard reads the recipe manifest from here.
     cfg.repo_cache = PathBuf::from(INDEX_CACHE);
     cfg.source_cache = PathBuf::from(SOURCE_CACHE);
+    // §10.5.6 opt-out; the critical-set double build defaults to ON
+    // because that is the safe direction.
+    cfg.repro_check = !flags.no_repro_check;
     let report = orchestrator::execute_plan(&conn, &effective_plan, &cfg)?;
     print_report(&report);
-    if report.is_clean() {
-        Ok(())
-    } else {
-        Err(PkgError::Build(format!(
+    if !report.is_clean() {
+        return Err(PkgError::Build(format!(
             "{} failed, {} blocked (progress is checkpointed — retry resumes at the failure)",
             report.failed.len(),
             report.blocked.len()
-        )))
+        )));
     }
+    // §7.6: a transaction that changed glibc itself goes through the
+    // anchor machinery — category-1 inline patch for a same-release-core
+    // patch bump, staged boot-time swap for a major bump.
+    if effective_plan.nodes.contains_key("glibc") {
+        if let (Some(old), Some(new)) = (installed.get("glibc"), selected.get("glibc")) {
+            if old != new {
+                handle_glibc_update(&conn, &selection, old, new, flags.assume_yes)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// glibc special case wiring (§7.6)
+// ---------------------------------------------------------------------
+
+/// The glibc floor a package declares, if any: the minimum version of
+/// its `glibc` dependency (`>= 2.40` → `2.40`; an exact pin is its own
+/// floor; an unconstrained dep has none).
+fn glibc_floor_of(
+    manifest: &PackageManifest,
+    selection: &BTreeMap<String, bool>,
+) -> PkgResult<Option<Version>> {
+    for dep in manifest.dep_set(selection).map_err(PkgError::from)? {
+        if let Dependency::Package { name, constraint } = dep {
+            if name == "glibc" {
+                return Ok(match constraint {
+                    VersionConstraint::AtLeast(v)
+                    | VersionConstraint::Exact(v)
+                    | VersionConstraint::Range { min: v, .. } => Some(v),
+                    VersionConstraint::Any => None,
+                });
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// §7.6.4(d): fail fast when a package's glibc floor reaches the
+/// staged-pending major bump, with the spec's message naming the
+/// package, the pending target, and the running glibc.
+fn enforce_glibc_pending_gate(
+    conn: &Connection,
+    name: &str,
+    version: &Version,
+    floor: &Version,
+) -> PkgResult<()> {
+    match queries::check_glibc_gate(conn, floor) {
+        Ok(()) => Ok(()),
+        Err(PkgError::GlibcPending { pending_target, .. }) => {
+            let running = running_glibc_version()
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "?".into());
+            Err(PkgError::Gate(format!(
+                "{name}-{version} requires glibc {floor}, but {pending_target} is \
+                 staged-pending (not yet active). Reboot to apply the pending update, \
+                 or select a version of {name} compatible with glibc {running}."
+            )))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The glibc half of a transaction that changed glibc itself. The
+/// orchestrator built the new tree as an ordinary package; what happens
+/// to it next is NOT ordinary activation (§7.6): same release core with
+/// an `-rN` patch suffix is a category-1 security patch applied inline
+/// to the live anchor; a different release core is a major bump staged
+/// for the boot-time `glibc-apply` swap.
+fn handle_glibc_update(
+    conn: &Connection,
+    selection: &BTreeMap<String, bool>,
+    old_version: &Version,
+    new_version: &Version,
+    assume_yes: bool,
+) -> PkgResult<()> {
+    let recipe = load_recipe("glibc")?;
+    let abi_tag = compute_abi_tag(conn, &recipe.manifest, selection)?;
+    let opt_tag = recipe.manifest.opt_tag(selection).map_err(PkgError::from)?;
+    let identity = Identity {
+        name: "glibc".to_string(),
+        version: new_version.clone(),
+        abi_tag,
+        opt_tag,
+        arch: Arch::Amd64,
+    };
+    let new_tree = store_roots()[0].join(identity.store_dir_name());
+    if !new_tree.is_dir() {
+        return Err(PkgError::NotFound(format!(
+            "built glibc tree {} not found",
+            new_tree.display()
+        )));
+    }
+    let anchor = Path::new(pkg_db::integrity::GLIBC_ANCHOR_DIR);
+    let mut confirm_fn = |prompt: &str| confirm(prompt, assume_yes);
+    if old_version.same_release_core(new_version) {
+        let files = category1_patch_files(&new_tree, anchor)?;
+        if files.is_empty() {
+            println!("glibc {new_version}: anchor already matches the new build; nothing to patch");
+            return Ok(());
+        }
+        let swapped = pkg_build::glibc::apply_category1_patch(anchor, &files, &mut confirm_fn)?;
+        println!(
+            "glibc category-1 patch applied inline to the active anchor ({} file(s))",
+            swapped.len()
+        );
+    } else {
+        // stage_major_bump consumes the tree it is handed (rename into
+        // .stage), so hand it a same-filesystem COPY — the store dir
+        // itself must stay put for the DB rows that reference it.
+        let stage_parent = Path::new("/usr/lib/pkg/.stage");
+        fs::create_dir_all(stage_parent).map_err(PkgError::Io)?;
+        let tmp = stage_parent.join(format!("glibc-new-{}", std::process::id()));
+        if tmp.exists() {
+            fs::remove_dir_all(&tmp).map_err(PkgError::Io)?;
+        }
+        copy_tree(&new_tree, &tmp)?;
+        let outcome = pkg_build::glibc::stage_major_bump(
+            conn,
+            &tmp,
+            new_version,
+            Path::new(GLIBC_APPLY_BIN),
+            &mut confirm_fn,
+        )?;
+        if let Some(discarded) = outcome.replaced_previous {
+            println!(
+                "note: previously staged glibc {discarded} was discarded \
+                 (latest-staged-wins; there is no queue, §7.6.4(c))"
+            );
+        }
+        println!(
+            "glibc {} staged; the anchor swap applies at next boot via glibc-apply",
+            outcome.pending.target_version
+        );
+    }
+    Ok(())
+}
+
+/// Collects the changed files of a category-1 patch: regular files in
+/// the new glibc tree whose anchor counterpart exists but differs.
+/// Anything else — a new file, a changed symlink — means this is not a
+/// pure category-1 patch, which is an error rather than a partial
+/// application (the anchor must never end up half-patched).
+fn category1_patch_files(new_tree: &Path, anchor: &Path) -> PkgResult<Vec<InlinePatchFile>> {
+    let mut files = Vec::new();
+    let mut stack = vec![new_tree.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).map_err(PkgError::Io)? {
+            let entry = entry.map_err(PkgError::Io)?;
+            let path = entry.path();
+            let rel = path
+                .strip_prefix(new_tree)
+                .map_err(|e| PkgError::Parse(e.to_string()))?
+                .to_path_buf();
+            let ftype = entry.file_type().map_err(PkgError::Io)?;
+            if ftype.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let dest = anchor.join(&rel);
+            if ftype.is_symlink() {
+                let new_target = fs::read_link(&path).map_err(PkgError::Io)?;
+                let old_target = fs::read_link(&dest).map_err(|_| {
+                    PkgError::Gate(format!(
+                        "{}: new symlink with no anchor counterpart — not a pure \
+                         category-1 patch",
+                        rel.display()
+                    ))
+                })?;
+                if new_target != old_target {
+                    return Err(PkgError::Gate(format!(
+                        "{}: symlink target changed ({} → {}) — not a pure category-1 patch",
+                        rel.display(),
+                        old_target.display(),
+                        new_target.display()
+                    )));
+                }
+                continue;
+            }
+            if !dest.is_file() {
+                return Err(PkgError::Gate(format!(
+                    "{}: new file with no anchor counterpart — not a pure category-1 patch",
+                    rel.display()
+                )));
+            }
+            if fs::read(&path).map_err(PkgError::Io)? != fs::read(&dest).map_err(PkgError::Io)? {
+                files.push(InlinePatchFile {
+                    new_content: path,
+                    anchor_relative: rel,
+                });
+            }
+        }
+    }
+    Ok(files)
+}
+
+/// Symlink-preserving recursive copy (the staged-tree copy for a glibc
+/// major bump must not follow links into the store).
+fn copy_tree(src: &Path, dst: &Path) -> PkgResult<()> {
+    fs::create_dir_all(dst).map_err(PkgError::Io)?;
+    for entry in fs::read_dir(src).map_err(PkgError::Io)? {
+        let entry = entry.map_err(PkgError::Io)?;
+        let path = entry.path();
+        let target = dst.join(entry.file_name());
+        let ftype = entry.file_type().map_err(PkgError::Io)?;
+        if ftype.is_dir() {
+            copy_tree(&path, &target)?;
+        } else if ftype.is_symlink() {
+            let link = fs::read_link(&path).map_err(PkgError::Io)?;
+            let _ = fs::remove_file(&target);
+            std::os::unix::fs::symlink(link, &target).map_err(PkgError::Io)?;
+        } else {
+            fs::copy(&path, &target).map_err(PkgError::Io)?;
+        }
+    }
+    Ok(())
+}
+
+/// The §10.5.6/§16.4 blocking surface: any unacknowledged hard finding
+/// from the supply-chain audit refuses install/upgrade, naming the
+/// packages and the `--acknowledge` remedy.
+fn enforce_supply_chain_gate(conn: &Connection) -> PkgResult<()> {
+    let report = pkg_audit::audit_supply_chain(
+        conn,
+        None, // pre-v14/provenance-row-only mode, same as `pkg audit --supply-chain`
+        Path::new(pkg_audit::QUARANTINE_DIR),
+        false,
+    )
+    .map_err(|e| PkgError::Parse(format!("supply-chain audit failed: {e}")))?;
+    let hard = pkg_audit::unacknowledged_hard_findings(conn, &report)?;
+    if hard.is_empty() {
+        return Ok(());
+    }
+    let mut msg = String::from(
+        "unacknowledged supply-chain hard findings block this transaction (§10.5.6):\n",
+    );
+    for f in &hard {
+        msg.push_str(&format!(
+            "  {} {} — {} {}: {}\n",
+            f.package,
+            f.version,
+            f.severity.as_str(),
+            f.kind.as_str(),
+            f.detail
+        ));
+    }
+    msg.push_str(
+        "acknowledge a finding with: pkg audit --supply-chain --acknowledge <package>",
+    );
+    Err(PkgError::Gate(msg))
 }
 
 /// Assembles the executor's plan from the cascade result: one node per
@@ -565,10 +955,20 @@ fn build_plan(
         all.entry(name.clone()).or_insert_with(|| (version.clone(), BTreeSet::new()));
     }
     let requested: BTreeSet<String> = direct.iter().map(|(n, _)| n.clone()).collect();
+    // Post-build pruning compares a rebuilt node's freshly measured
+    // interface against what its dependents consume TODAY — the
+    // installed (pre-upgrade) package's recorded interface hash (§7.7.2).
+    let installed = queries::list_installed_packages(conn)?;
     for (name, (version, deps)) in all {
         let recipe = load_recipe(&name)?;
         let abi_tag = compute_abi_tag(conn, &recipe.manifest, selection)?;
         let opt_tag = recipe.manifest.opt_tag(selection).map_err(PkgError::from)?;
+        let consumed_hash_at_plan = installed
+            .iter()
+            .find(|r| r.name == name && r.arch == Arch::Amd64)
+            .and_then(|r| {
+                queries::link_interface_hash(conn, &r.name, &r.version).ok().flatten()
+            });
         plan.nodes.insert(
             name.clone(),
             PlanNode {
@@ -580,7 +980,7 @@ fn build_plan(
                 selection: selection.clone(),
                 recipe,
                 deps_in_cascade: deps,
-                consumed_hash_at_plan: None,
+                consumed_hash_at_plan,
                 requested: requested.contains(&name),
             },
         );
@@ -731,7 +1131,7 @@ fn cmd_remove(name: &str, recursive: bool, force: bool, assume_yes: bool) -> Pkg
     // `command` is borrowed by activate_identities AND consumed by the
     // generation closure — give the closure its own clone.
     let cmd_for_gen = command.clone();
-    staging::activate_identities(&conn, &target, &store_roots(), &command, move |c| {
+    staging::activate_identities(&conn, &target, &store_roots(), move |c| {
         queries::record_generation(c, &cmd_for_gen, pkg_db::schema::GenerationKind::Remove, None)
     })?;
     println!("removed {}", listing.join(", "));
@@ -781,7 +1181,7 @@ fn cmd_autoremove(assume_yes: bool) -> PkgResult<()> {
     target.members.retain(|(n, _), _| !doomed.contains(n));
     let command = "pkg autoremove".to_string();
     let cmd_for_gen = command.clone();
-    staging::activate_identities(&conn, &target, &store_roots(), &command, move |c| {
+    staging::activate_identities(&conn, &target, &store_roots(), move |c| {
         queries::record_generation(c, &cmd_for_gen, pkg_db::schema::GenerationKind::Remove, None)
     })?;
     Ok(())
@@ -990,19 +1390,65 @@ fn time_string(ts: i64) -> String {
 // sync / search / info / why / explain / pin / unpin
 // ---------------------------------------------------------------------
 
-fn cmd_sync() -> PkgResult<()> {
+fn cmd_sync(force: bool, status: bool) -> PkgResult<()> {
+    if status {
+        // §10.6 `pkg sync --status`: cache age, last sync, freshness —
+        // no network, no lock (nothing is mutated).
+        let st = pkg_repo::sync_status(Path::new(INDEX_CACHE), REPO_CACHE_TTL)?;
+        match (st.fetched_at, st.age_secs, st.index_version) {
+            (Some(fetched), Some(age), Some(version)) => {
+                println!("index version: {version}");
+                println!("last sync: {} ({} ago)", time_string(fetched as i64), format_age(age));
+                println!(
+                    "cache: {} (TTL {}h)",
+                    if st.fresh { "fresh" } else { "STALE" },
+                    REPO_CACHE_TTL.as_secs() / 3600
+                );
+            }
+            _ => println!("never synced — run `pkg sync`"),
+        }
+        return Ok(());
+    }
     // pkg-repo contract: sync_index(&mut trust, mirrors, cache_dir,
     // ttl) fetches + verifies the signed index with mirror fallback and
     // a staleness check (v11 §10.6). Verification is anchored in the
     // trust store (v11 §10.5), bootstrapped from the embedded root.
+    // §9.4: `pkg sync` is a lock WRITER — it mutates local index cache
+    // state.
+    let _lock = lock_exclusive()?;
     let mirrors = configured_mirrors();
     let mut trust = pkg_repo::TrustStore::load(Path::new(pkg_repo::TRUST_DIR), &embedded_root())
         .map_err(|e| PkgError::Parse(format!("sync failed: {e}")))?;
-    let index = pkg_repo::sync_index(&mut trust, &mirrors, Path::new(INDEX_CACHE), Duration::from_secs(3600))
+    let ttl = if force { Duration::ZERO } else { REPO_CACHE_TTL };
+    let index = pkg_repo::sync_index(&mut trust, &mirrors, Path::new(INDEX_CACHE), ttl)
         .map_err(|e| PkgError::Parse(format!("sync failed: {e}")))?;
-    let _ = index;
-    println!("synced repository index into {INDEX_CACHE}");
+    for warning in &index.trust_warnings {
+        eprintln!("{warning}");
+    }
+    for note in &index.notes {
+        eprintln!("note: {note}");
+    }
+    if index.stale_cache {
+        println!(
+            "served from cache ({} old; index v{})",
+            format_age(index.cache_age_secs),
+            index.index_version
+        );
+    } else {
+        println!("synced repository index v{} into {INDEX_CACHE}", index.index_version);
+    }
     Ok(())
+}
+
+/// `3 days`, `5 hours`, ... — cache-age rendering for sync output.
+fn format_age(secs: u64) -> String {
+    if secs >= 86_400 {
+        format!("{} day(s)", secs / 86_400)
+    } else if secs >= 3600 {
+        format!("{} hour(s)", secs / 3600)
+    } else {
+        format!("{} minute(s)", secs / 60)
+    }
 }
 
 /// The embedded root trust anchor (v11 §10.5.2): the root-role
@@ -1015,6 +1461,10 @@ fn cmd_sync() -> PkgResult<()> {
 /// nothing. Production builds must embed the offline root key set here
 /// (fingerprint → hex-encoded Ed25519 public key, with its threshold).
 fn embedded_root() -> pkg_repo::RoleDelegation {
+    eprintln!(
+        "warning: using embedded DEVELOPMENT placeholder root keys (32 zero bytes, \
+         authorizes nothing); production builds must embed the real root key set (§10.5.2)"
+    );
     let mut keys = BTreeMap::new();
     keys.insert(
         "PLACEHOLDER-embedded-root-key".to_string(),
@@ -1233,18 +1683,293 @@ fn cmd_unpin(package: &str) -> PkgResult<()> {
 }
 
 // ---------------------------------------------------------------------
+// alternatives / profile / rebuild (§16.1)
+// ---------------------------------------------------------------------
+
+fn cmd_alternatives(action: AlternativesAction) -> PkgResult<()> {
+    match action {
+        AlternativesAction::List => {
+            let _lock = lock_shared()?;
+            let conn = open_db()?;
+            let prefs = load_alternative_prefs(&conn)?;
+            // The virtual universe is the recipe repo's `provides`
+            // declarations — the same source resolution materializes.
+            let mut providers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+            let dir = PathBuf::from(RECIPES_DIR);
+            if dir.is_dir() {
+                for entry in fs::read_dir(&dir).map_err(PkgError::Io)? {
+                    let entry = entry.map_err(PkgError::Io)?;
+                    let meta = entry.path().join("pkg-meta.toml");
+                    let Ok(text) = fs::read_to_string(&meta) else { continue };
+                    let Ok(manifest) = PackageManifest::from_toml_str(&text) else { continue };
+                    for virt in &manifest.provides {
+                        providers
+                            .entry(virt.to_string())
+                            .or_default()
+                            .insert(manifest.name.clone());
+                    }
+                }
+            }
+            if providers.is_empty() && prefs.is_empty() {
+                println!("no virtual packages in the recipe repository");
+                return Ok(());
+            }
+            for (virt, provs) in &providers {
+                let pref = prefs
+                    .get(virt)
+                    .map(|p| format!("preferred: {p}"))
+                    .unwrap_or_else(|| "no preference".to_string());
+                println!(
+                    "{virt}: {} ({pref})",
+                    provs.iter().cloned().collect::<Vec<_>>().join(", ")
+                );
+            }
+            for (virt, pref) in &prefs {
+                if !providers.contains_key(virt) {
+                    println!("{virt}: preferred: {pref} (stale — no recipe provides this virtual)");
+                }
+            }
+            Ok(())
+        }
+        AlternativesAction::Set { virtual_name, provider } => {
+            let _lock = lock_exclusive()?;
+            let conn = open_db()?;
+            // Accept both `virtual/foo` and the bare short name `foo`.
+            let virt = VirtualName::new(&virtual_name)
+                .or_else(|_| VirtualName::new(format!("virtual/{virtual_name}")))
+                .map_err(|e| PkgError::Parse(format!("bad virtual name {virtual_name:?}: {e}")))?;
+            // The preference is a bias the solver may legitimately
+            // backtrack past, but naming a provider that doesn't provide
+            // the virtual at all is a user error worth rejecting here.
+            let recipe = load_recipe(&provider)?;
+            if !recipe.manifest.provides.contains(&virt) {
+                return Err(PkgError::Parse(format!(
+                    "{provider} does not provide {virt} (its manifest has no such `provides` entry)"
+                )));
+            }
+            conn.execute(
+                "INSERT OR REPLACE INTO alternative_prefs (virtual_name, provider)
+                 VALUES (?1, ?2)",
+                rusqlite::params![virt.to_string(), provider],
+            )
+            .map_err(|e| PkgError::Db(e.to_string()))?;
+            println!(
+                "{virt}: preferred provider set to {provider} \
+                 (applies to future resolutions; rebuild affected dependents with \
+                 `pkg rebuild --affected`)"
+            );
+            Ok(())
+        }
+    }
+}
+
+fn cmd_profile(action: ProfileAction) -> PkgResult<()> {
+    match action {
+        ProfileAction::List => {
+            let set = load_profiles()?;
+            let active = fs::read_to_string(ACTIVE_PROFILE_PATH)
+                .ok()
+                .map(|s| s.trim().to_string());
+            let names: Vec<&str> = set.names().collect();
+            if names.is_empty() {
+                println!("no profiles in the synced index");
+                return Ok(());
+            }
+            for name in names {
+                let profile = set.get(name).expect("names() only yields present profiles");
+                let marker = if active.as_deref() == Some(name) { " (active)" } else { "" };
+                println!("{name}{marker}:");
+                for (package, constraint) in &profile.constraints {
+                    println!("  {package} {constraint}");
+                }
+            }
+            Ok(())
+        }
+        ProfileAction::Apply { name } => {
+            let set = load_profiles()?;
+            if set.get(&name).is_none() {
+                let available: Vec<&str> = set.names().collect();
+                return Err(PkgError::NotFound(format!(
+                    "no profile {name:?} (available: {})",
+                    available.join(", ")
+                )));
+            }
+            let _lock = lock_exclusive()?;
+            let path = Path::new(ACTIVE_PROFILE_PATH);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).map_err(PkgError::Io)?;
+            }
+            fs::write(path, format!("{name}\n")).map_err(PkgError::Io)?;
+            println!(
+                "profile {name} active — its constraints apply to the next \
+                 install/upgrade resolution"
+            );
+            Ok(())
+        }
+    }
+}
+
+/// `pkg rebuild --affected`: a package is affected when its manifest
+/// depends on a virtual whose *preferred* provider (per
+/// `alternative_prefs`) is not the provider currently satisfying it —
+/// the state an `alternatives set` switch leaves behind until the
+/// dependents are rebuilt against the new provider.
+fn cmd_rebuild(affected: bool, assume_yes: bool) -> PkgResult<()> {
+    if !affected {
+        return Err(PkgError::Parse(
+            "pkg rebuild: nothing to do without --affected (rebuild packages whose \
+             dependencies changed due to provider switching)"
+                .into(),
+        ));
+    }
+    let _lock = lock_exclusive()?;
+    let conn = open_db()?;
+    let prefs = load_alternative_prefs(&conn)?;
+    let rows = queries::list_installed_packages(&conn)?;
+    let installed_names: BTreeSet<String> = rows.iter().map(|p| p.name.clone()).collect();
+    let installed_map = installed_versions(&conn)?;
+
+    let mut affected_names: BTreeSet<String> = BTreeSet::new();
+    for row in &rows {
+        // A package whose recipe is gone from the repo can't be
+        // re-resolved, so it can't be judged affected either.
+        let Ok(recipe) = load_recipe(&row.name) else { continue };
+        let Ok(deps) = recipe.manifest.dep_set(&BTreeMap::new()) else { continue };
+        for dep in &deps {
+            let Dependency::Virtual(virt) = dep else { continue };
+            let pref = prefs
+                .get(&virt.to_string())
+                .or_else(|| prefs.get(virt.short_name()));
+            // No recorded provider-satisfaction edge exists in the DB
+            // for virtuals, so "the preferred provider is not installed"
+            // is the honest approximation: the package's virtual dep
+            // would now resolve somewhere it didn't before.
+            if let Some(provider) = pref {
+                if !installed_names.contains(provider) {
+                    affected_names.insert(row.name.clone());
+                    break;
+                }
+            }
+        }
+    }
+    if affected_names.is_empty() {
+        println!("no packages affected by provider switching");
+        return Ok(());
+    }
+    let listing: Vec<String> = affected_names.iter().cloned().collect();
+    if !confirm(
+        &format!("Rebuild {} package(s) against the switched providers?\n  {}", listing.len(), listing.join(", ")),
+        assume_yes,
+    ) {
+        return Ok(());
+    }
+
+    // Re-resolve each affected package AT its installed version (a
+    // rebuild, not an upgrade): the solver then pulls the preferred
+    // provider into the solution.
+    let graph = graph_from_recipes(Path::new(RECIPES_DIR), &prefs)?;
+    let pins = load_pins()?;
+    let profile_constraints = active_profile_constraints(&pins);
+    let mut selected: HashMap<String, Version> = HashMap::new();
+    for name in &affected_names {
+        let version = installed_map[name].clone();
+        match graph.resolve_with_constraints(name, version, &pins, &profile_constraints, &installed_map) {
+            Ok(solution) => selected.extend(solution),
+            Err(ResolveError::NoSolution(tree)) => return Err(explain_from_tree(&tree)),
+            Err(other) => return Err(PkgError::Resolution(other.to_string())),
+        }
+    }
+
+    let mut plan = BuildPlan::default();
+    let selection = BTreeMap::new();
+    let selected_names: BTreeSet<String> = selected.keys().cloned().collect();
+    for (name, version) in &selected {
+        let recipe = load_recipe(name)?;
+        let abi_tag = compute_abi_tag(&conn, &recipe.manifest, &selection)?;
+        let opt_tag = recipe.manifest.opt_tag(&selection).map_err(PkgError::from)?;
+        let deps_in_cascade = recipe
+            .manifest
+            .dep_set(&selection)
+            .map_err(PkgError::from)?
+            .into_iter()
+            .filter_map(|d| match d {
+                Dependency::Package { name, .. } => Some(name),
+                _ => None,
+            })
+            .filter(|d| selected_names.contains(d))
+            .collect();
+        plan.nodes.insert(
+            name.clone(),
+            PlanNode {
+                name: name.clone(),
+                version: version.clone(),
+                abi_tag,
+                arch: Arch::Amd64,
+                opt_tag,
+                selection: selection.clone(),
+                recipe,
+                deps_in_cascade,
+                consumed_hash_at_plan: None,
+                requested: affected_names.contains(name),
+            },
+        );
+    }
+
+    let mut cfg = SchedConfig::with_defaults();
+    cfg.command_line = "pkg rebuild --affected".to_string();
+    cfg.cascade_id = Some(new_cascade_id());
+    cfg.store_roots = store_roots();
+    cfg.host_glibc = running_glibc_version();
+    cfg.repo_cache = PathBuf::from(INDEX_CACHE);
+    cfg.source_cache = PathBuf::from(SOURCE_CACHE);
+    let report = orchestrator::execute_plan(&conn, &plan, &cfg)?;
+    print_report(&report);
+    if report.is_clean() {
+        Ok(())
+    } else {
+        Err(PkgError::Build(format!(
+            "{} failed, {} blocked (progress is checkpointed — retry resumes at the failure)",
+            report.failed.len(),
+            report.blocked.len()
+        )))
+    }
+}
+
+// ---------------------------------------------------------------------
 // check / clean
 // ---------------------------------------------------------------------
+
+/// `--depth` scan scope (§16.1): `minimal` scans only the bin/sbin
+/// trees (the executables a user actually invokes), `standard` scans
+/// every ELF file in the store dirs, `deep` additionally runs the
+/// dlopen-string heuristic per binary (§8.3 — informational; heuristic
+/// findings are never violations).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckDepth {
+    Minimal,
+    Standard,
+    Deep,
+}
+
+fn parse_depth(raw: Option<&str>) -> PkgResult<CheckDepth> {
+    match raw {
+        None | Some("standard") => Ok(CheckDepth::Standard),
+        Some("minimal") => Ok(CheckDepth::Minimal),
+        Some("deep") => Ok(CheckDepth::Deep),
+        Some(other) => Err(PkgError::Parse(format!(
+            "--depth must be minimal|standard|deep, got {other:?}"
+        ))),
+    }
+}
 
 fn cmd_check(
     target: Option<String>,
     verbose: bool,
-    _depth: Option<String>,
-    _nss: bool,
-    _suggest: bool,
+    depth: Option<String>,
+    nss: bool,
+    suggest: bool,
 ) -> PkgResult<()> {
-    let _lock = lock_shared()?;
-    let conn = open_db()?;
+    let depth = parse_depth(depth.as_deref())?;
     match target {
         // §16.1: single binary diagnostics.
         Some(t) => {
@@ -1268,55 +1993,312 @@ fn cmd_check(
                     }
                 }
             }
+            if depth == CheckDepth::Deep {
+                let candidates = pkg_scanner::find_dlopen_candidates(&bytes, &info.needed);
+                if candidates.is_empty() {
+                    println!("  dlopen candidates: none");
+                } else {
+                    println!("  dlopen candidates (heuristic, §8.3): {}", candidates.join(", "));
+                }
+            }
+            if suggest {
+                print_library_suggestions(&info.needed);
+            }
             if verbose {
                 println!("  (raw) {info:?}");
+            }
+            if nss {
+                check_nss()?;
             }
             Ok(())
         }
         // §8.6/pkg-scanner check.rs: whole-system scan.
         None => {
-            // pkg-scanner contract: check_system(&[InstalledPackage],
-            // &host_glibc) -> PkgResult<Vec<CheckFinding>> (a scan
-            // reports; it doesn't fail). The scanner takes plain data,
-            // not the DB — resolve each row's store dir here via its
-            // Identity, the same derivation staging uses.
+            // §9.4 reader fallback: a reader that can't take the shared
+            // lock within the 2s reader timeout degrades to filesystem
+            // scanning instead of erroring — `pkg check` is designed to
+            // degrade gracefully.
+            let installed = match lock_shared() {
+                Ok(_guard) => {
+                    let conn = open_db()?;
+                    installed_from_db(&conn)?
+                }
+                Err(e) => {
+                    eprintln!(
+                        "warning: could not acquire the shared lock ({e}); \
+                         falling back to filesystem scanning (§9.4)"
+                    );
+                    installed_from_store()?
+                }
+            };
             let host = running_glibc_version().ok_or_else(|| {
                 PkgError::Parse(
                     "could not determine the running glibc version (ldd --version); \
                      cannot check floors without a ceiling".into(),
                 )
             })?;
-            let roots = store_roots();
-            let mut installed = Vec::new();
-            for row in queries::list_installed_packages(&conn)? {
-                let identity = pkg_core::Identity {
-                    name: row.name.clone(),
-                    version: row.version.clone(),
-                    abi_tag: row.abi_tag,
-                    opt_tag: row.opt_tag.parse().map_err(|e| {
-                        PkgError::Parse(format!("bad opt_tag in packages row: {e}"))
-                    })?,
-                    arch: row.arch,
-                };
-                let root = staging::store_root_for(row.arch, &roots)?;
-                installed.push(pkg_scanner::InstalledPackage {
-                    name: row.name,
-                    version: row.version.to_string(),
-                    store_dir: root.join(identity.store_dir_name()),
-                });
-            }
-            let findings = pkg_scanner::check_system(&installed, &host)?;
+            let mut deep_notes = Vec::new();
+            let findings = scan_installed(&installed, &host, depth, &mut deep_notes)?;
             if findings.is_empty() {
                 println!("system check: clean");
             } else {
                 for f in &findings {
-                    println!("{f:?}");
+                    println!("{f}");
                 }
                 println!("{} finding(s)", findings.len());
+            }
+            for note in &deep_notes {
+                println!("note: {note}");
+            }
+            if suggest {
+                println!("note: --suggest applies to single-binary checks (`pkg check <name>`)");
+            }
+            if nss {
+                check_nss()?;
             }
             Ok(())
         }
     }
+}
+
+/// The installed set from the DB (the scanner takes plain data, not the
+/// DB — resolve each row's store dir here via its Identity, the same
+/// derivation staging uses).
+fn installed_from_db(conn: &Connection) -> PkgResult<Vec<pkg_scanner::InstalledPackage>> {
+    let roots = store_roots();
+    let mut installed = Vec::new();
+    for row in queries::list_installed_packages(conn)? {
+        let identity = Identity {
+            name: row.name.clone(),
+            version: row.version.clone(),
+            abi_tag: row.abi_tag,
+            opt_tag: row.opt_tag.parse().map_err(|e| {
+                PkgError::Parse(format!("bad opt_tag in packages row: {e}"))
+            })?,
+            arch: row.arch,
+        };
+        let root = staging::store_root_for(row.arch, &roots)?;
+        installed.push(pkg_scanner::InstalledPackage {
+            name: row.name,
+            version: row.version.to_string(),
+            store_dir: root.join(identity.store_dir_name()),
+        });
+    }
+    Ok(installed)
+}
+
+/// The §9.4 lock-contention fallback: the installed set enumerated from
+/// the store dirs themselves (identity parsed from each dir name), no
+/// DB access at all.
+fn installed_from_store() -> PkgResult<Vec<pkg_scanner::InstalledPackage>> {
+    let mut out = Vec::new();
+    for arch in [Arch::Amd64, Arch::I686] {
+        let root = staging::store_root_for(arch, &store_roots())?;
+        if !root.is_dir() {
+            continue;
+        }
+        for entry in fs::read_dir(&root).map_err(PkgError::Io)? {
+            let entry = entry.map_err(PkgError::Io)?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == staging::STAGE_DIR_NAME || !entry.file_type().map_err(PkgError::Io)?.is_dir()
+            {
+                continue;
+            }
+            // A dir that doesn't parse as an identity isn't a package
+            // store dir (e.g. leftover staging); skip it.
+            let Ok(id) = Identity::parse_store_dir_name(&name, arch) else { continue };
+            out.push(pkg_scanner::InstalledPackage {
+                name: id.name,
+                version: id.version.to_string(),
+                store_dir: entry.path(),
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Whole-system scan over the given installed set, honoring `--depth`.
+/// Composed from pkg-scanner's public pieces (`walk_elf_files`,
+/// `parse_elf`, `classify`) so the finding semantics stay identical to
+/// `check_system`'s — only the per-depth file selection and the deep
+/// dlopen notes live here.
+fn scan_installed(
+    installed: &[pkg_scanner::InstalledPackage],
+    host: &Version,
+    depth: CheckDepth,
+    deep_notes: &mut Vec<String>,
+) -> PkgResult<Vec<pkg_scanner::CheckFinding>> {
+    use pkg_scanner::{CheckFinding, FindingKind};
+    let mut findings = Vec::new();
+    for pkg in installed {
+        let artifacts = match pkg_scanner::walk_elf_files(&pkg.store_dir) {
+            Ok(files) => files,
+            Err(_) => {
+                findings.push(CheckFinding::MissingStoreDir {
+                    package: pkg.to_string(),
+                    path: pkg.store_dir.clone(),
+                });
+                continue;
+            }
+        };
+        for artifact in artifacts {
+            if depth == CheckDepth::Minimal && !in_bin_tree(&artifact) {
+                continue;
+            }
+            let bytes = fs::read(&artifact).map_err(PkgError::Io)?;
+            let info = match pkg_scanner::parse_elf(&bytes) {
+                Ok(info) => info,
+                Err(e) => {
+                    findings.push(CheckFinding::UnparseableElf {
+                        package: pkg.to_string(),
+                        path: artifact.clone(),
+                        reason: e.to_string(),
+                    });
+                    continue;
+                }
+            };
+            if depth == CheckDepth::Deep {
+                for cand in pkg_scanner::find_dlopen_candidates(&bytes, &info.needed) {
+                    deep_notes.push(format!(
+                        "{}: {}: dlopen candidate {cand}",
+                        pkg,
+                        artifact.display()
+                    ));
+                }
+            }
+            match pkg_scanner::classify(&info, host) {
+                Some(FindingKind::FloorAboveCeiling { floor }) => {
+                    findings.push(CheckFinding::FloorAboveCeiling {
+                        package: pkg.to_string(),
+                        path: artifact,
+                        floor,
+                        ceiling: host.clone(),
+                    });
+                }
+                Some(FindingKind::UnknownGlibcFloor) => {
+                    findings.push(CheckFinding::UnknownGlibcFloor {
+                        package: pkg.to_string(),
+                        path: artifact,
+                    });
+                }
+                None => {}
+            }
+        }
+    }
+    Ok(findings)
+}
+
+/// `--depth=minimal` scope: the executable trees only.
+fn in_bin_tree(path: &Path) -> bool {
+    path.components().any(|c| {
+        let s = c.as_os_str();
+        s == "bin" || s == "sbin"
+    })
+}
+
+/// §16.1 `--suggest`: for each needed soname not resolvable from the
+/// standard linker dirs, search the store for a package providing a
+/// file with that name.
+fn print_library_suggestions(needed: &[String]) {
+    const LIB_DIRS: [&str; 4] = ["/lib", "/usr/lib", "/lib64", "/usr/lib64"];
+    let mut printed_header = false;
+    for soname in needed {
+        if LIB_DIRS.iter().any(|d| Path::new(d).join(soname).exists()) {
+            continue;
+        }
+        if !printed_header {
+            println!("  library suggestions:");
+            printed_header = true;
+        }
+        let providers = store_dirs_providing(soname);
+        if providers.is_empty() {
+            println!("    {soname}: not found in any installed package");
+        } else {
+            println!("    {soname}: provided by {}", providers.join(", "));
+        }
+    }
+}
+
+/// Store dirs containing a file named `soname` (walked lazily;
+/// `--suggest` is explicit opt-in, so the walk cost is on request).
+fn store_dirs_providing(soname: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for root in store_roots() {
+        if !root.is_dir() {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&root) else { continue };
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            if tree_contains_file(&dir, soname) {
+                out.push(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn tree_contains_file(dir: &Path, name: &str) -> bool {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&d) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(ftype) = entry.file_type() else { continue };
+            if ftype.is_dir() {
+                stack.push(path);
+            } else if entry.file_name().to_string_lossy() == name {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// §16.1 `--nss`: every service named in nsswitch.conf must resolve to
+/// a libnss_<service> module on the library path. glibc is explicitly
+/// outside the scanner's coverage (§8's "NSS non-coverage"), so this is
+/// the narrow honest check: config-vs-module existence, nothing more.
+fn check_nss() -> PkgResult<()> {
+    const LIB_DIRS: [&str; 4] = ["/lib", "/usr/lib", "/lib64", "/usr/lib64"];
+    let text = match fs::read_to_string("/etc/nsswitch.conf") {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("nss: no /etc/nsswitch.conf (glibc built-in defaults apply)");
+            return Ok(());
+        }
+        Err(e) => return Err(PkgError::Io(e)),
+    };
+    let mut missing = Vec::new();
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        let Some((db, services)) = line.split_once(':') else { continue };
+        for token in services.split_whitespace() {
+            // An action clause (`[NOTFOUND=return]`) ends the service list.
+            if token.starts_with('[') {
+                break;
+            }
+            let present = LIB_DIRS.iter().any(|d| {
+                Path::new(d).join(format!("libnss_{token}.so.2")).exists()
+                    || Path::new(d).join(format!("libnss_{token}.so")).exists()
+            });
+            if !present {
+                missing.push(format!("{}: {token}", db.trim()));
+            }
+        }
+    }
+    if missing.is_empty() {
+        println!("nss: every service in /etc/nsswitch.conf has a module");
+    } else {
+        for m in &missing {
+            println!("nss: MISSING module for {m} (no libnss_<service>.so[.2] on the library path)");
+        }
+    }
+    Ok(())
 }
 
 /// `$PATH` search for a bare name (§16.1 `pkg check <name>`).
@@ -1706,18 +2688,32 @@ fn cmd_audit(
     supply_chain: bool,
     critical: bool,
     acknowledge: Option<String>,
+    env: Option<String>,
 ) -> PkgResult<()> {
-    let _lock = lock_shared()?;
-    let conn = open_db()?;
+    if let Some(env_name) = env {
+        return cmd_audit_env(&env_name, json);
+    }
     if let Some(pkg) = acknowledge {
         // Issue 3.6: acknowledgment unblocks enforcement-mode installs.
-        let stamp = Path::new("/var/lib/pkg/audit-acknowledgments");
-        let mut text = fs::read_to_string(stamp).unwrap_or_default();
-        text.push_str(&format!("{pkg}\n"));
-        fs::write(stamp, text).map_err(PkgError::Io)?;
-        println!("acknowledged supply-chain finding for {pkg}");
+        // The ack lands in the DB (pkg-audit's
+        // supply_chain_acknowledgements table), the same place
+        // `unacknowledged_hard_findings` consults — mutating, so this
+        // branch takes the exclusive lock (§9.4).
+        let _lock = lock_exclusive()?;
+        let conn = open_db()?;
+        let report = pkg_audit::audit_supply_chain(
+            &conn,
+            None,
+            Path::new(pkg_audit::QUARANTINE_DIR),
+            critical,
+        )
+        .map_err(|e| PkgError::Parse(format!("audit failed: {e}")))?;
+        let n = pkg_audit::supply_chain::acknowledge(&conn, &report, &pkg)?;
+        println!("acknowledged {n} hard supply-chain finding(s) for {pkg}");
         return Ok(());
     }
+    let _lock = lock_shared()?;
+    let conn = open_db()?;
     // pkg-audit's surface: advisory matching against the synced
     // security.json (via the sync cache dir), deleted-inode process
     // scans for --glibc, and the --supply-chain provenance report with
@@ -1797,6 +2793,69 @@ fn cmd_audit(
         }
     }
     Ok(())
+}
+
+/// `pkg audit --env <name>` (§16.1): advisory staleness scoped to a
+/// named environment — matches the advisory index against the env's
+/// resolved identity lock instead of the system installed set.
+fn cmd_audit_env(env_name: &str, json: bool) -> PkgResult<()> {
+    let root = env_root(env_name)?;
+    let lock_text = fs::read_to_string(root.join("lock.txt")).map_err(PkgError::Io)?;
+    let index = pkg_audit::load_advisories(Path::new(INDEX_CACHE))
+        .map_err(|e| PkgError::Parse(format!("audit failed: {e}")))?;
+    let mut matches = Vec::new();
+    let mut checked = 0usize;
+    for line in lock_text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Lock lines are store dir names; try both arches, since the
+        // name alone doesn't encode it (§6.1).
+        let identity = [Arch::Amd64, Arch::I686]
+            .iter()
+            .find_map(|a| Identity::parse_store_dir_name(line, *a).ok())
+            .ok_or_else(|| {
+                PkgError::Parse(format!("env {env_name} lock line not a store identity: {line}"))
+            })?;
+        checked += 1;
+        for adv in &index.advisories {
+            if adv.package != identity.name {
+                continue;
+            }
+            if pkg_audit::advisories::version_affected(&adv.affected, &identity.version)? {
+                matches.push(format!(
+                    "{} [{}] {} {}: {}{}",
+                    adv.id,
+                    adv.class.as_str(),
+                    adv.package,
+                    identity.version,
+                    adv.summary,
+                    adv.fixed
+                        .as_deref()
+                        .map(|f| format!(" (fixed in {f})"))
+                        .unwrap_or_default(),
+                ));
+            }
+        }
+    }
+    if json {
+        println!("{matches:?}");
+    } else if matches.is_empty() {
+        println!("audit: env {env_name} clean ({checked} package(s) checked)");
+    } else {
+        for m in &matches {
+            println!("{m}");
+        }
+    }
+    if matches.is_empty() {
+        Ok(())
+    } else {
+        Err(PkgError::Gate(format!(
+            "env {env_name} has {} unaddressed advisories",
+            matches.len()
+        )))
+    }
 }
 
 fn cmd_isolate(path: &str, args: Vec<String>) -> PkgResult<()> {
@@ -1903,44 +2962,67 @@ fn cmd_key(action: KeyAction) -> PkgResult<()> {
     // the management surface (§10.5.4).
     match action {
         KeyAction::List => {
-            let dir = Path::new(TRUST_DIR);
-            if !dir.is_dir() {
-                return Err(PkgError::NotFound(format!(
-                    "trust store {TRUST_DIR} not initialized — see `pkg key trust-root`"
-                )));
-            }
-            let mut stack = vec![dir.to_path_buf()];
-            while let Some(d) = stack.pop() {
-                for entry in fs::read_dir(&d).map_err(PkgError::Io)? {
-                    let entry = entry.map_err(PkgError::Io)?;
-                    let path = entry.path();
-                    if path.is_dir() {
-                        println!("[{}]", path.strip_prefix(dir).unwrap().display());
-                        stack.push(path);
-                    } else {
-                        println!("  {}", path.file_name().unwrap_or_default().to_string_lossy());
-                    }
-                }
+            let trust = pkg_repo::TrustStore::load(Path::new(TRUST_DIR), &embedded_root())
+                .map_err(|e| PkgError::Parse(format!("trust store: {e}")))?;
+            let root = trust.root_manifest();
+            println!(
+                "root manifest v{} (expires {}) — threshold {}/{} root keys",
+                root.version,
+                root.expires_at,
+                root.root.threshold,
+                root.root.keys.len()
+            );
+            for info in trust.list_keys() {
+                println!(
+                    "{:10} {}{}",
+                    info.role.as_str(),
+                    info.fingerprint,
+                    if info.revoked { " [locally revoked]" } else { "" }
+                );
             }
             Ok(())
         }
         KeyAction::ShowChain => {
-            for role in ["root", "repository", "timestamp"] {
-                let present = Path::new(TRUST_DIR).join(role).exists();
-                println!("{role}: {}", if present { "present" } else { "MISSING" });
-            }
+            let trust = pkg_repo::TrustStore::load(Path::new(TRUST_DIR), &embedded_root())
+                .map_err(|e| PkgError::Parse(format!("trust store: {e}")))?;
+            print!("{}", trust.show_chain());
             Ok(())
         }
         KeyAction::TrustRoot { file } => {
-            let _lock = lock_exclusive()?;
-            fs::create_dir_all(Path::new(TRUST_DIR).join("root")).map_err(PkgError::Io)?;
-            let dest = Path::new(TRUST_DIR).join("root").join(
-                Path::new(&file)
-                    .file_name()
-                    .ok_or_else(|| PkgError::Parse(format!("bad path {file:?}")))?,
+            // §10.5.4: the out-of-band recovery path. It bypasses the
+            // delegation chain BY DESIGN (the chain is what broke), so
+            // the fingerprints are shown and interactive confirmation is
+            // required before anything is persisted.
+            let bytes = fs::read(&file).map_err(PkgError::Io)?;
+            let manifest = pkg_repo::TrustStore::parse_root_manifest_doc(&bytes)?;
+            println!("new root manifest v{}:", manifest.version);
+            println!(
+                "  root threshold: {}/{}",
+                manifest.root.threshold,
+                manifest.root.keys.len()
             );
-            fs::copy(&file, &dest).map_err(PkgError::Io)?;
-            println!("installed root trust anchor as {}", dest.display());
+            for fp in manifest.root.keys.keys() {
+                println!("  root key: {fp}");
+            }
+            println!(
+                "  delegates: repository {}/{}\n             timestamp {}\n             reviewer {}",
+                manifest.repository.threshold,
+                manifest.repository.keys.len(),
+                manifest.timestamp.threshold,
+                manifest.reviewer.threshold,
+            );
+            eprintln!(
+                "warning: this bypasses the normal delegation chain — it is the recovery \
+                 path for when that chain is broken. Import only a manifest you received \
+                 out of band from the project (§10.5.4)."
+            );
+            if !confirm("import this root trust anchor?", false) {
+                println!("aborted; trust store unchanged");
+                return Ok(());
+            }
+            let _lock = lock_exclusive()?;
+            pkg_repo::TrustStore::import_root_manifest(Path::new(TRUST_DIR), &bytes)?;
+            println!("imported root trust anchor v{}", manifest.version);
             Ok(())
         }
     }
@@ -2145,6 +3227,7 @@ fn cmd_cascade(at: Option<String>, execute_pending: bool, ignore_power: bool) ->
             skip_rebuilds: false,
             defer_security: None,
             background: false,
+            no_repro_check: false,
             assume_yes: true,
         };
         return run_transaction("upgrade", Vec::new(), &flags);

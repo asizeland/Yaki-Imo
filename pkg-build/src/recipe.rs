@@ -216,6 +216,7 @@ pub fn run_recipe(
 
     let outcome = run_recipe_phases(recipe, ctx);
     let duration = clock.elapsed();
+    let peak_rss = children_peak_rss_kib();
     let phase_logs = outcome.logs;
     let result = outcome.result;
 
@@ -233,6 +234,7 @@ pub fn run_recipe(
         // not plumbed through the sandbox in v1 — recorded as NULL
         // rather than fabricated (§4.2.4: NULL if unknown).
         cc_hit_rate: None,
+        peak_rss,
         host_jobs: ctx.inner_jobs,
     };
     // A history-write failure is reported but must not mask the build
@@ -348,6 +350,29 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// Peak RSS of all child processes reaped so far, in KiB
+/// (`getrusage(RUSAGE_CHILDREN)`'s `ru_maxrss`, which is in KiB on
+/// Linux). `None` when the syscall fails.
+///
+/// This is a process-wide *running maximum*, not a per-build
+/// measurement: under the orchestrator's parallel workers the value read
+/// after one build's child exits is the max over every build child
+/// reaped by the process up to that point. The recorded `peak_rss` is
+/// therefore an upper bound that converges to a package's true peak over
+/// repeat builds — the right shape for §7.9.3's display/ordering input,
+/// which never feeds correctness.
+pub fn children_peak_rss_kib() -> Option<i64> {
+    // SAFETY: `usage` is fully initialized by a successful getrusage
+    // call; the result is only read when the return code is 0.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) };
+    if rc == 0 {
+        Some(usage.ru_maxrss as i64)
+    } else {
+        None
+    }
+}
+
 // ---------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------
@@ -390,6 +415,20 @@ default = false
             }),
             gate_deps: Vec::new(),
         }
+    }
+
+    #[test]
+    fn children_peak_rss_is_available_after_reaping_a_child() {
+        // The syscall itself must succeed on Linux even with no
+        // children (0), and after reaping a real child the running max
+        // is populated.
+        std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("true")
+            .status()
+            .unwrap();
+        let peak = children_peak_rss_kib();
+        assert!(peak.is_some(), "getrusage(RUSAGE_CHILDREN) must succeed");
     }
 
     #[test]

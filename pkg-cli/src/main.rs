@@ -19,7 +19,7 @@ mod cli;
 mod commands;
 mod preview;
 
-use cli::{Cli, Command};
+use cli::Cli;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();

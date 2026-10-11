@@ -34,7 +34,7 @@ use pkg_core::{PkgError, PkgResult};
 use sha2::{Digest, Sha256};
 
 use crate::recipe_manifest::{RecipeManifestEntry, Source};
-use crate::trust::sha256_hex;
+use crate::trust::hex_encode;
 
 /// Per-file download cap (4 GiB). Source trees are not that big; an
 /// unbounded stream is a disk-fill DoS.
@@ -153,7 +153,9 @@ pub fn sha256_file(path: &Path) -> PkgResult<String> {
 }
 
 fn hex_from_digest(hasher: Sha256) -> String {
-    sha256_hex(&hasher.finalize())
+    // `finalize` already IS the digest — hex-encode it directly.
+    // (`sha256_hex` would hash the digest a second time.)
+    hex_encode(&hasher.finalize())
 }
 
 fn fetch_one(source: &Source, cache_dir: &Path) -> PkgResult<PathBuf> {

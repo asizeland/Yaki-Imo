@@ -490,7 +490,7 @@ mod tests {
         let mut t = TailBuffer::new(8);
         t.push(b"hello ");
         t.push(b"world!");
-        assert_eq!(t.tail(), b"lo world");
+        assert_eq!(t.tail(), b"o world!");
         t.push(b"!!");
         assert_eq!(t.tail(), b"world!!!");
     }

@@ -350,8 +350,9 @@ pub fn prune_after_build(plan: &mut CascadePlan, name: &str, interface_changed: 
         }
     }
     // Clean dangling in-cascade edges to pruned nodes.
+    let remaining: std::collections::BTreeSet<String> = plan.nodes.keys().cloned().collect();
     for node in plan.nodes.values_mut() {
-        node.deps_in_cascade.retain(|d| plan.nodes.contains_key(d));
+        node.deps_in_cascade.retain(|d| remaining.contains(d));
     }
     pruned
 }

@@ -12,6 +12,13 @@
 //!   undo), `glibc` (v13 category-1 inline patches + major-bump
 //!   staging).
 //!
+//! ## v2 changes
+//!
+//! - `repro` (§10.5.6 critical-set double-build + quarantine),
+//!   `peak_rss` build-history recording (§7.9.3), config-driven compiler
+//!   wrapper (§7.9.6), and post-activation provenance/link-interface
+//!   recording (§9.2.1/§7.7.2) in the orchestrator.
+//!
 //! Public modules are re-exported flat (`pub use x::*`).
 
 pub mod cache;
@@ -19,6 +26,7 @@ pub mod cascade;
 pub mod glibc;
 pub mod orchestrator;
 pub mod recipe;
+pub mod repro;
 pub mod staging;
 
 pub use cache::*;
@@ -26,4 +34,5 @@ pub use cascade::*;
 pub use glibc::*;
 pub use orchestrator::*;
 pub use recipe::*;
+pub use repro::*;
 pub use staging::*;

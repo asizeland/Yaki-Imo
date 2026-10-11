@@ -42,6 +42,11 @@ pub struct TransactionFlags {
     #[arg(long)]
     pub background: bool,
 
+    /// Skip the critical-set double build (§10.5.6 opt-out; the double
+    /// build is the default because that is the safe direction).
+    #[arg(long)]
+    pub no_repro_check: bool,
+
     /// Assume yes to interactive confirmations (§16.3).
     #[arg(short = 'y', long)]
     pub assume_yes: bool,
@@ -80,8 +85,17 @@ pub enum Command {
         flags: TransactionFlags,
     },
 
-    /// Fetch and verify the latest repository index (§10.6).
-    Sync,
+    /// Fetch and verify the latest repository index (§10.6). Writer for
+    /// lock purposes (§9.4).
+    Sync {
+        /// Bypass the local cache TTL, fetch immediately.
+        #[arg(long)]
+        force: bool,
+        /// Show cache age, last successful sync, and freshness; no
+        /// network access.
+        #[arg(long)]
+        status: bool,
+    },
 
     /// Search the repository index.
     Search { query: String },
@@ -107,6 +121,29 @@ pub enum Command {
 
     /// Remove a pin.
     Unpin { package: String },
+
+    /// Preferred providers for virtual packages (§16.1).
+    Alternatives {
+        #[command(subcommand)]
+        action: AlternativesAction,
+    },
+
+    /// Repository-curated resolution profiles (§10.3).
+    Profile {
+        #[command(subcommand)]
+        action: ProfileAction,
+    },
+
+    /// Rebuild packages whose dependencies changed due to provider
+    /// switching (§16.1).
+    Rebuild {
+        /// Rebuild packages whose virtual dependencies now resolve to a
+        /// different (not yet installed) preferred provider.
+        #[arg(long)]
+        affected: bool,
+        #[arg(short = 'y', long)]
+        assume_yes: bool,
+    },
 
     /// Run scanner diagnostics (§8.6).
     Check {
@@ -199,6 +236,11 @@ pub enum Command {
         /// (unblocks install/upgrade in enforcement mode, Issue 3.6).
         #[arg(long, value_name = "package")]
         acknowledge: Option<String>,
+        /// Environment staleness scope (§16.1): audit the resolved
+        /// identities locked into a named environment instead of the
+        /// installed set.
+        #[arg(long, value_name = "name")]
+        env: Option<String>,
     },
 
     /// Run a binary in a temporary mount namespace (§16.1).
@@ -263,8 +305,23 @@ pub enum Command {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum EnvAction {
-    /// Resolve + materialize a named environment.
+pub enum AlternativesAction {
+    /// List virtual packages and current preferred providers.
+    List,
+    /// Set the preferred provider for future resolutions.
+    Set { virtual_name: String, provider: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProfileAction {
+    /// List available resolution profiles.
+    List,
+    /// Apply a resolution profile for the next upgrade.
+    Apply { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum EnvAction {    /// Resolve + materialize a named environment.
     Create {
         name: String,
         #[arg(long, value_name = "manifest.toml")]

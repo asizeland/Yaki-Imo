@@ -348,7 +348,6 @@ pub fn activate_identities<F>(
     conn: &Connection,
     target: &ActivationSet,
     store_roots: &[PathBuf],
-    command: &str,
     record_generation: F,
 ) -> PkgResult<ActivationReport>
 where
@@ -506,10 +505,11 @@ pub fn activate_built_package(
         .insert((identity.name.clone(), identity.arch), (identity, explicit));
     let command = command.to_string();
     let cascade = cascade_id.map(str::to_string);
-    activate_identities(conn, &target, store_roots, &command, move |c| {
+    let command_for_gen = command.clone();
+    activate_identities(conn, &target, store_roots, move |c| {
         queries::record_generation(
             c,
-            &command,
+            &command_for_gen,
             GenerationKind::Upgrade,
             cascade.as_deref(),
         )
@@ -629,8 +629,9 @@ pub fn undo_to_generation(
     // role (Issue 5 §5.2).
     let command = format!("pkg undo {gen_id}");
     let undone_id = latest.id;
-    let report = activate_identities(conn, &target_set, store_roots, &command, move |c| {
-        queries::record_undo_generation(c, &command, undone_id, None)
+    let command_for_gen = command.clone();
+    let report = activate_identities(conn, &target_set, store_roots, move |c| {
+        queries::record_undo_generation(c, &command_for_gen, undone_id, None)
     })?;
 
     // Post-undo pin re-check (§5.6): warn, never block.

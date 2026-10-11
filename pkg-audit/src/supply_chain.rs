@@ -114,6 +114,15 @@ pub enum FindingKind {
     QuarantinePresent,
 }
 
+impl FindingSeverity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FindingSeverity::Warning => "warning",
+            FindingSeverity::Hard => "hard",
+        }
+    }
+}
+
 impl FindingKind {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -767,8 +776,9 @@ mod tests {
         assert!(unacknowledged_hard_findings(&conn, &report).unwrap().is_empty());
 
         // A NEW version's same finding is not covered by the old ack.
-        conn.execute("DELETE FROM packages", []).unwrap();
+        // provenance references packages(id) — delete it first.
         conn.execute("DELETE FROM provenance", []).unwrap();
+        conn.execute("DELETE FROM packages", []).unwrap();
         insert_pkg(&conn, 2, "xz", "5.6.2");
         insert_prov(&conn, 2, Some(r#"["r1"]"#), Some("mismatch"), "[]");
         let report2 = audit_supply_chain(&conn, Some(&m), &no_quarantine(), false).unwrap();

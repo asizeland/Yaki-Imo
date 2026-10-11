@@ -61,7 +61,7 @@ pub fn parse_maps_line(line: &str) -> Option<MapsEntry> {
     // so the path is recovered as the raw remainder after field 5.
     let mut fields = line.split_whitespace();
     let (inode, have_path) = {
-        let mut f = fields.by_ref();
+        let f = fields.by_ref();
         let _addr = f.next()?;
         let _perms = f.next()?;
         let _offset = f.next()?;
