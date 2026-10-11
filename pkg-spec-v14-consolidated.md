@@ -1,4 +1,4 @@
-# [Name TBD] Package Manager & Distribution Specification — v14 (Consolidated)
+# Yakimo Package Manager & Distribution Specification — v14 (Consolidated)
 
 **Status:** Consolidated specification; all decisions settled
 **Target:** Linux, amd64 (+ i686 multilib), glibc-based, init-system agnostic (OpenRC default)

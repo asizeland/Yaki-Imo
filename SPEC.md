@@ -1,4 +1,4 @@
-# SPEC.md — pkg workspace interface contracts (v14 target)
+# SPEC.md — Yakimo (pkg) workspace interface contracts (v14 target)
 
 Single source of truth for the current build-out. Source-builds only; binary repo machinery excluded. Specs: `/mnt/agents/upload/pkg-spec-v11.md`, deltas v12/v13, and `/mnt/agents/output/design-fixes-issues-1-5.md` (v14 content). All code lives in this repo; subagents implement to THESE contracts exactly.
 

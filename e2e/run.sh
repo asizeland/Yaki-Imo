@@ -161,6 +161,9 @@ EOF
 # ---------------------------------------------------------------
 mkdir -p "$ROOT/etc/pkg"
 printf 'mirrors = [\n  "%s",\n]\n' "$BASE" > "$ROOT/etc/pkg/mirrors.toml"
+# Relocate the artifact cache via [paths] — exercises the config-file
+# override for every build below.
+printf '[paths]\n"/var/lib/pkg/cache" = "/e2e-cache"\n' > "$ROOT/etc/pkg/config.toml"
 
 # ---------------------------------------------------------------
 # 5. Toolchain symlink farm + bwrap shim (host-quirk adaptation).
@@ -253,6 +256,8 @@ pass "pkg install libfoo (source build in sandbox)"
 
 ls "$ROOT"/usr/lib/pkg/.store/*/usr/lib/libfoo.so.1.0 >/dev/null 2>&1 || fail "libfoo store artifact"
 pass "libfoo store artifact present"
+ls "$ROOT"/e2e-cache/libfoo/*.pkg.tar.zst >/dev/null 2>&1 || fail "[paths] cache override"
+pass "[paths] override relocated the artifact cache"
 [ -e "$ROOT/usr/lib/libfoo.so.1.0" ] || fail "libfoo activated symlink"
 pass "libfoo activated into live tree"
 
