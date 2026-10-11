@@ -84,15 +84,15 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use pkg_core::{Arch, PackageId, PkgError, PkgResult, Track};
+use pkg_core::{Arch, Identity, OptTag, PackageId, PkgError, PkgResult, Track};
 use rusqlite::Connection;
 // v3: content hashing for the staged-glibc manifest (spec v13 §5).
 // Dependency note: requires `sha2 = "0.10"` in this crate's Cargo.toml.
 use sha2::{Digest, Sha256};
 
 use crate::{
-    current_schema_version, insert_package, insert_package_with_opt_tag,
-    list_installed_packages, PackageRow, SCHEMA_VERSION,
+    current_schema_version, insert_package_with_opt_tag, list_installed_packages, PackageRow,
+    SCHEMA_VERSION,
 };
 
 // ---------------------------------------------------------------------
@@ -627,7 +627,7 @@ pub fn verify_anchor_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::init_schema;
+    use crate::{init_schema, insert_package};
     use pkg_core::AbiTag;
     use tempfile::tempdir;
 
@@ -867,9 +867,19 @@ mod tests {
         let id = test_id("openssl");
 
         // DB -> disk: an installed option-tagged package whose
-        // `+p`-suffixed directory exists must not be flagged.
+        // `+p`-suffixed directory exists must not be flagged. The
+        // directory name is derived through the canonical
+        // `store_dir_name` (normalized version rendering included),
+        // the same way the real store creates it.
         insert_package_with_opt_tag(&conn, &id, "3f9a1b2c", Track::Binary, 0, true).unwrap();
-        fs::create_dir(dir.path().join("openssl-1.0.0+ab1+p3f9a1b2c")).unwrap();
+        let tagged = Identity {
+            name: id.name.clone(),
+            version: id.version.clone(),
+            abi_tag: id.abi_tag,
+            opt_tag: "3f9a1b2c".parse().unwrap(),
+            arch: id.arch,
+        };
+        fs::create_dir(dir.path().join(tagged.store_dir_name())).unwrap();
         let discrepancies = scan_store(&conn, dir.path(), Arch::Amd64).unwrap();
         assert!(
             discrepancies.is_empty(),

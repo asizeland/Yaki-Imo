@@ -15,12 +15,10 @@
 //!   operation"), and `acquire_exclusive`'s documentation have been
 //!   rewritten to state this contract. flock mechanics, timeouts, and
 //!   holder metadata are unchanged.
-//! - [MINOR] fs4 API pinned: this file requires **fs4 0.8+**, whose
-//!   `FileExt::try_lock` / `try_lock_shared` return
-//!   `Result<(), fs4::TryLockError>` (a `WouldBlock` / `Error(io::Error)`
-//!   enum). Do NOT "upgrade" blindly to fs4 0.7 semantics, where the
-//!   equivalents were `try_lock_exclusive` returning `io::Result<bool>` —
-//!   the call shapes differ and this code is written against 0.8.
+//! - [MINOR] Locking now uses std's stabilized file-lock API
+//!   (`File::try_lock` / `try_lock_shared`, Rust 1.89+, flock on Linux)
+//!   instead of the fs4 crate — std's inherent methods shadow the fs4
+//!   trait methods, so the fs4 import went from load-bearing to unused.
 //! - [MINOR] Stale holder metadata: `ExclusiveGuard` now implements
 //!   `Drop`, truncating the holder-info sidecar when the exclusive lock
 //!   is released, so a subsequent `NoWait` failure no longer reports a
@@ -69,16 +67,13 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-// fs4 API pin: this file is written against fs4 0.8+, where
-// `FileExt::try_lock` / `try_lock_shared` return
-// `Result<(), fs4::TryLockError>`. (fs4 0.7 used `try_lock_exclusive`
-// returning `io::Result<bool>` instead — different names, different
-// return type; do not mix.)
-use fs4::FileExt;
+// Locking uses std's stabilized file-lock API (`File::try_lock` /
+// `try_lock_shared`, flock on Linux); an earlier revision used the fs4
+// crate for the same syscalls.
 use pkg_core::{PkgError, PkgResult};
 
 /// Default wait timeout for writers (§9.4): 60 seconds, applied when
@@ -117,17 +112,16 @@ pub enum LockMode {
 /// alive — typically the duration of a single DB read, not a whole
 /// command.
 ///
-/// Deliberately has no `Drop` impl. `fs4::FileExt`'s own documentation
-/// states the underlying `flock` releases automatically when the file
-/// handle closes — which happens on its own the moment this struct's
-/// `file` field is dropped, since the OS ties the lock to the *open file
-/// description*, not to any explicit unlock call. Ordinary Rust
-/// field-dropping already does the right thing here; a `Drop` impl
-/// calling `.unlock()` would only be redundant with what closing the fd
-/// already guarantees — verified directly: two independently opened
-/// handles to the same path really do contend with each other via
-/// `flock`, and dropping the first (with no explicit unlock) releases it
-/// for the second, exactly as advertised.
+/// Deliberately has no `Drop` impl. The underlying `flock` releases
+/// automatically when the file handle closes — which happens on its own
+/// the moment this struct's `file` field is dropped, since the OS ties
+/// the lock to the *open file description*, not to any explicit unlock
+/// call. Ordinary Rust field-dropping already does the right thing here;
+/// a `Drop` impl calling `.unlock()` would only be redundant with what
+/// closing the fd already guarantees — verified directly: two
+/// independently opened handles to the same path really do contend with
+/// each other via `flock`, and dropping the first (with no explicit
+/// unlock) releases it for the second, exactly as advertised.
 #[derive(Debug)]
 pub struct SharedGuard {
     _file: File,
@@ -163,7 +157,6 @@ impl SharedGuard {
 #[derive(Debug)]
 pub struct ExclusiveGuard {
     file: File,
-    path: PathBuf,
 }
 
 impl ExclusiveGuard {
@@ -260,7 +253,7 @@ fn wait_for(
     file: &File,
     timeout: Duration,
     path: &Path,
-    try_fn: impl Fn(&File) -> Result<(), fs4::TryLockError>,
+    try_fn: impl Fn(&File) -> Result<(), std::fs::TryLockError>,
 ) -> PkgResult<()> {
     let start = Instant::now();
     loop {
@@ -311,10 +304,7 @@ pub fn acquire_exclusive(path: &Path, wait: WaitMode) -> PkgResult<ExclusiveGuar
         }
     }
     write_holder_metadata(&mut file)?;
-    Ok(ExclusiveGuard {
-        file,
-        path: path.to_path_buf(),
-    })
+    Ok(ExclusiveGuard { file })
 }
 
 // ---------------------------------------------------------------------

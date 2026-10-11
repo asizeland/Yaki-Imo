@@ -89,6 +89,16 @@
 //!   rebuild cascade), `provenance` (§3.5 supply-chain log),
 //!   `build_history` (§4.2.4 ETA input), and `link_interface` (§4.1.1
 //!   measured link interfaces driving rebuild-cascade pruning).
+//! - [MINOR] `build_history` gains `peak_rss INTEGER` (KiB;
+//!   §7.9.3/§9.2.1 list peak RSS among the recorded fields). Added in
+//!   place without a version bump: v3 is still pre-release, and the
+//!   table is created additively by `DDL` on both fresh and
+//!   v1/v2-migrated databases, so one definition covers every path.
+//! - [MINOR] `provenance.package_id` and `link_interface.package_id`
+//!   gain `ON DELETE CASCADE`: both describe the *installed* artifact,
+//!   and pkg-build now actually writes these tables — without the
+//!   cascade, the next upgrade's `DELETE FROM packages` of the
+//!   superseded row would fail FK enforcement.
 
 use std::fmt;
 use std::str::FromStr;
@@ -136,7 +146,7 @@ pub const SCHEMA_VERSION: i64 = 3;
 //   legitimately own the same installed path. If the layout assumption
 //   ever changes (e.g. arches sharing a tree), this constraint must gain
 //   arch scope or become UNIQUE(package_id, path).
-const DDL: &str = "
+const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_meta (
     -- Singleton table: exactly one row, ever. The CHECK pins the only
     -- legal id, and PRIMARY KEY makes a second insert impossible.
@@ -259,8 +269,11 @@ CREATE TABLE IF NOT EXISTS generation_packages (
 -- every installed artifact, so `pkg audit` can retrospectively answer
 -- "which packages were built from a recipe commit later implicated in
 -- an incident".
+-- ON DELETE CASCADE: the row describes the *installed* artifact; when an
+-- upgrade/removal deletes the packages row, its provenance goes with it
+-- rather than blocking the delete under FK enforcement.
 CREATE TABLE IF NOT EXISTS provenance (
-    package_id INTEGER PRIMARY KEY REFERENCES packages(id),
+    package_id INTEGER PRIMARY KEY REFERENCES packages(id) ON DELETE CASCADE,
     recipe_commit TEXT NOT NULL,
     source_hashes TEXT NOT NULL,        -- JSON: [{url, sha256}], exactly as verified at fetch
     index_version INTEGER NOT NULL,     -- which signed index authorized this build
@@ -285,6 +298,7 @@ CREATE TABLE IF NOT EXISTS build_history (
     success INTEGER NOT NULL,
     started_at INTEGER NOT NULL,        -- unix ts
     cc_hit_rate REAL,                   -- NULL if compiler cache disabled
+    peak_rss INTEGER,                   -- peak RSS in KiB (getrusage ru_maxrss); NULL when unmeasurable
     host_jobs INTEGER NOT NULL
 );
 
@@ -294,14 +308,16 @@ CREATE TABLE IF NOT EXISTS build_history (
 -- link_interface_hash is unchanged prunes the rebuild cascade at that
 -- node.
 CREATE TABLE IF NOT EXISTS link_interface (
-    package_id INTEGER NOT NULL REFERENCES packages(id),
+    -- ON DELETE CASCADE, same rationale as provenance: a measurement of
+    -- the installed artifact, deleted together with its packages row.
+    package_id INTEGER NOT NULL REFERENCES packages(id) ON DELETE CASCADE,
     soname TEXT NOT NULL,
     symbol_versions TEXT NOT NULL,
     header_fingerprint TEXT NOT NULL,
     link_interface_hash TEXT NOT NULL,
     UNIQUE(package_id, soname)
 );
-";
+"#;
 
 /// Creates every table if it doesn't already exist, and stamps
 /// `schema_meta` with `SCHEMA_VERSION`. Safe to call on every startup —
@@ -745,6 +761,11 @@ pub struct BuildHistoryRow {
     pub started_at: i64,
     /// Compiler-cache hit rate; `None` when the cache is disabled.
     pub cc_hit_rate: Option<f64>,
+    /// Peak RSS of the build's child processes, in KiB
+    /// (`getrusage(RUSAGE_CHILDREN)` `ru_maxrss`); `None` when the
+    /// measurement was unavailable. §7.9.3 lists it as display/ETA input
+    /// only.
+    pub peak_rss: Option<i64>,
     pub host_jobs: u32,
 }
 
@@ -1316,6 +1337,66 @@ mod tests {
     fn dependency_kind_fromstr_rejects_unknown() {
         let err = "dev".parse::<DependencyKind>().unwrap_err();
         assert!(matches!(err, PkgError::Parse(_)));
+    }
+
+    #[test]
+    fn build_history_has_peak_rss_column() {
+        let conn = fresh_db();
+        init_schema(&conn).unwrap();
+        let has_peak_rss: bool = conn
+            .prepare("SELECT peak_rss FROM build_history LIMIT 0")
+            .is_ok();
+        assert!(has_peak_rss, "build_history must carry peak_rss (§7.9.3)");
+        // NULL is legal — the measurement is best-effort.
+        conn.execute(
+            "INSERT INTO build_history
+                 (name, version, abi_tag, option_set_hash, duration_s, success, started_at, host_jobs)
+             VALUES ('a', '1.0', 'ab1', '', 1, 1, 0, 1)",
+            [],
+        )
+        .unwrap();
+        let peak: Option<i64> = conn
+            .query_row("SELECT peak_rss FROM build_history WHERE name = 'a'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(peak, None);
+    }
+
+    #[test]
+    fn provenance_and_link_interface_cascade_with_the_package_row() {
+        // Upgrades delete the superseded packages row; the artifact's
+        // provenance and measured interface must go with it, not block
+        // the delete under FK enforcement.
+        let conn = fresh_db();
+        init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO packages (name, version, abi_tag, arch, track, installed_at)
+             VALUES ('openssl', '3.0.13', 'ab1', 'amd64', 'source', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO provenance
+                 (package_id, recipe_commit, source_hashes, index_version, build_host, builder_version, started_at, finished_at)
+             VALUES (1, 'c0ffee', '[]', 1, 'host', 'pkg', 0, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO link_interface (package_id, soname, symbol_versions, header_fingerprint, link_interface_hash)
+             VALUES (1, 'libssl.so.3', '', 'hfp', 'h1')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute("DELETE FROM packages WHERE id = 1", []).unwrap();
+        for table in ["provenance", "link_interface"] {
+            let n: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(n, 0, "{table} rows must cascade-delete with the package");
+        }
     }
 
     #[test]

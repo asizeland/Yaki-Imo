@@ -9,7 +9,6 @@ description = "SQLite system database: schema, queries, integrity, locking"
 [dependencies]
 pkg-core = { path = "../pkg-core" }
 rusqlite.workspace = true
-fs4.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]

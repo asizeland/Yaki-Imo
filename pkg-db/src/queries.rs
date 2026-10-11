@@ -81,13 +81,15 @@
 //!   builds of a package name.
 //! - [MAJOR] `link_interface_hash(name, version)` (§4.1.1): the
 //!   measured link-interface hash the rebuild cascade prunes on.
+//! - [MINOR] `BuildRecord`/`BuildHistoryRow` gain `peak_rss`
+//!   (KiB, nullable; §7.9.3); `record_build` writes it.
 //! - [MINOR] All v3 functions (`glibc_pending` gate, `pkg clean` guard)
 //!   are unchanged in behavior.
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use pkg_core::{AbiTag, Arch, PackageId, PkgError, PkgResult, Track, Version};
+use pkg_core::{AbiTag, Arch, Identity, OptTag, PackageId, PkgError, PkgResult, Track, Version};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, Value, ValueRef};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 
@@ -980,12 +982,18 @@ pub fn restorable(conn: &Connection, store_root: &Path, gen_id: i64) -> PkgResul
         )));
     }
     for pkg in generation_package_set(conn, gen_id)? {
-        let dir = if pkg.opt_tag.is_empty() {
-            format!("{}-{}+{}", pkg.name, pkg.version, pkg.abi_tag)
-        } else {
-            format!("{}-{}+{}+p{}", pkg.name, pkg.version, pkg.abi_tag, pkg.opt_tag)
+        // Store dir naming goes through Identity::store_dir_name (the
+        // v14 contract: normalized version, +p<opt_tag> only when
+        // non-default) — hand-rolled formatting here would drift from
+        // what activation actually creates on disk.
+        let identity = Identity {
+            name: pkg.name.clone(),
+            version: pkg.version.clone(),
+            abi_tag: pkg.abi_tag,
+            opt_tag: pkg.opt_tag.parse().unwrap_or_else(|_| OptTag::none()),
+            arch: pkg.arch,
         };
-        if !store_root.join(&dir).is_dir() {
+        if !store_root.join(identity.store_dir_name()).is_dir() {
             return Ok(false);
         }
     }
@@ -1077,6 +1085,12 @@ pub struct BuildRecord {
     pub started_at: i64,
     /// Compiler-cache hit rate; `None` when the cache is disabled.
     pub cc_hit_rate: Option<f64>,
+    /// Peak RSS of the build's child processes in KiB
+    /// (`getrusage(RUSAGE_CHILDREN)` `ru_maxrss`); `None` when the
+    /// measurement was unavailable. Note this is a process-wide running
+    /// maximum across *all* reaped children — see the measurement site
+    /// in pkg-build for why per-build attribution is approximate.
+    pub peak_rss: Option<i64>,
     pub host_jobs: u32,
 }
 
@@ -1095,6 +1109,7 @@ fn map_build_history_row(row: &Row) -> rusqlite::Result<BuildHistoryRow> {
         success: success != 0,
         started_at: row.get("started_at")?,
         cc_hit_rate: row.get("cc_hit_rate")?,
+        peak_rss: row.get("peak_rss")?,
         host_jobs: u32::try_from(host_jobs).map_err(|_| {
             rusqlite::Error::FromSqlConversionFailure(
                 0,
@@ -1108,7 +1123,7 @@ fn map_build_history_row(row: &Row) -> rusqlite::Result<BuildHistoryRow> {
 }
 
 const BUILD_HISTORY_COLUMNS: &str = "id, name, version, abi_tag, option_set_hash, duration_s, \
-     success, started_at, cc_hit_rate, host_jobs";
+     success, started_at, cc_hit_rate, peak_rss, host_jobs";
 
 /// Records one finished (or failed) build (§4.2.4). Returns the new row
 /// id. Historical rows only ever feed ETA display and scheduling order,
@@ -1118,8 +1133,8 @@ const BUILD_HISTORY_COLUMNS: &str = "id, name, version, abi_tag, option_set_hash
 pub fn record_build(conn: &Connection, build: &BuildRecord) -> PkgResult<i64> {
     conn.execute(
         "INSERT INTO build_history
-             (name, version, abi_tag, option_set_hash, duration_s, success, started_at, cc_hit_rate, host_jobs)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             (name, version, abi_tag, option_set_hash, duration_s, success, started_at, cc_hit_rate, peak_rss, host_jobs)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             build.name,
             SqlVersion(build.version.clone()),
@@ -1129,6 +1144,7 @@ pub fn record_build(conn: &Connection, build: &BuildRecord) -> PkgResult<i64> {
             build.success as i64,
             build.started_at,
             build.cc_hit_rate,
+            build.peak_rss,
             build.host_jobs as i64,
         ],
     )
@@ -1504,31 +1520,22 @@ mod tests {
         insert_dependency(&conn, wget_id, openssl_id, DependencyKind::Runtime).unwrap();
         insert_dependency(&conn, app_id, openssl_id, DependencyKind::Build).unwrap();
 
-        let blocking: Vec<&str> = removal_blockers(&conn, openssl_id)
-            .unwrap()
-            .iter()
-            .map(|p| p.name.as_str())
-            .collect();
+        let blockers = removal_blockers(&conn, openssl_id).unwrap();
+        let blocking: Vec<&str> = blockers.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(
             blocking,
             vec!["curl", "wget"],
             "link + runtime edges block removal; build edges never do"
         );
 
-        let build: Vec<&str> = reverse_dependents(&conn, openssl_id, &[DependencyKind::Build])
-            .unwrap()
-            .iter()
-            .map(|p| p.name.as_str())
-            .collect();
+        let build_deps = reverse_dependents(&conn, openssl_id, &[DependencyKind::Build]).unwrap();
+        let build: Vec<&str> = build_deps.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(build, vec!["app"]);
 
         // A single-kind slice still works for callers slicing the graph
         // one kind at a time.
-        let link_only: Vec<&str> = reverse_dependents(&conn, openssl_id, &[DependencyKind::Link])
-            .unwrap()
-            .iter()
-            .map(|p| p.name.as_str())
-            .collect();
+        let link_deps = reverse_dependents(&conn, openssl_id, &[DependencyKind::Link]).unwrap();
+        let link_only: Vec<&str> = link_deps.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(link_only, vec!["curl"]);
     }
 
@@ -1829,14 +1836,15 @@ mod tests {
 
         // Store dir naming follows the v14 Identity::store_dir_name
         // contract: name-version+ab<abi>, plus +p<opt> for a non-empty
-        // option tag.
-        std::fs::create_dir(store.path().join("curl-1.0.0+ab1")).unwrap();
+        // option tag — with the version in its normalized form ("1.0.0"
+        // renders as "1").
+        std::fs::create_dir(store.path().join("curl-1+ab1")).unwrap();
         assert!(
             !restorable(&conn, store.path(), gen).unwrap(),
             "every pinned store dir must exist, not just some"
         );
 
-        std::fs::create_dir(store.path().join("ffmpeg-1.0.0+ab1+pa1b2c3d4")).unwrap();
+        std::fs::create_dir(store.path().join("ffmpeg-1+ab1+pa1b2c3d4")).unwrap();
         assert!(restorable(&conn, store.path(), gen).unwrap());
     }
 
@@ -1904,6 +1912,7 @@ mod tests {
             success,
             started_at,
             cc_hit_rate: None,
+            peak_rss: None,
             host_jobs: 8,
         }
     }
@@ -1913,6 +1922,7 @@ mod tests {
         let conn = fresh_db();
         let mut build = test_build("ffmpeg", 3600, true, 100);
         build.cc_hit_rate = Some(0.75);
+        build.peak_rss = Some(4_194_304); // 4 GiB in KiB
         let id = record_build(&conn, &build).unwrap();
         assert!(id > 0);
 
@@ -1923,7 +1933,16 @@ mod tests {
         assert!(row.success);
         assert_eq!(row.started_at, 100);
         assert_eq!(row.cc_hit_rate, Some(0.75));
+        assert_eq!(row.peak_rss, Some(4_194_304));
         assert_eq!(row.host_jobs, 8);
+    }
+
+    #[test]
+    fn record_build_peak_rss_defaults_to_none_when_unmeasured() {
+        let conn = fresh_db();
+        record_build(&conn, &test_build("zlib", 10, true, 1)).unwrap();
+        let history = build_history_for(&conn, "zlib").unwrap();
+        assert_eq!(history[0].peak_rss, None);
     }
 
     #[test]
@@ -2038,7 +2057,9 @@ mod tests {
 
         let cascade = packages_in_cascade(&conn, "c-7").unwrap();
         let gens: Vec<i64> = cascade.iter().map(|p| p.generation_id).collect();
-        assert_eq!(gens, vec![g1, g2], "one snapshot per cascade generation, ordered");
+        // Each generation's row set is the full package set at that
+        // point: g1 = {openssl}, g2 = {curl, openssl}.
+        assert_eq!(gens, vec![g1, g2, g2], "union of both generations' snapshots, ordered");
         let names: Vec<&str> = cascade.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, vec!["openssl", "curl", "openssl"]);
     }
