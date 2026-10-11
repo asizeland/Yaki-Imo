@@ -166,7 +166,7 @@ impl ArtifactCache {
 
     /// The cache at the spec location with the spec cap.
     pub fn default_root() -> Self {
-        Self::new(PathBuf::from(CACHE_ROOT), DEFAULT_CAP_BYTES)
+        Self::new(pkg_core::paths::at(CACHE_ROOT), DEFAULT_CAP_BYTES)
     }
 
     pub fn root(&self) -> &Path {

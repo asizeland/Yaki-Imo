@@ -298,7 +298,7 @@ pub fn sync_status(cache_dir: &Path, ttl: Duration) -> PkgResult<SyncStatus> {
 
 /// The default cache location for the synced repository documents.
 pub fn default_cache_dir() -> PathBuf {
-    PathBuf::from("/var/lib/pkg/cache/repo")
+    pkg_core::paths::at("/var/lib/pkg/cache/repo")
 }
 
 fn index_from_verified(

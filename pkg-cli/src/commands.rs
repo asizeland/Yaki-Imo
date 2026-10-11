@@ -47,6 +47,7 @@ use pkg_build::orchestrator::{
 };
 use pkg_build::{recipe::Recipe, staging};
 use pkg_core::manifest::PackageManifest;
+use pkg_core::paths::at;
 use pkg_core::{
     AbiTag, Arch, Dependency, Identity, PkgError, PkgResult, Track, Version,
     VersionConstraint, VirtualName,
@@ -69,6 +70,10 @@ use crate::preview::{format_dry_run_preview, DryRunPlan};
 // ---------------------------------------------------------------------
 // Paths & small helpers
 // ---------------------------------------------------------------------
+//
+// The `*_PATH` / `*_DIR` consts are absolute-path SUFFIXES: use sites
+// resolve them through [`at`], which re-roots them under `$PKG_ROOT`
+// when that test override is set (pkg-core `paths` docs).
 
 pub const DB_PATH: &str = "/var/lib/pkg/db/pkg.sqlite";
 pub const LOCK_PATH: &str = "/var/lib/pkg/lock";
@@ -91,22 +96,23 @@ pub const REPO_CACHE_TTL: Duration = Duration::from_secs(24 * 3600);
 
 pub fn store_roots() -> Vec<PathBuf> {
     vec![
-        PathBuf::from("/usr/lib/pkg/.store"),
-        PathBuf::from("/usr/lib32/pkg/.store"),
+        at("/usr/lib/pkg/.store"),
+        at("/usr/lib32/pkg/.store"),
     ]
 }
 
 /// Opens (and migrates) the package DB.
 pub fn open_db() -> PkgResult<Connection> {
-    let conn = Connection::open(DB_PATH)
-        .map_err(|e| PkgError::Db(format!("opening {DB_PATH}: {e}")))?;
+    let db_path = at(DB_PATH);
+    let conn = Connection::open(&db_path)
+        .map_err(|e| PkgError::Db(format!("opening {}: {e}", db_path.display())))?;
     schema::init_schema(&conn)?;
     Ok(conn)
 }
 
 pub fn lock_exclusive() -> PkgResult<pkg_db::lock::ExclusiveGuard> {
     pkg_db::lock::acquire_exclusive(
-        Path::new(LOCK_PATH),
+        &at(LOCK_PATH),
         pkg_db::lock::WaitMode::Wait {
             timeout: pkg_db::lock::DEFAULT_WRITER_TIMEOUT,
         },
@@ -115,7 +121,7 @@ pub fn lock_exclusive() -> PkgResult<pkg_db::lock::ExclusiveGuard> {
 
 pub fn lock_shared() -> PkgResult<pkg_db::lock::SharedGuard> {
     pkg_db::lock::acquire_shared(
-        Path::new(LOCK_PATH),
+        &at(LOCK_PATH),
         pkg_db::lock::WaitMode::Wait {
             timeout: pkg_db::lock::DEFAULT_READER_FALLBACK_TIMEOUT,
         },
@@ -123,7 +129,7 @@ pub fn lock_shared() -> PkgResult<pkg_db::lock::SharedGuard> {
 }
 
 pub fn load_pins() -> PkgResult<PinSet> {
-    match fs::read_to_string(PINS_PATH) {
+    match fs::read_to_string(at(PINS_PATH)) {
         Ok(text) => PinSet::from_toml_str(&text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(PinSet::new()),
         Err(e) => Err(PkgError::Io(e)),
@@ -131,10 +137,11 @@ pub fn load_pins() -> PkgResult<PinSet> {
 }
 
 fn save_pins(pins: &PinSet) -> PkgResult<()> {
-    if let Some(parent) = Path::new(PINS_PATH).parent() {
+    let path = at(PINS_PATH);
+    if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(PkgError::Io)?;
     }
-    fs::write(PINS_PATH, pins.to_toml_string()?).map_err(PkgError::Io)
+    fs::write(&path, pins.to_toml_string()?).map_err(PkgError::Io)
 }
 
 // ---------------------------------------------------------------------
@@ -145,7 +152,7 @@ fn save_pins(pins: &PinSet) -> PkgResult<()> {
 /// bundle, §10.6). A missing file is an error naming `pkg sync`, the
 /// same contract `catalog_from_recipes` uses for the recipe checkout.
 pub fn load_profiles() -> PkgResult<ProfileSet> {
-    match fs::read_to_string(PROFILES_PATH) {
+    match fs::read_to_string(at(PROFILES_PATH)) {
         Ok(text) => ProfileSet::from_toml_str(&text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(PkgError::NotFound(
             "no profiles.toml in the sync cache — run `pkg sync` first".into(),
@@ -161,7 +168,7 @@ pub fn load_profiles() -> PkgResult<ProfileSet> {
 /// the wrong kind of implicit (§2), but so would bricking every
 /// transaction because the repo retired a profile.
 fn active_profile_constraints(pins: &PinSet) -> EffectiveConstraints {
-    let Ok(text) = fs::read_to_string(ACTIVE_PROFILE_PATH) else {
+    let Ok(text) = fs::read_to_string(at(ACTIVE_PROFILE_PATH)) else {
         return EffectiveConstraints::new();
     };
     let name = text.trim();
@@ -333,7 +340,7 @@ pub fn graph_from_recipes(
 }
 
 /// Loads a package's recipe from the recipe repo.
-pub fn load_recipe(name: &str) -> PkgResult<Recipe> {    let dir = Path::new(RECIPES_DIR).join(name);
+pub fn load_recipe(name: &str) -> PkgResult<Recipe> {    let dir = at(RECIPES_DIR).join(name);
     if !dir.is_dir() {
         return Err(PkgError::NotFound(format!("no recipe for {name}")));
     }
@@ -491,7 +498,7 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
     // install/upgrade outright.
     enforce_supply_chain_gate(&conn)?;
     let pins = load_pins()?;
-    let recipes_dir = PathBuf::from(RECIPES_DIR);
+    let recipes_dir = at(RECIPES_DIR);
     let preferred_providers = load_alternative_prefs(&conn)?;
     let graph = graph_from_recipes(&recipes_dir, &preferred_providers)?;
     let installed = installed_versions(&conn)?;
@@ -657,8 +664,9 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
         println!(
             "build detached: {} packages queued. Follow with \
              `pkg upgrade --attach` (planned: pkg cascade --execute-pending); \
-             completion is signaled in {PENDING_BUILD_STATE}.",
-            effective_plan.nodes.len()
+             completion is signaled in {}.",
+            effective_plan.nodes.len(),
+            at(PENDING_BUILD_STATE).display()
         );
         return Ok(());
     }
@@ -671,8 +679,8 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
     cfg.host_glibc = running_glibc_version();
     // The same cache dir `cmd_sync` passed to sync_index — the fetch
     // stage's T7 guard reads the recipe manifest from here.
-    cfg.repo_cache = PathBuf::from(INDEX_CACHE);
-    cfg.source_cache = PathBuf::from(SOURCE_CACHE);
+    cfg.repo_cache = at(INDEX_CACHE);
+    cfg.source_cache = at(SOURCE_CACHE);
     // §10.5.6 opt-out; the critical-set double build defaults to ON
     // because that is the safe direction.
     cfg.repro_check = !flags.no_repro_check;
@@ -779,15 +787,15 @@ fn handle_glibc_update(
             new_tree.display()
         )));
     }
-    let anchor = Path::new(pkg_db::integrity::GLIBC_ANCHOR_DIR);
+    let anchor = at(pkg_db::integrity::GLIBC_ANCHOR_DIR);
     let mut confirm_fn = |prompt: &str| confirm(prompt, assume_yes);
     if old_version.same_release_core(new_version) {
-        let files = category1_patch_files(&new_tree, anchor)?;
+        let files = category1_patch_files(&new_tree, &anchor)?;
         if files.is_empty() {
             println!("glibc {new_version}: anchor already matches the new build; nothing to patch");
             return Ok(());
         }
-        let swapped = pkg_build::glibc::apply_category1_patch(anchor, &files, &mut confirm_fn)?;
+        let swapped = pkg_build::glibc::apply_category1_patch(&anchor, &files, &mut confirm_fn)?;
         println!(
             "glibc category-1 patch applied inline to the active anchor ({} file(s))",
             swapped.len()
@@ -796,8 +804,8 @@ fn handle_glibc_update(
         // stage_major_bump consumes the tree it is handed (rename into
         // .stage), so hand it a same-filesystem COPY — the store dir
         // itself must stay put for the DB rows that reference it.
-        let stage_parent = Path::new("/usr/lib/pkg/.stage");
-        fs::create_dir_all(stage_parent).map_err(PkgError::Io)?;
+        let stage_parent = at("/usr/lib/pkg/.stage");
+        fs::create_dir_all(&stage_parent).map_err(PkgError::Io)?;
         let tmp = stage_parent.join(format!("glibc-new-{}", std::process::id()));
         if tmp.exists() {
             fs::remove_dir_all(&tmp).map_err(PkgError::Io)?;
@@ -807,7 +815,7 @@ fn handle_glibc_update(
             conn,
             &tmp,
             new_version,
-            Path::new(GLIBC_APPLY_BIN),
+            &at(GLIBC_APPLY_BIN),
             &mut confirm_fn,
         )?;
         if let Some(discarded) = outcome.replaced_previous {
@@ -1008,7 +1016,7 @@ fn retain_requested(mut plan: BuildPlan, requested: &BTreeSet<String>) -> BuildP
 /// rich matching; this is the deliberately conservative pre-check —
 /// substring hits may over-refuse, never under-refuse.
 fn cascade_touches_security(names: &BTreeSet<&str>) -> bool {
-    let Ok(json) = fs::read_to_string(SECURITY_JSON) else {
+    let Ok(json) = fs::read_to_string(at(SECURITY_JSON)) else {
         return false; // no synced advisories → nothing to refuse on
     };
     names.iter().any(|n| json.contains(&format!("\"{n}\"")))
@@ -1017,7 +1025,7 @@ fn cascade_touches_security(names: &BTreeSet<&str>) -> bool {
 /// Records a deferred cascade for `pkg clean` (store pinning) and
 /// `pkg cascade --execute-pending`.
 fn record_pending_deferral(names: &BTreeSet<&str>) -> PkgResult<()> {
-    let path = Path::new(PENDING_BUILD_STATE);
+    let path = at(PENDING_BUILD_STATE);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(PkgError::Io)?;
     }
@@ -1394,7 +1402,7 @@ fn cmd_sync(force: bool, status: bool) -> PkgResult<()> {
     if status {
         // §10.6 `pkg sync --status`: cache age, last sync, freshness —
         // no network, no lock (nothing is mutated).
-        let st = pkg_repo::sync_status(Path::new(INDEX_CACHE), REPO_CACHE_TTL)?;
+        let st = pkg_repo::sync_status(&at(INDEX_CACHE), REPO_CACHE_TTL)?;
         match (st.fetched_at, st.age_secs, st.index_version) {
             (Some(fetched), Some(age), Some(version)) => {
                 println!("index version: {version}");
@@ -1417,10 +1425,10 @@ fn cmd_sync(force: bool, status: bool) -> PkgResult<()> {
     // state.
     let _lock = lock_exclusive()?;
     let mirrors = configured_mirrors();
-    let mut trust = pkg_repo::TrustStore::load(Path::new(pkg_repo::TRUST_DIR), &embedded_root())
+    let mut trust = pkg_repo::TrustStore::load(&at(pkg_repo::TRUST_DIR), &embedded_root())
         .map_err(|e| PkgError::Parse(format!("sync failed: {e}")))?;
     let ttl = if force { Duration::ZERO } else { REPO_CACHE_TTL };
-    let index = pkg_repo::sync_index(&mut trust, &mirrors, Path::new(INDEX_CACHE), ttl)
+    let index = pkg_repo::sync_index(&mut trust, &mirrors, &at(INDEX_CACHE), ttl)
         .map_err(|e| PkgError::Parse(format!("sync failed: {e}")))?;
     for warning in &index.trust_warnings {
         eprintln!("{warning}");
@@ -1435,7 +1443,7 @@ fn cmd_sync(force: bool, status: bool) -> PkgResult<()> {
             index.index_version
         );
     } else {
-        println!("synced repository index v{} into {INDEX_CACHE}", index.index_version);
+        println!("synced repository index v{} into {}", index.index_version, at(INDEX_CACHE).display());
     }
     Ok(())
 }
@@ -1476,7 +1484,7 @@ fn embedded_root() -> pkg_repo::RoleDelegation {
 /// Mirrors from `/etc/pkg/mirrors.toml` (`mirrors = [...]`), or none
 /// (sync then fails loudly inside pkg-repo — the honest default).
 fn configured_mirrors() -> Vec<String> {
-    fs::read_to_string("/etc/pkg/mirrors.toml")
+    fs::read_to_string(at("/etc/pkg/mirrors.toml"))
         .ok()
         .map(|text| {
             text.lines()
@@ -1494,7 +1502,7 @@ fn configured_mirrors() -> Vec<String> {
 
 fn cmd_search(query: &str) -> PkgResult<()> {
     // Source-only system: the searchable universe is the recipe repo.
-    let dir = PathBuf::from(RECIPES_DIR);
+    let dir = at(RECIPES_DIR);
     if !dir.is_dir() {
         return Err(PkgError::NotFound(format!(
             "recipe repository {} not found — run `pkg sync` first",
@@ -1608,7 +1616,7 @@ fn cmd_why(name: &str) -> PkgResult<()> {
 
 fn cmd_explain(constraint: &str) -> PkgResult<()> {
     let (name, version) = parse_spec(constraint);
-    let catalog = catalog_from_recipes(Path::new(RECIPES_DIR))?;
+    let catalog = catalog_from_recipes(&at(RECIPES_DIR))?;
     let recipe = load_recipe(&name)?;
     let version: Version = match version {
         Some(v) => v.parse().map_err(|_| PkgError::Parse(format!("bad version in {constraint:?}")))?,
@@ -1695,7 +1703,7 @@ fn cmd_alternatives(action: AlternativesAction) -> PkgResult<()> {
             // The virtual universe is the recipe repo's `provides`
             // declarations — the same source resolution materializes.
             let mut providers: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-            let dir = PathBuf::from(RECIPES_DIR);
+            let dir = at(RECIPES_DIR);
             if dir.is_dir() {
                 for entry in fs::read_dir(&dir).map_err(PkgError::Io)? {
                     let entry = entry.map_err(PkgError::Io)?;
@@ -1767,7 +1775,7 @@ fn cmd_profile(action: ProfileAction) -> PkgResult<()> {
     match action {
         ProfileAction::List => {
             let set = load_profiles()?;
-            let active = fs::read_to_string(ACTIVE_PROFILE_PATH)
+            let active = fs::read_to_string(at(ACTIVE_PROFILE_PATH))
                 .ok()
                 .map(|s| s.trim().to_string());
             let names: Vec<&str> = set.names().collect();
@@ -1795,7 +1803,7 @@ fn cmd_profile(action: ProfileAction) -> PkgResult<()> {
                 )));
             }
             let _lock = lock_exclusive()?;
-            let path = Path::new(ACTIVE_PROFILE_PATH);
+            let path = at(ACTIVE_PROFILE_PATH);
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).map_err(PkgError::Io)?;
             }
@@ -1867,7 +1875,7 @@ fn cmd_rebuild(affected: bool, assume_yes: bool) -> PkgResult<()> {
     // Re-resolve each affected package AT its installed version (a
     // rebuild, not an upgrade): the solver then pulls the preferred
     // provider into the solution.
-    let graph = graph_from_recipes(Path::new(RECIPES_DIR), &prefs)?;
+    let graph = graph_from_recipes(&at(RECIPES_DIR), &prefs)?;
     let pins = load_pins()?;
     let profile_constraints = active_profile_constraints(&pins);
     let mut selected: HashMap<String, Version> = HashMap::new();
@@ -1920,8 +1928,8 @@ fn cmd_rebuild(affected: bool, assume_yes: bool) -> PkgResult<()> {
     cfg.cascade_id = Some(new_cascade_id());
     cfg.store_roots = store_roots();
     cfg.host_glibc = running_glibc_version();
-    cfg.repo_cache = PathBuf::from(INDEX_CACHE);
-    cfg.source_cache = PathBuf::from(SOURCE_CACHE);
+    cfg.repo_cache = at(INDEX_CACHE);
+    cfg.source_cache = at(SOURCE_CACHE);
     let report = orchestrator::execute_plan(&conn, &plan, &cfg)?;
     print_report(&report);
     if report.is_clean() {
@@ -2625,7 +2633,7 @@ fn cmd_build_env(name: &str, resolve: bool) -> PkgResult<()> {
     let _lock = lock_shared()?;
     let conn = open_db()?;
     if resolve {
-        let catalog = catalog_from_recipes(Path::new(RECIPES_DIR))?;
+        let catalog = catalog_from_recipes(&at(RECIPES_DIR))?;
         let recipe = load_recipe(name)?;
         let installed = installed_versions(&conn)?;
         let pins = load_pins()?;
@@ -2962,7 +2970,7 @@ fn cmd_key(action: KeyAction) -> PkgResult<()> {
     // the management surface (§10.5.4).
     match action {
         KeyAction::List => {
-            let trust = pkg_repo::TrustStore::load(Path::new(TRUST_DIR), &embedded_root())
+            let trust = pkg_repo::TrustStore::load(&at(TRUST_DIR), &embedded_root())
                 .map_err(|e| PkgError::Parse(format!("trust store: {e}")))?;
             let root = trust.root_manifest();
             println!(
@@ -2983,7 +2991,7 @@ fn cmd_key(action: KeyAction) -> PkgResult<()> {
             Ok(())
         }
         KeyAction::ShowChain => {
-            let trust = pkg_repo::TrustStore::load(Path::new(TRUST_DIR), &embedded_root())
+            let trust = pkg_repo::TrustStore::load(&at(TRUST_DIR), &embedded_root())
                 .map_err(|e| PkgError::Parse(format!("trust store: {e}")))?;
             print!("{}", trust.show_chain());
             Ok(())
@@ -3021,7 +3029,7 @@ fn cmd_key(action: KeyAction) -> PkgResult<()> {
                 return Ok(());
             }
             let _lock = lock_exclusive()?;
-            pkg_repo::TrustStore::import_root_manifest(Path::new(TRUST_DIR), &bytes)?;
+            pkg_repo::TrustStore::import_root_manifest(&at(TRUST_DIR), &bytes)?;
             println!("imported root trust anchor v{}", manifest.version);
             Ok(())
         }

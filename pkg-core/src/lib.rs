@@ -5,8 +5,9 @@
 //! `Version`, `AbiTag`, `Arch`, `Track`, `PackageId`, `OptTag`,
 //! `Identity`), the manifest format ([`manifest`]), dependency/virtual
 //! declarations ([`r#virtual`]: `Dependency`, `VersionConstraint`,
-//! `VirtualName`), and the workspace-wide error type ([`error`]:
-//! `PkgError`, `PkgResult`).
+//! `VirtualName`), the workspace-wide error type ([`error`]:
+//! `PkgError`, `PkgResult`), and the `PKG_ROOT` test-root path
+//! override ([`paths`]: `root`, `at`).
 //!
 //! Per SPEC, every public module is re-exported flat at the crate root,
 //! so the rest of the workspace writes `pkg_core::Version` rather than
@@ -20,9 +21,11 @@
 pub mod error;
 pub mod manifest;
 pub mod package;
+pub mod paths;
 pub mod r#virtual;
 
 pub use error::*;
 pub use manifest::*;
 pub use package::*;
+pub use paths::*;
 pub use r#virtual::*;

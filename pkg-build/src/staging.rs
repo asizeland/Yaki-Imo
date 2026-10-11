@@ -381,13 +381,13 @@ where
     for identity in &activate {
         let root = store_root_for(identity.arch, store_roots)?;
         let store_dir = root.join(identity.store_dir_name());
-        ops.extend(plan_activation_ops(&store_dir, Path::new("/"))?);
+        ops.extend(plan_activation_ops(&store_dir, pkg_core::paths::root())?);
     }
     for (identity, _) in &deactivate {
         let root = store_root_for(identity.arch, store_roots)?;
         let store_dir = root.join(identity.store_dir_name());
         if store_dir.is_dir() {
-            ops.extend(plan_deactivation_ops(&store_dir, Path::new("/"))?);
+            ops.extend(plan_deactivation_ops(&store_dir, pkg_core::paths::root())?);
         }
     }
     with_old_targets(&mut ops);
@@ -662,8 +662,8 @@ pub fn undo_to_generation(
 /// undo is not a resolution.
 fn recheck_pins(conn: &Connection) -> Vec<String> {
     let mut warnings = Vec::new();
-    let pins_path = Path::new("/var/lib/pkg/config/pins.toml");
-    let Ok(text) = fs::read_to_string(pins_path) else {
+    let pins_path = pkg_core::paths::at("/var/lib/pkg/config/pins.toml");
+    let Ok(text) = fs::read_to_string(&pins_path) else {
         return warnings; // no pins file → nothing to check
     };
     let Ok(pins) = pkg_resolver::PinSet::from_toml_str(&text) else {

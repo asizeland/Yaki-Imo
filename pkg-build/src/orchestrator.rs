@@ -248,8 +248,8 @@ impl SchedConfig {
             max_pkg_jobs: 4,
             cgroup_root: PathBuf::from(BUILD_CGROUP_ROOT),
             cache: Some(ArtifactCache::default_root()),
-            build_root: PathBuf::from("/var/lib/pkg/build"),
-            source_cache: PathBuf::from("/var/cache/pkg/sources"),
+            build_root: pkg_core::paths::at("/var/lib/pkg/build"),
+            source_cache: pkg_core::paths::at("/var/cache/pkg/sources"),
             repo_cache: pkg_repo::sync::default_cache_dir(),
             host_glibc: None,
             // with_defaults cannot fail (its callers build one
@@ -258,7 +258,7 @@ impl SchedConfig {
             // a cache. Callers that can propagate errors should prefer
             // `compiler_wrapper_from_config` directly (hard error per
             // §4.3's unknown-values philosophy).
-            compiler_wrapper: match compiler_wrapper_from_config(std::path::Path::new(CONFIG_PATH)) {
+            compiler_wrapper: match compiler_wrapper_from_config(&pkg_core::paths::at(CONFIG_PATH)) {
                 Ok(wrapper) => wrapper,
                 Err(e) => {
                     eprintln!("pkg: warning: ignoring {CONFIG_PATH}: {e}");
@@ -268,7 +268,7 @@ impl SchedConfig {
             repro_check: true,
             command_line: String::new(),
             cascade_id: None,
-            store_roots: vec![PathBuf::from("/usr/lib/pkg/.store")],
+            store_roots: vec![pkg_core::paths::at("/usr/lib/pkg/.store")],
         }
     }
 }

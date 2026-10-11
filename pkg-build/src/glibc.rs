@@ -125,12 +125,12 @@ pub fn apply_category1_patch(
 /// `None` when the last nag is fresh. Stamp-update failures are ignored:
 /// the nag is a courtesy, not a gate.
 pub fn restart_nag() -> Option<String> {
-    let stamp = Path::new(NAG_STAMP);
+    let stamp = pkg_core::paths::at(NAG_STAMP);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    if let Ok(meta) = fs::metadata(stamp) {
+    if let Ok(meta) = fs::metadata(&stamp) {
         if let Ok(modified) = meta.modified() {
             let age = SystemTime::now()
                 .duration_since(modified)
@@ -141,7 +141,7 @@ pub fn restart_nag() -> Option<String> {
             }
         }
     }
-    let _ = fs::write(stamp, format!("{now}\n"));
+    let _ = fs::write(&stamp, format!("{now}\n"));
     Some(
         "glibc was patched in place; long-running processes still hold the old libc.\n\
          Run `pkg audit --glibc` to list affected PIDs/services, and\n\
@@ -200,19 +200,19 @@ pub fn stage_major_bump(
     // it against its own manifest. `glibc-apply` re-verifies at boot
     // against the flag-file hash (v13 §5) and never swaps unverified
     // content — staging-time verification catches corruption early.
-    let staged = Path::new(STAGED_GLIBC_DIR);
+    let staged = pkg_core::paths::at(STAGED_GLIBC_DIR);
     if staged.exists() {
-        fs::remove_dir_all(staged).map_err(PkgError::Io)?;
+        fs::remove_dir_all(&staged).map_err(PkgError::Io)?;
     }
     if let Some(parent) = staged.parent() {
         fs::create_dir_all(parent).map_err(PkgError::Io)?;
     }
-    if fs::rename(new_tree, staged).is_err() {
-        copy_tree(new_tree, staged)?;
+    if fs::rename(new_tree, &staged).is_err() {
+        copy_tree(new_tree, &staged)?;
     }
-    let manifest = StagedGlibcManifest::build(staged)?;
+    let manifest = StagedGlibcManifest::build(&staged)?;
     let staged_sha256 = manifest.manifest_sha256();
-    pkg_db::integrity::verify_staged_glibc(staged, &staged_sha256)?;
+    pkg_db::integrity::verify_staged_glibc(&staged, &staged_sha256)?;
 
     let pending = PendingGlibc {
         protocol: GLIBC_PENDING_PROTOCOL,
@@ -225,7 +225,7 @@ pub fn stage_major_bump(
     // Flag file FIRST (v13 §2 format; the boot-time binary reads the
     // protocol field before anything else and refuses formats it
     // doesn't know).
-    write_pending_flag(Path::new(PENDING_FLAG), &pending)?;
+    write_pending_flag(&pkg_core::paths::at(PENDING_FLAG), &pending)?;
     // DB row second (v13 §4d) — lets pre-build checks fail fast from
     // the database alone (`queries::check_glibc_gate`).
     queries::set_pending_glibc(conn, &pending)?;
