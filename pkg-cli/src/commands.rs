@@ -919,10 +919,16 @@ fn copy_tree(src: &Path, dst: &Path) -> PkgResult<()> {
 /// from the supply-chain audit refuses install/upgrade, naming the
 /// packages and the `--acknowledge` remedy.
 fn enforce_supply_chain_gate(conn: &Connection) -> PkgResult<()> {
+    // The recipe manifest is what tells the audit which installed
+    // packages are critical-set (and who committed each entry) —
+    // without it every attestation check degrades to a warning and the
+    // gate would never hold. Absent (never synced) degrades to the
+    // provenance-row-only view rather than blocking.
+    let manifest = pkg_repo::load_cached_recipe_manifest(&at(INDEX_CACHE)).ok();
     let report = pkg_audit::audit_supply_chain(
         conn,
-        None, // pre-v14/provenance-row-only mode, same as `pkg audit --supply-chain`
-        Path::new(pkg_audit::QUARANTINE_DIR),
+        manifest.as_ref(),
+        &at(pkg_audit::QUARANTINE_DIR),
         false,
     )
     .map_err(|e| PkgError::Parse(format!("supply-chain audit failed: {e}")))?;
@@ -2712,10 +2718,11 @@ fn cmd_audit(
         // branch takes the exclusive lock (§9.4).
         let _lock = lock_exclusive()?;
         let conn = open_db()?;
+        let manifest = pkg_repo::load_cached_recipe_manifest(&at(INDEX_CACHE)).ok();
         let report = pkg_audit::audit_supply_chain(
             &conn,
-            None,
-            Path::new(pkg_audit::QUARANTINE_DIR),
+            manifest.as_ref(),
+            &at(pkg_audit::QUARANTINE_DIR),
             critical,
         )
         .map_err(|e| PkgError::Parse(format!("audit failed: {e}")))?;
@@ -2732,10 +2739,11 @@ fn cmd_audit(
     // (Vec<AdvisoryMatch> / RestartReport / SupplyChainReport), so each
     // renders itself.
     if supply_chain {
+        let manifest = pkg_repo::load_cached_recipe_manifest(&at(INDEX_CACHE)).ok();
         let report = pkg_audit::audit_supply_chain(
             &conn,
-            None, // manifest: None = pre-v14/provenance-row-only mode
-            Path::new(pkg_audit::QUARANTINE_DIR),
+            manifest.as_ref(), // None (never synced) = provenance-row-only mode
+            &at(pkg_audit::QUARANTINE_DIR),
             critical,
         )
         .map_err(|e| PkgError::Parse(format!("audit failed: {e}")))?;

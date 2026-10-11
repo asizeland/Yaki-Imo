@@ -73,6 +73,15 @@ EOF
 tar -czf "$SRC/libfoo-1.0.tar.gz" -C "$SRC" libfoo-1.0
 tar -czf "$SRC/hello-1.0.tar.gz" -C "$SRC" hello-1.0
 
+# Two critical-set packages: crtpkg is properly attested (exercises the
+# §10.5.6 double-build), badcrt carries no attestations (exercises the
+# §10.5.6/§16.4 supply-chain gate).
+for p in crtpkg badcrt; do
+    mkdir -p "$SRC/$p-1"
+    printf '#include <stdio.h>\nint main(void){puts("%s");return 0;}\n' "$p" > "$SRC/$p-1/main.c"
+    tar -czf "$SRC/$p-1.tar.gz" -C "$SRC" "$p-1"
+done
+
 # Host glibc, as seen through ldd.
 LIBC_PATH=$(ldd /bin/sh | awk '/libc\.so/{print $3; exit}')
 LD_PATH=$(ldd /bin/sh | awk '/ld-linux/{print $1; exit}')
@@ -85,13 +94,15 @@ echo "host glibc: $GLIBC_VER ($LIBC_PATH)"
 "$MKREPO" "$REPO" "$BASE" \
     "glibc:$GLIBC_VER:e2e0001:false:" \
     "libfoo:1:e2e0001:false:$SRC/libfoo-1.0.tar.gz" \
-    "hello:1:e2e0001:false:$SRC/hello-1.0.tar.gz" >/dev/null
+    "hello:1:e2e0001:false:$SRC/hello-1.0.tar.gz" \
+    "crtpkg:1:e2e0001:true:$SRC/crtpkg-1.tar.gz" \
+    "badcrt:1:e2e0001:true:$SRC/badcrt-1.tar.gz:noattest" >/dev/null
 pass "mkrepo fabricated signed repo"
 
 # ---------------------------------------------------------------
 # 3. Recipes checked out under the test root.
 # ---------------------------------------------------------------
-for p in glibc libfoo hello; do
+for p in glibc libfoo hello crtpkg badcrt; do
     mkdir -p "$ROOT/var/lib/pkg/recipes/$p"
     echo "e2e0001" > "$ROOT/var/lib/pkg/recipes/$p/.recipe-commit"
 done
@@ -155,6 +166,31 @@ cat > "$ROOT/var/lib/pkg/recipes/hello/install" <<'EOF'
 mkdir -p "$PKGDIR/usr/bin"
 cp hello-1.0/hello "$PKGDIR/usr/bin/"
 EOF
+
+# Critical-set recipes: [build] critical triggers the double-build; the
+# index/manifest critical flag (mkrepo) drives the supply-chain audit.
+for p in crtpkg badcrt; do
+    cat > "$ROOT/var/lib/pkg/recipes/$p/pkg-meta.toml" <<EOF
+name = "$p"
+version = "1"
+category = "base"
+
+[dependencies]
+runtime = ["glibc"]
+
+[build]
+critical = true
+EOF
+    cat > "$ROOT/var/lib/pkg/recipes/$p/build" <<EOF
+tar xzf $p-1.tar.gz
+cd $p-1
+cc -O2 -o $p main.c
+EOF
+    cat > "$ROOT/var/lib/pkg/recipes/$p/install" <<EOF
+mkdir -p "\$PKGDIR/usr/bin"
+cp $p-1/$p "\$PKGDIR/usr/bin/"
+EOF
+done
 
 # ---------------------------------------------------------------
 # 4. Config: mirrors pointing at the local server.
@@ -296,7 +332,9 @@ echo "e2e0002" > "$ROOT/var/lib/pkg/recipes/libfoo/.recipe-commit"
 "$MKREPO" "$REPO" "$BASE" \
     "glibc:$GLIBC_VER:e2e0001:false:" \
     "libfoo:1.1:e2e0002:false:$SRC/libfoo-1.1.tar.gz" \
-    "hello:1:e2e0001:false:$SRC/hello-1.0.tar.gz" >/dev/null
+    "hello:1:e2e0001:false:$SRC/hello-1.0.tar.gz" \
+    "crtpkg:1:e2e0001:true:$SRC/crtpkg-1.tar.gz" \
+    "badcrt:1:e2e0001:true:$SRC/badcrt-1.tar.gz:noattest" >/dev/null
 "$PKG" sync --force >/dev/null
 "$PKG" upgrade -y libfoo >/dev/null 2>&1 || fail "pkg upgrade libfoo"
 ls "$ROOT"/usr/lib/pkg/.store/*/usr/lib/libfoo.so.1.0 >/dev/null 2>&1 || fail "libfoo 1.1 store artifact"
@@ -308,7 +346,38 @@ out=$(LD_LIBRARY_PATH="$ROOT/usr/lib" "$ROOT/usr/bin/hello") \
 pass "cascade rebuilt hello against libfoo 1.1"
 
 # ---------------------------------------------------------------
-# 12. Security: plant an advisory for hello, re-sync, audit.
+# 12. Critical-set double build (§10.5.6): a properly attested
+#     critical package builds twice, trees compared, self-match
+#     recorded in provenance, quarantine stays empty.
+# ---------------------------------------------------------------
+"$PKG" install -y crtpkg >/dev/null 2>&1 || fail "pkg install crtpkg"
+repro=$(sqlite3 "$ROOT/var/lib/pkg/db/pkg.sqlite" \
+    "SELECT p2.reproducibility FROM provenance p2 JOIN packages p ON p.id=p2.package_id WHERE p.name='crtpkg'")
+[ "$repro" = "self-match" ] || { echo "reproducibility: $repro" >&2; fail "crtpkg double-build self-match recorded"; }
+pass "critical double-build recorded self-match"
+[ -z "$(find "$ROOT/var/lib/pkg/build/quarantine" -mindepth 1 2>/dev/null)" ] \
+    && pass "quarantine empty after matching double-build" || fail "quarantine should be empty"
+
+# ---------------------------------------------------------------
+# 13. Supply-chain gate (§10.5.6/§16.4): an under-attested critical
+#     package installs (nothing to block it yet), but the NEXT
+#     transaction is blocked until the finding is acknowledged.
+# ---------------------------------------------------------------
+"$PKG" install -y badcrt >/dev/null 2>&1 || fail "pkg install badcrt"
+"$PKG" audit --supply-chain 2>&1 | grep -q "badcrt" \
+    && pass "supply-chain audit flags badcrt" || fail "audit should flag badcrt"
+if "$PKG" install -y hello >/dev/null 2>&1; then
+    fail "gate allowed a transaction with an unacknowledged hard finding"
+else
+    "$PKG" install -y hello 2>&1 | grep -q "unacknowledged supply-chain hard findings" \
+        && pass "gate blocks the next transaction" || fail "gate block message"
+fi
+"$PKG" audit --supply-chain --acknowledge badcrt >/dev/null
+"$PKG" install -y hello >/dev/null 2>&1 \
+    && pass "acknowledgement unblocks transactions" || fail "acknowledge badcrt"
+
+# ---------------------------------------------------------------
+# 14. Security: plant an advisory for hello, re-sync, audit.
 # ---------------------------------------------------------------
 cat > "$E2E/advisory.json" <<'EOF'
 {"format_version": 1, "advisories": [
@@ -321,6 +390,8 @@ EOF
     "glibc:$GLIBC_VER:e2e0001:false:" \
     "libfoo:1.1:e2e0002:false:$SRC/libfoo-1.1.tar.gz" \
     "hello:1:e2e0001:false:$SRC/hello-1.0.tar.gz" \
+    "crtpkg:1:e2e0001:true:$SRC/crtpkg-1.tar.gz" \
+    "badcrt:1:e2e0001:true:$SRC/badcrt-1.tar.gz:noattest" \
     --advisory "$E2E/advisory.json" >/dev/null
 "$PKG" sync --force >/dev/null
 if "$PKG" audit 2>&1 | grep -q "E2E-2026-0001"; then

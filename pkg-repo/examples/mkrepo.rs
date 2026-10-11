@@ -17,11 +17,14 @@
 //!
 //! ```text
 //! mkrepo <repo-dir> <base-url> <pkg>... [--advisory <json-file>]
-//! pkg := name:version:commit:critical:src1,src2,...
+//! pkg := name:version:commit:critical:src1,src2,...[:noattest]
 //! ```
 //!
 //! Source files are copied into `<repo-dir>/sources/` and their URLs
-//! recorded as `<base-url>/sources/<file>`.
+//! recorded as `<base-url>/sources/<file>`. A package spec ending in
+//! `:noattest` gets NO reviewer attestations — for exercising the
+//! supply-chain gate (an under-attested critical package must block
+//! the next transaction until acknowledged).
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -69,24 +72,32 @@ struct PkgSpec {
     commit: String,
     critical: bool,
     sources: Vec<PathBuf>,
+    attest: bool,
 }
 
 fn parse_pkg(arg: &str) -> PkgSpec {
     let parts: Vec<&str> = arg.split(':').collect();
-    if parts.len() != 5 {
-        eprintln!("bad package spec {arg:?} — want name:version:commit:critical:src1,src2");
+    let (fields, attest) = match parts.as_slice() {
+        [rest @ .., "noattest"] => (rest, false),
+        _ => (parts.as_slice(), true),
+    };
+    if fields.len() != 5 {
+        eprintln!(
+            "bad package spec {arg:?} — want name:version:commit:critical:src1,src2[:noattest]"
+        );
         std::process::exit(2);
     }
     PkgSpec {
-        name: parts[0].to_string(),
-        version: parts[1].to_string(),
-        commit: parts[2].to_string(),
-        critical: parts[3] == "true",
-        sources: parts[4]
+        name: fields[0].to_string(),
+        version: fields[1].to_string(),
+        commit: fields[2].to_string(),
+        critical: fields[3] == "true",
+        sources: fields[4]
             .split(',')
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
             .collect(),
+        attest,
     }
 }
 
@@ -120,7 +131,13 @@ fn main() {
     let root_keys = [test_key(1), test_key(2), test_key(3)];
     let repo_key = test_key(10);
     let ts_key = test_key(11);
-    let reviewer_keys = [test_key(12), test_key(13)];
+    // Reviewer pool: 12, 13, 14. Entries are "committed" by 13 and
+    // attested by 12 and 14, so a properly attested critical package
+    // has exactly the required 2 INDEPENDENT reviewer sign-offs (the
+    // committer's own attestation never counts, v14 §4/T3).
+    let reviewer_keys = [test_key(12), test_key(13), test_key(14)];
+    let committer = test_key(13);
+    let attesters = [test_key(12), test_key(14)];
 
     std::fs::create_dir_all(repo_dir.join("sources")).unwrap();
 
@@ -142,19 +159,21 @@ fn main() {
             name: p.name.clone(),
             version: p.version.clone(),
             recipe_commit: p.commit.clone(),
-            committer_fingerprint: Some(key_fingerprint(&reviewer_keys[1].verifying_key())),
+            committer_fingerprint: Some(key_fingerprint(&committer.verifying_key())),
             sources,
             attestations: Vec::new(),
             critical: p.critical,
         };
-        let msg = attestation_message(&entry);
-        entry.attestations = reviewer_keys
-            .iter()
-            .map(|k| Attestation {
-                key_fingerprint: key_fingerprint(&k.verifying_key()),
-                sig: hex_encode(&k.sign(&msg).to_bytes()),
-            })
-            .collect();
+        if p.attest {
+            let msg = attestation_message(&entry);
+            entry.attestations = attesters
+                .iter()
+                .map(|k| Attestation {
+                    key_fingerprint: key_fingerprint(&k.verifying_key()),
+                    sig: hex_encode(&k.sign(&msg).to_bytes()),
+                })
+                .collect();
+        }
         manifest_entries.push(entry);
     }
     let manifest_toml = toml::to_string(&RecipeManifest {
@@ -217,7 +236,10 @@ fn main() {
         root: delegation_of(&[&root_keys[0], &root_keys[1], &root_keys[2]], 2),
         repository: delegation_of(&[&repo_key], 1),
         timestamp: delegation_of(&[&ts_key], 1),
-        reviewer: delegation_of(&[&reviewer_keys[0], &reviewer_keys[1]], 1),
+        reviewer: delegation_of(
+            &[&reviewer_keys[0], &reviewer_keys[1], &reviewer_keys[2]],
+            1,
+        ),
     };
     let root_doc = sign_doc(serde_json::to_value(&root).unwrap(), &[&root_keys[0], &root_keys[1]]);
     std::fs::write(repo_dir.join("root.json"), &root_doc).unwrap();
