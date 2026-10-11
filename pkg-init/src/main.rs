@@ -14,7 +14,7 @@
 //!   - flag:   `/var/lib/pkg/glibc-pending`
 //!   - anchor: `/usr/lib/pkg/glibc-anchor/`       (currently-active glibc tree)
 //!   - staged: `/usr/lib/pkg/.stage/glibc-active/` (verified replacement tree)
-//!   - DB:     `/var/lib/pkg/pkg.db`              (read-only, best-effort;
+//!   - DB:     `/var/lib/pkg/db/pkg.sqlite`     (read-only, best-effort;
 //!              this binary does NOT open it — verification of the DB row
 //!              happens in `pkg` / queries-v3.rs, not here)
 //!
@@ -32,14 +32,16 @@
 //! Subcommand: `--rollback` — reverses the exchange (staged <-> anchor
 //! again), used from the rescue shell after a bad boot.
 //!
-//! Flag file format (protocol v1, line-based `key = value`):
+//! Flag file format (protocol v1, spec §7.6.2, line-based `key = value`):
 //! ```text
 //! protocol = 1
 //! target = 2.40
-//! staged_sha256 = <hex>
-//! glibc_apply_sha256 = <hex>
-//! created_at = <unix>
+//! manifest_sha256 = <hex digest of the staged tree's manifest>
+//! created = <RFC 3339 timestamp>
 //! ```
+//! `glibc_apply_sha256 = <hex>` may additionally appear as an optional
+//! protocol-1 extension carrying the §7.6.3 drift-check hash (see
+//! `parse_flag`).
 //!
 //! ## v1 notes
 //!
@@ -169,7 +171,7 @@ fn run_apply() -> ExitCode {
     //    boot the old glibc (exit 0).
     let staged_root = Path::new(STAGED_DIR);
     match manifest_sha256(staged_root) {
-        Ok(actual) if actual == flag.staged_sha256 => {
+        Ok(actual) if actual == flag.manifest_sha256 => {
             eprintln!(
                 "glibc-apply: staged glibc {} verified ({} files... digest match)",
                 flag.target,
@@ -182,7 +184,7 @@ fn run_apply() -> ExitCode {
             eprintln!(
                 "glibc-apply: WARNING: staged tree manifest mismatch \
                  (expected {}, computed {actual}); booting old glibc",
-                flag.staged_sha256
+                flag.manifest_sha256
             );
             clear_flag();
             return ExitCode::SUCCESS;
@@ -196,11 +198,15 @@ fn run_apply() -> ExitCode {
         }
     }
 
-    // 4. Drift check (v13 §3): the flag records the sha256 of the
-    //    glibc-apply binary that staged the upgrade. If THIS binary
-    //    differs (e.g. initramfs rebuilt with an older/newer copy),
-    //    warn but proceed — the check is informational only, since the
-    //    manifest verification above is the actual safety gate.
+    // 4. Drift check (v13 §3): the PM records the sha256 of the
+    //    installed glibc-apply binary in the DB; a protocol-1 flag MAY
+    //    carry a copy (`glibc_apply_sha256`), since this std-only binary
+    //    cannot open sqlite. Absent field or unreadable self-hash =>
+    //    skip silently (best-effort). If THIS binary differs from the
+    //    recorded hash (e.g. initramfs rebuilt with an older/newer
+    //    copy), warn but proceed — the check is informational only,
+    //    since the manifest verification above is the actual safety
+    //    gate.
     if let Some(expected) = &flag.glibc_apply_sha256 {
         match self_sha256() {
             Ok(actual) if &actual != expected => {
@@ -289,26 +295,37 @@ fn run_rollback() -> ExitCode {
 // Flag file (protocol v1, `key = value` lines)
 // ---------------------------------------------------------------------
 
+#[derive(Debug)]
 struct PendingFlag {
     protocol: u64,
     target: String,
-    staged_sha256: String,
+    manifest_sha256: String,
     glibc_apply_sha256: Option<String>,
     #[allow(dead_code)] // recorded for diagnostics / future use
-    created_at: Option<i64>,
+    created: String,
 }
 
-/// Parses the flag file. Strict about `protocol`, `target`, and
-/// `staged_sha256` (without them there is nothing safe to do);
-/// `glibc_apply_sha256` and `created_at` are optional. Blank lines and
-/// `#` comments are ignored; `=` may have surrounding whitespace.
+/// Parses the flag file (spec §7.6.2 protocol-1 format). Required:
+/// `protocol`, `target`, `manifest_sha256` (64-char hex), and `created`
+/// (RFC 3339). `glibc_apply_sha256` is an optional protocol-1 extension
+/// mirroring the DB column of the same name, for the §7.6.3 drift
+/// self-check — the DB row is canonical, but this std-only binary cannot
+/// open sqlite, so a flag copy is its only possible source.
+///
+/// Unknown keys are FATAL, not ignored: a flag carrying fields this
+/// binary doesn't know is either corrupt or was written by a newer
+/// format that forgot to bump `protocol`. Per the frozen-interface
+/// rationale (§7.6.1), a format mismatch must degrade into "refuses to
+/// act" — the caller boots the old glibc with a loud warning — never
+/// into guessing at semantics. Blank lines and `#` comments are
+/// ignored; `=` may have surrounding whitespace.
 fn parse_flag(path: &str) -> Result<PendingFlag, String> {
     let text = fs::read_to_string(path).map_err(|e| format!("read: {e}"))?;
     let mut protocol = None;
     let mut target = None;
-    let mut staged_sha256 = None;
+    let mut manifest_sha256 = None;
     let mut glibc_apply_sha256 = None;
-    let mut created_at = None;
+    let mut created = None;
     for (lineno, raw) in text.lines().enumerate() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -327,19 +344,88 @@ fn parse_flag(path: &str) -> Result<PendingFlag, String> {
                 )
             }
             "target" => target = Some(value.to_string()),
-            "staged_sha256" => staged_sha256 = Some(value.to_ascii_lowercase()),
-            "glibc_apply_sha256" => glibc_apply_sha256 = Some(value.to_ascii_lowercase()),
-            "created_at" => created_at = value.parse::<i64>().ok(),
-            other => eprintln!("glibc-apply: note: ignoring unknown flag key '{other}'"),
+            "manifest_sha256" => {
+                manifest_sha256 = Some(hex64(value).ok_or_else(|| {
+                    format!("line {}: bad manifest_sha256 (want 64 hex chars)", lineno + 1)
+                })?)
+            }
+            "glibc_apply_sha256" => {
+                glibc_apply_sha256 = Some(hex64(value).ok_or_else(|| {
+                    format!("line {}: bad glibc_apply_sha256 (want 64 hex chars)", lineno + 1)
+                })?)
+            }
+            "created" => {
+                created = Some(parse_rfc3339(value).ok_or_else(|| {
+                    format!("line {}: bad created (want RFC 3339)", lineno + 1)
+                })?)
+            }
+            other => {
+                return Err(format!(
+                    "line {}: unknown key '{other}' (refusing to guess at an \
+                     unrecognized format)",
+                    lineno + 1
+                ))
+            }
         }
     }
     Ok(PendingFlag {
         protocol: protocol.ok_or("missing 'protocol'")?,
         target: target.ok_or("missing 'target'")?,
-        staged_sha256: staged_sha256.ok_or("missing 'staged_sha256'")?,
+        manifest_sha256: manifest_sha256.ok_or("missing 'manifest_sha256'")?,
         glibc_apply_sha256,
-        created_at,
+        created: created.ok_or("missing 'created'")?,
     })
+}
+
+/// Lowercases and validates a 64-char hex digest.
+fn hex64(value: &str) -> Option<String> {
+    let lowered = value.to_ascii_lowercase();
+    (lowered.len() == 64 && lowered.bytes().all(|b| b.is_ascii_hexdigit())).then_some(lowered)
+}
+
+/// RFC 3339 shape check: `YYYY-MM-DDTHH:MM:SS` followed by `Z` or a
+/// `±HH:MM` offset, with range checks on each field. Calendar validity
+/// (e.g. Feb 30) is not checked — the value is diagnostic only, never a
+/// safety gate.
+fn parse_rfc3339(value: &str) -> Option<String> {
+    let b = value.as_bytes();
+    if b.len() != 20 && b.len() != 25 {
+        return None;
+    }
+    let digits = |from: usize, to: usize| b[from..to].iter().all(u8::is_ascii_digit);
+    let num = |i: usize| (b[i] - b'0') as u32 * 10 + (b[i + 1] - b'0') as u32;
+    if !(digits(0, 4)
+        && b[4] == b'-' && digits(5, 7)
+        && b[7] == b'-' && digits(8, 10)
+        && b[10] == b'T' && digits(11, 13)
+        && b[13] == b':' && digits(14, 16)
+        && b[16] == b':' && digits(17, 19))
+    {
+        return None;
+    }
+    let (month, day, hour, min, sec) = (num(5), num(8), num(11), num(14), num(17));
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || min > 59
+        || sec > 60 // 60: leap second
+    {
+        return None;
+    }
+    if b[19] == b'Z' {
+        return (b.len() == 20).then(|| value.to_string());
+    }
+    if b.len() == 25
+        && (b[19] == b'+' || b[19] == b'-')
+        && digits(20, 22)
+        && b[22] == b':'
+        && digits(23, 25)
+        && num(20) <= 23
+        && num(23) <= 59
+    {
+        return Some(value.to_string());
+    }
+    None
 }
 
 /// Best-effort flag removal: the flag must never keep us in a boot loop,
@@ -449,7 +535,7 @@ fn hex_lower(digest: &[u8; 32]) -> String {
 fn exchange(a: &str, b: &str) -> Result<(), String> {
     let a_c = CString::new(a).map_err(|_| "anchor path contains NUL".to_string())?;
     let b_c = CString::new(b).map_err(|_| "staged path contains NUL".to_string())?;
-    let ret = unsafe { sys_renameat2(AT_FDCWD, a_c.as_ptr(), AT_FDCWD, b_c.as_ptr(), RENAME_EXCHANGE) };
+    let ret = unsafe { sys_renameat2(AT_FDCWD, a_c.as_ptr().cast(), AT_FDCWD, b_c.as_ptr().cast(), RENAME_EXCHANGE) };
     if ret == 0 {
         Ok(())
     } else {
@@ -706,23 +792,128 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    fn parse_flag_protocol_v1() {
-        let dir = std::env::temp_dir().join(format!("glibc-apply-flag-{}", std::process::id()));
+    fn write_flag(text: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "glibc-apply-flag-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         fs::create_dir_all(&dir).unwrap();
         let p = dir.join("glibc-pending");
-        fs::write(
-            &p,
-            "protocol = 1\ntarget = 2.40\nstaged_sha256 = ABCD\n\
-             glibc_apply_sha256 = 1234\ncreated_at = 1700000000\n",
-        )
-        .unwrap();
+        fs::write(&p, text).unwrap();
+        (dir, p)
+    }
+
+    #[test]
+    fn parse_flag_spec_format() {
+        // Spec v14 §7.6.2 protocol-1 format, with the optional
+        // glibc_apply_sha256 extension present.
+        let (dir, p) = write_flag(&format!(
+            "protocol = 1\ntarget = 2.40\nmanifest_sha256 = {}\n\
+             created = 2024-07-03T09:46:40Z\nglibc_apply_sha256 = {}\n",
+            "AB".repeat(32),
+            "CD".repeat(32)
+        ));
         let f = parse_flag(p.to_str().unwrap()).unwrap();
         assert_eq!(f.protocol, GLIBC_PENDING_PROTOCOL);
         assert_eq!(f.target, "2.40");
-        assert_eq!(f.staged_sha256, "abcd"); // hex lowered
-        assert_eq!(f.glibc_apply_sha256.as_deref(), Some("1234"));
-        assert_eq!(f.created_at, Some(1_700_000_000));
+        assert_eq!(f.manifest_sha256, "ab".repeat(32)); // hex lowered
+        assert_eq!(f.created, "2024-07-03T09:46:40Z");
+        assert_eq!(f.glibc_apply_sha256.as_deref(), Some("cd".repeat(32).as_str()));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parse_flag_verbatim_spec_example() {
+        // Regression test for the writer/reader split: the verbatim spec
+        // v14 §7.6.2 example block is
+        //
+        //     protocol = 1
+        //     target = 2.40
+        //     manifest_sha256 = <hex digest of the staged tree's manifest>
+        //     created = <RFC 3339 timestamp>
+        //
+        // parsed here with the placeholders realized concretely (the
+        // digest below is SHA-256 of an empty staged-tree manifest).
+        let (dir, p) = write_flag(concat!(
+            "protocol = 1\n",
+            "target = 2.40\n",
+            "manifest_sha256 = e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n",
+            "created = 2026-01-15T03:22:41Z\n",
+        ));
+        let f = parse_flag(p.to_str().unwrap()).unwrap();
+        assert_eq!(f.protocol, 1);
+        assert_eq!(f.target, "2.40");
+        assert_eq!(
+            f.manifest_sha256,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(f.created, "2026-01-15T03:22:41Z");
+        assert_eq!(f.glibc_apply_sha256, None);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parse_flag_refuses_unknown_keys_and_legacy_format() {
+        // Frozen interface: unknown fields must degrade into refusal,
+        // never into guessing (§7.6.1/§7.6.2). This also pins the fix
+        // for the writer/reader split: a flag in the OLD format
+        // (`staged_sha256 =`, `created_at =`) is rejected loudly instead
+        // of being silently misparsed into a swap that never applies.
+        let (dir, p) = write_flag(
+            "protocol = 1\ntarget = 2.40\nstaged_sha256 = abcd\ncreated_at = 1700000000\n",
+        );
+        let err = parse_flag(p.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("unknown key 'staged_sha256'"), "{err}");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parse_flag_requires_all_spec_fields() {
+        let digest = "ab".repeat(32);
+        for text in [
+            format!("target = 2.40\nmanifest_sha256 = {digest}\ncreated = 2024-07-03T09:46:40Z\n"),
+            format!("protocol = 1\nmanifest_sha256 = {digest}\ncreated = 2024-07-03T09:46:40Z\n"),
+            format!("protocol = 1\ntarget = 2.40\ncreated = 2024-07-03T09:46:40Z\n"),
+            format!("protocol = 1\ntarget = 2.40\nmanifest_sha256 = {digest}\n"),
+        ] {
+            let (dir, p) = write_flag(&text);
+            assert!(parse_flag(p.to_str().unwrap()).is_err(), "accepted: {text}");
+            fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn parse_flag_rfc3339_validation() {
+        assert_eq!(
+            parse_rfc3339("2024-07-03T09:46:40Z").as_deref(),
+            Some("2024-07-03T09:46:40Z")
+        );
+        assert_eq!(
+            parse_rfc3339("2024-07-03T09:46:40+05:30").as_deref(),
+            Some("2024-07-03T09:46:40+05:30")
+        );
+        for bad in [
+            "1700000000", // unix timestamp: the pre-fix reader's format
+            "2024-07-03 09:46:40Z",
+            "2024-13-03T09:46:40Z", // month 13
+            "2024-07-03T25:46:40Z", // hour 25
+            "2024-07-03T09:46:40", // missing offset
+        ] {
+            assert_eq!(parse_rfc3339(bad), None, "accepted: {bad}");
+        }
+    }
+
+    #[test]
+    fn parse_flag_protocol_gate_still_parseable() {
+        // An unrecognized protocol must PARSE (so the caller can refuse
+        // with a clear message) but fail the GLIBC_PENDING_PROTOCOL gate.
+        let (dir, p) = write_flag(&format!(
+            "protocol = 2\ntarget = 2.41\nmanifest_sha256 = {}\ncreated = 2024-07-03T09:46:40Z\n",
+            "ab".repeat(32)
+        ));
+        let f = parse_flag(p.to_str().unwrap()).unwrap();
+        assert_ne!(f.protocol, GLIBC_PENDING_PROTOCOL);
         fs::remove_dir_all(&dir).ok();
     }
 }

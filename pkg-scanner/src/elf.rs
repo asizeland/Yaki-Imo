@@ -248,7 +248,7 @@ fn elf_defined_symbols(path: &Path) -> Option<BTreeSet<String>> {
 fn defined_symbols_of(elf: &Elf) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     for sym in elf.syms.iter() {
-        if sym.is_undefined() || sym.st_name == 0 {
+        if sym.st_shndx == goblin::elf::section_header::SHN_UNDEF as usize || sym.st_name == 0 {
             continue;
         }
         if let Some(name) = elf.strtab.get_at(sym.st_name) {

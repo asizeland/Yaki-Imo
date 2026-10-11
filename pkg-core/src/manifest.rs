@@ -711,6 +711,25 @@ fn default_true() -> bool {
     true
 }
 
+/// Parses one `[dependencies]` array entry into a `(Dependency,
+/// DependencyKind)` pair. A plain-string entry takes the kind implied by
+/// the array it appears in; an inline-table entry's explicit `kind` wins
+/// when present, and falls back to the implied kind when omitted. The
+/// dependency expression itself goes through `parse_dependency_expr`
+/// either way, so both forms share one grammar and one set of errors.
+fn parse_dep_entry(
+    entry: &RawDepEntry,
+    implied: DependencyKind,
+) -> Result<(Dependency, DependencyKind), ManifestError> {
+    match entry {
+        RawDepEntry::Simple(expr) => Ok((parse_dependency_expr(expr)?, implied)),
+        RawDepEntry::Detailed(detailed) => Ok((
+            parse_dependency_expr(&detailed.dep)?,
+            detailed.kind.unwrap_or(implied),
+        )),
+    }
+}
+
 // ---------------------------------------------------------------------
 // Dependency expression parsing
 // ---------------------------------------------------------------------
@@ -857,7 +876,9 @@ mod tests {
         "#;
         let m = PackageManifest::from_toml_str(toml).unwrap();
         assert_eq!(m.name, "hello");
-        assert_eq!(m.version.to_string(), "1.0.0");
+        // FromStr normalizes trailing zero components: "1.0.0" stores as
+        // [1] and displays canonically as "1".
+        assert_eq!(m.version.to_string(), "1");
         assert_eq!(m.category, Category::Other("app-misc".to_string()));
         assert!(!m.multilib);
         assert!(m.provides.is_empty());

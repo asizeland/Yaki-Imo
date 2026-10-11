@@ -46,8 +46,7 @@ use pkg_core::{PkgError, Version};
 // `::pubgrub`, not bare `pubgrub`: the crate root declares a module
 // named `pubgrub`, which shadows the extern crate in Rust 2018 uniform
 // paths (see the note in `pubgrub.rs`).
-use ::pubgrub::{DefaultStringReporter, Reporter};
-use ::pubgrub::report::DerivationTree;
+use ::pubgrub::{DefaultStringReporter, DerivationTree, Reporter};
 
 use crate::{Catalog, PkgVersionSet, ResolveError};
 
@@ -63,7 +62,7 @@ use crate::{Catalog, PkgVersionSet, ResolveError};
 /// failure never requires solving a second time. The returned
 /// `PkgError::Resolution` (§16.1: exit code 1) is the user-facing error
 /// `pkg` prints.
-pub fn explain_from_tree(tree: &DerivationTree<String, PkgVersionSet>) -> PkgError {
+pub fn explain_from_tree(tree: &DerivationTree<String, PkgVersionSet, String>) -> PkgError {
     PkgError::Resolution(DefaultStringReporter::report(tree))
 }
 

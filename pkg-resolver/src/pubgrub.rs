@@ -60,8 +60,7 @@ use pkg_core::{PkgError, PkgResult, Version, VersionConstraint};
 // named `pubgrub` (this file), and a crate-root module shadows the
 // extern prelude in Rust 2018 uniform paths. `::pubgrub` is
 // unambiguous in every edition.
-use ::pubgrub::{DefaultStringReporter, OfflineDependencyProvider, Ranges, Reporter, VersionSet};
-use ::pubgrub::report::DerivationTree;
+use ::pubgrub::{DefaultStringReporter, DerivationTree, OfflineDependencyProvider, Ranges, Reporter};
 
 use crate::PinSet;
 
@@ -216,7 +215,7 @@ pub fn constraint_to_range(constraint: &VersionConstraint) -> PkgVersionSet {
 /// without solving a second time.
 #[derive(Debug)]
 pub enum ResolveError {
-    NoSolution(DerivationTree<String, PkgVersionSet>),
+    NoSolution(DerivationTree<String, PkgVersionSet, String>),
     /// Any other `PubGrubError`. Unreachable in practice for a
     /// `Catalog`-backed provider (`OfflineDependencyProvider`'s `Err`
     /// associated type is `Infallible`), kept because the match has to
@@ -226,7 +225,7 @@ pub enum ResolveError {
 
 impl ResolveError {
     /// The derivation tree, when this failure is a genuine conflict.
-    pub fn derivation_tree(&self) -> Option<&DerivationTree<String, PkgVersionSet>> {
+    pub fn derivation_tree(&self) -> Option<&DerivationTree<String, PkgVersionSet, String>> {
         match self {
             ResolveError::NoSolution(tree) => Some(tree),
             ResolveError::Other(_) => None,

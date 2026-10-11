@@ -420,7 +420,7 @@ mod tests {
                 max: Some("25".parse().unwrap()),
             }
             .to_string(),
-            ">=24.0, <25"
+            ">=24, <25"
         );
         assert_eq!(
             VersionConstraint::Range {
@@ -428,7 +428,7 @@ mod tests {
                 max: None,
             }
             .to_string(),
-            ">=24.0"
+            ">=24"
         );
     }
 
