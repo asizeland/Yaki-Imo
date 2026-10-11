@@ -180,6 +180,9 @@ impl Drop for ExclusiveGuard {
 }
 
 fn open_lock_file(path: &Path) -> PkgResult<File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     OpenOptions::new()
         .read(true)
         .write(true)

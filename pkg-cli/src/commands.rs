@@ -104,6 +104,9 @@ pub fn store_roots() -> Vec<PathBuf> {
 /// Opens (and migrates) the package DB.
 pub fn open_db() -> PkgResult<Connection> {
     let db_path = at(DB_PATH);
+    if let Some(parent) = db_path.parent() {
+        fs::create_dir_all(parent).map_err(PkgError::Io)?;
+    }
     let conn = Connection::open(&db_path)
         .map_err(|e| PkgError::Db(format!("opening {}: {e}", db_path.display())))?;
     schema::init_schema(&conn)?;
@@ -2670,7 +2673,7 @@ fn cmd_build_env(name: &str, resolve: bool) -> PkgResult<()> {
         pkgdir: PathBuf::from("<pkgdir>"),
         selection,
         inner_jobs: 1,
-        source_cache: PathBuf::from(SOURCE_CACHE),
+        source_cache: at(SOURCE_CACHE),
         compiler_wrapper: None,
         host_glibc: None,
         // build_env only reads selection/wrapper/paths; the fetch/gate
@@ -2774,7 +2777,7 @@ fn cmd_audit(
     // Default: security advisories. `load_advisories` takes the sync
     // cache DIR (it appends security.json itself); `match_advisories`
     // reads the installed set from the DB.
-    let index = pkg_audit::load_advisories(Path::new(INDEX_CACHE))
+    let index = pkg_audit::load_advisories(&at(INDEX_CACHE))
         .map_err(|e| PkgError::Parse(format!("audit failed: {e}")))?;
     let matches = pkg_audit::match_advisories(&conn, &index)
         .map_err(|e| PkgError::Parse(format!("audit failed: {e}")))?;
@@ -2809,7 +2812,7 @@ fn cmd_audit(
 fn cmd_audit_env(env_name: &str, json: bool) -> PkgResult<()> {
     let root = env_root(env_name)?;
     let lock_text = fs::read_to_string(root.join("lock.txt")).map_err(PkgError::Io)?;
-    let index = pkg_audit::load_advisories(Path::new(INDEX_CACHE))
+    let index = pkg_audit::load_advisories(&at(INDEX_CACHE))
         .map_err(|e| PkgError::Parse(format!("audit failed: {e}")))?;
     let mut matches = Vec::new();
     let mut checked = 0usize;
@@ -2897,7 +2900,7 @@ fn cmd_fetch(name: &str) -> PkgResult<()> {
     // only network stage (Issue 3.4) and verifies SHA-256 + declared
     // origins (v14 T7). The entry comes from the synced recipe manifest,
     // not the recipe checkout.
-    let manifest = pkg_repo::load_cached_recipe_manifest(Path::new(INDEX_CACHE))?;
+    let manifest = pkg_repo::load_cached_recipe_manifest(&at(INDEX_CACHE))?;
     let entry = manifest
         .find(&recipe.manifest.name, &recipe.manifest.version.to_string())
         .ok_or_else(|| {
@@ -2906,7 +2909,7 @@ fn cmd_fetch(name: &str) -> PkgResult<()> {
                 recipe.manifest.name, recipe.manifest.version
             ))
         })?;
-    let fetched = pkg_repo::fetch_sources(entry, Path::new(SOURCE_CACHE))?;
+    let fetched = pkg_repo::fetch_sources(entry, &at(SOURCE_CACHE))?;
     for f in &fetched {
         println!("fetched {}", f.display());
     }
@@ -2944,8 +2947,8 @@ fn cmd_build(name: &str, opts: Vec<String>, no_cache: bool) -> PkgResult<()> {
     cfg.cascade_id = None; // standalone build (Issue 4.2.5)
     cfg.store_roots = store_roots();
     cfg.host_glibc = running_glibc_version();
-    cfg.repo_cache = PathBuf::from(INDEX_CACHE);
-    cfg.source_cache = PathBuf::from(SOURCE_CACHE);
+    cfg.repo_cache = at(INDEX_CACHE);
+    cfg.source_cache = at(SOURCE_CACHE);
     if no_cache {
         cfg.cache = None; // Issue 4.5: "exists for paranoia"
     }

@@ -293,7 +293,9 @@ pub struct SignedDocument<P> {
 
 /// The canonical byte string that signatures cover for a raw JSON
 /// `signed` value: sorted-key, whitespace-free re-serialization.
-fn canonical_bytes(value: &serde_json::Value) -> Result<Vec<u8>, TrustError> {
+/// Public so repository tooling (index-signing CI, test fixtures) can
+/// reproduce the exact signed bytes.
+pub fn canonical_bytes(value: &serde_json::Value) -> Result<Vec<u8>, TrustError> {
     serde_json::to_vec(value)
         .map_err(|e| TrustError::Malformed(format!("cannot canonicalize payload: {e}")))
 }

@@ -34,7 +34,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use pkg_core::manifest::PackageManifest;
 use pkg_core::{AbiTag, PkgError, PkgResult, Version};
 use pkg_db::queries::{self, BuildRecord};
-use pkg_sandbox::{run_sandboxed, SandboxProfile};
+use pkg_sandbox::{run_sandboxed_with_deps, SandboxProfile};
 use rusqlite::Connection;
 
 /// Recipe phase names, in execution order after `Fetch`.
@@ -291,14 +291,45 @@ fn run_recipe_phases_impl(
                 recipe.manifest.name, recipe.manifest.version
             ))
         })?;
-    let _sources: Vec<PathBuf> =
+    let sources: Vec<PathBuf> =
         pkg_repo::fetch_sources(manifest_entry, &ctx.source_cache)?;
 
     fs::create_dir_all(&ctx.scratch_dir).map_err(PkgError::Io)?;
     fs::create_dir_all(&ctx.pkgdir).map_err(PkgError::Io)?;
 
+    // Materialize the fetched sources into the scratch dir: the Build
+    // profile's only RW bind is scratch, so a tarball left in the
+    // source cache is unreachable from inside the sandbox. Cache file
+    // names carry a `<sha256>-` prefix (pkg-repo's `cache_file_name`);
+    // recipe scripts reference their sources by the URL's bare file
+    // name, so the prefix is stripped here.
+    for src in &sources {
+        let name = src
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| {
+                PkgError::Build(format!("source path {} has no file name", src.display()))
+            })?;
+        let bare = match name.split_once('-') {
+            Some((hash, rest))
+                if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) =>
+            {
+                rest
+            }
+            _ => name,
+        };
+        fs::copy(src, ctx.scratch_dir.join(bare)).map_err(PkgError::Io)?;
+    }
+
     let env = build_env(ctx, recipe)?;
     let profile = SandboxProfile::Build;
+    // The resolved dependency tree, RO-bound into the build sandbox at
+    // its real store paths so the build can link against it (v12 §9).
+    let dep_binds: Vec<PathBuf> = ctx
+        .gate_deps
+        .iter()
+        .map(|d| d.store_dir.clone())
+        .collect();
 
     // -- prepare / build / check / install ----------------------------
     for phase in PHASES {
@@ -312,12 +343,20 @@ fn run_recipe_phases_impl(
             }
             continue;
         };
+        // The recipe dir is NOT bound into the sandbox — copy the phase
+        // script into the scratch dir (the build's only always-RW bind)
+        // and run it from there.
+        let local_script = ctx
+            .scratch_dir
+            .join(format!(".pkg-phase-{}", phase.script_name()));
+        fs::copy(script, &local_script).map_err(PkgError::Io)?;
         let cmd = vec![
             "/bin/sh".to_string(),
             "-e".to_string(),
-            script.display().to_string(),
+            local_script.display().to_string(),
         ];
-        let outcome = run_sandboxed(&profile, &cmd, &ctx.scratch_dir, &env)?;
+        let outcome =
+            run_sandboxed_with_deps(&profile, &dep_binds, &cmd, &ctx.scratch_dir, &env)?;
         phase_logs.push((phase, outcome.stderr_tail.clone()));
         if !outcome.success() {
             return Err(PkgError::Build(format!(

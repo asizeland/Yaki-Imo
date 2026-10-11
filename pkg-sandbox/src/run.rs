@@ -130,6 +130,21 @@ pub fn run_sandboxed(
     scratch_dir: &Path,
     env: &[(String, String)],
 ) -> PkgResult<SandboxOutcome> {
+    run_sandboxed_with_deps(profile, &[], cmd, scratch_dir, env)
+}
+
+/// [`run_sandboxed`] plus caller-supplied extra read-only binds — the
+/// resolved dependency store dirs a build links against (v12 §9: the
+/// dependency tree is visible to the build, read-only, at its real
+/// store path). Dep binds are *added to* the profile's contract, never
+/// a way around it: they're read-only like the toolchain binds.
+pub fn run_sandboxed_with_deps(
+    profile: &SandboxProfile,
+    extra_bind_ro: &[PathBuf],
+    cmd: &[String],
+    scratch_dir: &Path,
+    env: &[(String, String)],
+) -> PkgResult<SandboxOutcome> {
     if cmd.is_empty() {
         return Err(PkgError::Build(
             "run_sandboxed: empty command".to_string(),
@@ -139,7 +154,22 @@ pub fn run_sandboxed(
         .iter()
         .find(|(k, _)| k == "PKGDIR")
         .map(|(_, v)| PathBuf::from(v));
-    let data = profile.resolve(scratch_dir, pkgdir.as_deref());
+    let mut data = profile.resolve(scratch_dir, pkgdir.as_deref());
+    data.bind_ro.extend(extra_bind_ro.iter().cloned());
+    // A bind source that doesn't exist on this host (e.g. `/lib` on a
+    // NixOS-style layout) would make bwrap refuse the whole invocation;
+    // there is nothing to protect at a path that isn't there, so drop it
+    // — loudly, since on a conventional layout these binds are expected.
+    data.bind_ro.retain(|p| {
+        let exists = p.exists();
+        if !exists {
+            eprintln!(
+                "pkg: sandbox: bind source {} does not exist; skipping",
+                p.display()
+            );
+        }
+        exists
+    });
     let argv = build_argv(&data, cmd, scratch_dir, env);
 
     let mut child = Command::new(&argv[0])

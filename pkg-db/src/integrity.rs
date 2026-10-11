@@ -252,6 +252,12 @@ pub fn scan_store(
             continue;
         }
         let dir_name = entry.file_name().to_string_lossy().into_owned();
+        // The staging area (pkg-build's `STAGE_DIR_NAME`) is a
+        // legitimate non-package resident of the store root: activation
+        // assembles trees there before the atomic rename.
+        if dir_name == ".stage" {
+            continue;
+        }
         if known_names.contains(&dir_name) {
             continue;
         }
