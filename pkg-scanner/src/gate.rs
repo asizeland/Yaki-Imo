@@ -78,6 +78,24 @@ pub struct GateReport {
     pub warnings: Vec<String>,
 }
 
+/// How the undeclared-DT_NEEDED check treats sonames provided by
+/// neither the package itself nor its declared dependencies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkagePolicy {
+    /// Source builds: undeclared linkage is a hard `PkgError::Gate`
+    /// failure — the build reached outside its declared dependency
+    /// contract (a sandbox escape or an undeclared system lib).
+    Strict,
+    /// Vendor binary blobs (manifest `[build] binary = true`):
+    /// undeclared linkage is recorded as a warning, not a failure. A
+    /// redistributed blob legitimately links system libraries the
+    /// distribution ships separately from the blob's declared deps;
+    /// demanding the full closure as packages would make the binary
+    /// pattern unrepresentable. The foreign-glibc floor check stays a
+    /// hard failure under either policy.
+    BinaryRedistributable,
+}
+
 /// SPEC entry point: post-build verification of the artifacts in
 /// `store_dir` against `host_glibc` and the declared dependency set.
 ///
@@ -100,6 +118,18 @@ pub fn verify_build(
     store_dir: &Path,
     host_glibc: &Version,
     declared_deps: &[DeclaredDep],
+) -> PkgResult<GateReport> {
+    verify_build_with_policy(store_dir, host_glibc, declared_deps, LinkagePolicy::Strict)
+}
+
+/// [`verify_build`] with an explicit [`LinkagePolicy`] for the
+/// undeclared-soname check. See [`LinkagePolicy::BinaryRedistributable`]
+/// for when the relaxed policy is legitimate.
+pub fn verify_build_with_policy(
+    store_dir: &Path,
+    host_glibc: &Version,
+    declared_deps: &[DeclaredDep],
+    policy: LinkagePolicy,
 ) -> PkgResult<GateReport> {
     // Sonames provided by the declared dependency set. Scanning each
     // dep's store dir is the ground truth — the resolver's *claim* is
@@ -169,13 +199,27 @@ pub fn verify_build(
     // sonames are complete (a package's own libs may need each other).
     for (artifact, info) in &artifacts {
         let missing = undeclared_sonames(&info.needed, &self_provided, &dep_provided);
-        if !missing.is_empty() {
-            return Err(PkgError::Gate(format!(
-                "{}: links against undeclared dependencies: {} \
-                 (not provided by this package or any declared dep)",
-                artifact.display(),
-                missing.join(", ")
-            )));
+        if missing.is_empty() {
+            continue;
+        }
+        match policy {
+            LinkagePolicy::Strict => {
+                return Err(PkgError::Gate(format!(
+                    "{}: links against undeclared dependencies: {} \
+                     (not provided by this package or any declared dep)",
+                    artifact.display(),
+                    missing.join(", ")
+                )));
+            }
+            LinkagePolicy::BinaryRedistributable => {
+                report.warnings.push(format!(
+                    "{}: vendor blob links undeclared sonames: {} \
+                     (allowed by [build] binary; expected to come from \
+                     the host distribution at runtime)",
+                    artifact.display(),
+                    missing.join(", ")
+                ));
+            }
         }
     }
 

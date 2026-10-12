@@ -346,7 +346,11 @@ fn run_recipe_phases_impl(
     // -- prepare / build / check / install ----------------------------
     for phase in PHASES {
         let Some(script) = recipe.phase_script(phase) else {
-            if matches!(phase, Phase::Build | Phase::Install) {
+            // A binary-blob repackaging ([build] binary = true) needs
+            // no compile step; extraction/placement happens in install.
+            let required = matches!(phase, Phase::Install)
+                || (matches!(phase, Phase::Build) && !recipe.manifest.binary);
+            if required {
                 return Err(PkgError::Build(format!(
                     "recipe {} has no `{}` script",
                     recipe.dir.display(),
@@ -388,8 +392,24 @@ fn run_recipe_phases_impl(
     // is what the gate scans for provided sonames; it may be a partial
     // view when deps were built in the same cascade — the undeclared-
     // soname check then just can't attribute those (see BuildContext).
+    // Vendor binary blobs run under the relaxed linkage policy (see
+    // the manifest's `[build] binary`); their undeclared sonames come
+    // back as warnings, which the build log must surface.
     if let Some(host) = &ctx.host_glibc {
-        pkg_scanner::gate_build(&ctx.pkgdir, host, &ctx.gate_deps)?;
+        let policy = if recipe.manifest.binary {
+            pkg_scanner::LinkagePolicy::BinaryRedistributable
+        } else {
+            pkg_scanner::LinkagePolicy::Strict
+        };
+        let report = pkg_scanner::verify_build_with_policy(
+            &ctx.pkgdir,
+            host,
+            &ctx.gate_deps,
+            policy,
+        )?;
+        for warning in &report.warnings {
+            eprintln!("pkg: gate warning: {warning}");
+        }
     }
     Ok(())
 }

@@ -55,7 +55,7 @@ Every crate's `lib.rs` re-exports its public modules flat (`pub use x::*`).
 ## pkg-scanner (elf.rs → v2; NEW gate.rs, check.rs)
 
 - elf-v2 additions: `LinkInterface { soname, symbol_versions: BTreeSet<String> }`, `extract_link_interface(path) -> Result<Vec<LinkInterface>>`, `link_interface_hash(&[LinkInterface], header_fp: &str) -> String` (SHA-256 of canonical sorted serialization, 8-hex), `detect_static_consumption(artifact, archive_paths) -> Vec<String>` (symbol-table comparison). Keep v1 floor/ceiling API.
-- gate.rs: `gate_build(store_dir, host_glibc: &Version, required_runtime_deps) -> Result<(), PkgError::Gate>` — post-build verification per v12 §9 (framing: verification, not gate against host).
+- gate.rs: `gate_build(store_dir, host_glibc: &Version, required_runtime_deps) -> Result<(), PkgError::Gate>` — post-build verification per v12 §9 (framing: verification, not gate against host). `LinkagePolicy::{Strict, BinaryRedistributable}` via `verify_build_with_policy`: under the binary policy (manifest `[build] binary = true`) undeclared DT_NEEDED sonames are warnings, not hard failures — vendor blobs link system libs the distribution ships separately.
 - check.rs: `check_system(conn, store_roots) -> Vec<CheckFinding>` — powers `pkg check`.
 - heuristic.rs stays as-is (dlopen heuristics), ensure it compiles against elf-v2 (bump to v2 with import fix if needed).
 

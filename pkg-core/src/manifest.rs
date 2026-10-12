@@ -37,7 +37,8 @@
 //!   at parse time. `add_deps`/`add_build_deps` entries use the same
 //!   dependency-expression grammar as `[dependencies]`.
 //! - [MAJOR] `[build]` table: `compiler_cache: bool = true`,
-//!   `critical: bool = false` (supply-chain critical set marker).
+//!   `critical: bool = false` (supply-chain critical set marker),
+//!   `binary: bool = false` (vendor binary-blob repackaging mode).
 //! - [MAJOR] Selection-driven accessors: `dep_set(selection)` (base
 //!   link+runtime deps plus `add_deps` of enabled options),
 //!   `build_dep_set(selection)` (base build deps plus `add_build_deps`),
@@ -287,6 +288,17 @@ pub struct PackageManifest {
     /// supply-chain critical set, the set whose builds get stricter
     /// provenance/attestation treatment downstream.
     pub critical: bool,
+    /// `[build] binary` (default `false`) — the package repackages a
+    /// vendor-built binary blob (Discord, Steam, …) rather than
+    /// compiling from source. Effects: the recipe's `build` phase is
+    /// optional (extraction and placement happen in `install`), and the
+    /// post-build gate reports DT_NEEDED sonames not provided by any
+    /// declared dependency as warnings instead of hard failures —
+    /// vendor blobs routinely link system libraries the distribution
+    /// packages separately from the blob's declared deps. The
+    /// foreign-glibc floor check stays a hard failure regardless: a
+    /// blob needing a newer glibc than the host genuinely cannot run.
+    pub binary: bool,
     /// `Some` only when the manifest has a `[dkms]` table (§7.8).
     pub dkms: Option<DkmsInfo>,
 }
@@ -394,6 +406,7 @@ impl PackageManifest {
             options,
             compiler_cache: raw.build.compiler_cache,
             critical: raw.build.critical,
+            binary: raw.build.binary,
             dkms,
         })
     }
@@ -694,6 +707,8 @@ struct RawBuild {
     compiler_cache: bool,
     #[serde(default)]
     critical: bool,
+    #[serde(default)]
+    binary: bool,
 }
 
 /// `Default` is hand-written (not derived) because the SPEC default for
@@ -703,6 +718,7 @@ impl Default for RawBuild {
         RawBuild {
             compiler_cache: true,
             critical: false,
+            binary: false,
         }
     }
 }
@@ -1270,6 +1286,7 @@ mod tests {
         let m = PackageManifest::from_toml_str(toml).unwrap();
         assert!(m.compiler_cache, "compiler_cache defaults to true");
         assert!(!m.critical, "critical defaults to false");
+        assert!(!m.binary, "binary defaults to false");
     }
 
     #[test]
@@ -1282,10 +1299,12 @@ mod tests {
             [build]
             compiler_cache = false
             critical = true
+            binary = true
         "#;
         let m = PackageManifest::from_toml_str(toml).unwrap();
         assert!(!m.compiler_cache);
         assert!(m.critical);
+        assert!(m.binary);
     }
 
     // --- v3: selection-driven accessors ---
