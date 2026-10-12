@@ -16,7 +16,7 @@
 //! Usage:
 //!
 //! ```text
-//! mkrepo <repo-dir> <base-url> <pkg>... [--advisory <json-file>]
+//! mkrepo <repo-dir> <base-url> <pkg>... [--advisory <json-file>] [--index-version <n>]
 //! pkg := name:version:commit:critical:src1,src2,...[:noattest]
 //! ```
 //!
@@ -105,7 +105,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 3 {
         eprintln!(
-            "usage: mkrepo <repo-dir> <base-url> <pkg>... [--advisory <json-file>]\n\
+            "usage: mkrepo <repo-dir> <base-url> <pkg>... [--advisory <json-file>] [--index-version <n>]\n\
              pkg := name:version:commit:critical:src1,src2,..."
         );
         std::process::exit(2);
@@ -114,10 +114,16 @@ fn main() {
     let base_url = args[1].trim_end_matches('/').to_string();
     let mut pkgs = Vec::new();
     let mut advisory_file: Option<PathBuf> = None;
+    let mut index_version: u64 = 1;
     let mut it = args[2..].iter();
     while let Some(a) = it.next() {
         if a == "--advisory" {
             advisory_file = it.next().map(PathBuf::from);
+        } else if a == "--index-version" {
+            index_version = it
+                .next()
+                .and_then(|v| v.parse().ok())
+                .expect("--index-version wants a number");
         } else {
             pkgs.push(parse_pkg(a));
         }
@@ -196,14 +202,14 @@ fn main() {
         .collect();
     let index_payload = serde_json::json!({
         "format_version": 1,
-        "index_version": 1,
+        "index_version": index_version,
         "generated_at": now,
         "packages": packages,
     });
     let index_env: SignedDocument<serde_json::Value> =
         serde_json::from_slice(&sign_doc(index_payload, &[&repo_key])).unwrap();
     let ts_payload = serde_json::json!({
-        "index_version": 1,
+        "index_version": index_version,
         "index_sha256": sha256_hex(&canonical_bytes(&index_env.signed).unwrap()),
         "issued_at": now,
         "expires_at": now + 24 * 3600,

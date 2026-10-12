@@ -49,7 +49,7 @@ use pkg_build::{recipe::Recipe, staging};
 use pkg_core::manifest::PackageManifest;
 use pkg_core::paths::at;
 use pkg_core::{
-    AbiTag, Arch, Dependency, Identity, PkgError, PkgResult, Track, Version,
+    AbiTag, Arch, Dependency, Identity, OptTag, PkgError, PkgResult, Track, Version,
     VersionConstraint, VirtualName,
 };
 use pkg_db::queries;
@@ -579,7 +579,13 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
                 });
             }
             None => {
-                direct.push((name.clone(), version.clone()));
+                // Only the packages the user named count as direct —
+                // a freshly pulled-in dependency must NOT become
+                // `installed_explicitly` (§16.6: autoremove depends on
+                // the distinction).
+                if is_direct {
+                    direct.push((name.clone(), version.clone()));
+                }
                 bumped.push(BumpedPackage {
                     name: name.clone(),
                     old_version: version.clone(), // no prior build
@@ -1251,23 +1257,31 @@ fn cmd_undo(
     let roots = store_roots();
 
     // `pkg undo n` restores the PRE-transaction state of transaction n
-    // = generation n−1 (Issue 5 §5.2); default: the most recent
-    // restorable transaction.
-    let target_gen = match n {
-        Some(n) if n >= 1 => n - 1,
+    // (Issue 5 §5.2); a cascade counts as one transaction, so that's
+    // the generation before the cascade's first member. Default: undo
+    // the transaction whose post-state is currently live.
+    let gens = queries::list_generations(&conn)?;
+    let live = staging::live_state_gen(&gens)?;
+    let u = match n {
+        Some(n) if n >= 1 => n,
         Some(n) => {
             return Err(PkgError::Parse(format!(
                 "pkg undo {n}: transaction ids start at 1"
             )))
         }
-        None => {
-            let gens = queries::list_generations(&conn)?;
-            let latest = gens
-                .last()
-                .ok_or_else(|| PkgError::NotFound("no generations yet".into()))?;
-            latest.id - 1
-        }
+        None => live,
     };
+    if u != live {
+        return Err(PkgError::Resolution(format!(
+            "undo is strictly sequential: transaction {u} is not the most recent \
+             one (the live state is generation {live}).\n\
+             Out-of-order undo would require re-solving against historical \
+             constraints the system no longer has; sequential undo steps \
+             through states the system provably occupied.\n\
+             To go back further: run `pkg undo` repeatedly."
+        )));
+    }
+    let target_gen = staging::pre_transaction_gen(&gens, u);
     if target_gen < 1 {
         return Err(PkgError::NotFound(
             "nothing to undo: the target transaction is the first generation".into(),
@@ -1294,18 +1308,16 @@ fn cmd_undo(
         }
     }
 
-    let gens = queries::list_generations(&conn)?;
     let label = gens
         .iter()
-        .find(|g| g.id == target_gen + 1)
+        .find(|g| g.id == u)
         .map(|g| g.command.clone())
         .unwrap_or_else(|| "?".into());
     if !confirm(
         &format!(
-            "Undo transaction {} ({label}) — restore generation {target_gen}?\n\
+            "Undo transaction {u} ({label}) — restore generation {target_gen}?\n\
              This re-points the symlink tree at the retained old store dirs.\n\
-             NOTE: /etc config files are NOT reverted (Issue 5 §5.1).",
-            target_gen + 1
+             NOTE: /etc config files are NOT reverted (Issue 5 §5.1)."
         ),
         assume_yes,
     ) {
@@ -1313,6 +1325,25 @@ fn cmd_undo(
     }
 
     let report = staging::undo_to_generation(&conn, target_gen, &roots)?;
+    // Dependency edges are recorded at activation time (see
+    // staging::activate_built_package); undo reactivates package rows
+    // straight from the generation's package set, so re-derive edges
+    // from the current recipes. Best-effort: a package whose recipe is
+    // gone keeps no edges rather than failing the completed undo.
+    if let Ok(rows) = queries::list_installed_packages(&conn) {
+        for row in &rows {
+            let Ok(recipe) = load_recipe(&row.name) else { continue };
+            let edges = recipe.manifest.dependency_edges();
+            if let Err(e) =
+                queries::record_dependency_edges(&conn, &row.name, row.arch, &edges)
+            {
+                eprintln!(
+                    "pkg: warning: could not restore dependency edges for {}: {e}",
+                    row.name
+                );
+            }
+        }
+    }
     println!(
         "undone: {} reactivated, {} deactivated (recorded as generation {})",
         report.reactivated.len(),
@@ -3095,6 +3126,37 @@ fn cmd_db(action: DbAction) -> PkgResult<()> {
                     return Err(PkgError::Db(format!(
                         "{} store discrepancies under {}",
                         discrepancies.len(),
+                        root.display()
+                    )));
+                }
+                // Content verification: every installed package's store
+                // dir must still match the manifest written when it was
+                // staged (missing/extra files and hash mismatches are
+                // all failures — indistinguishable from tampering).
+                let mut content_failures = 0usize;
+                for pkg in queries::list_installed_packages(&conn)?
+                    .into_iter()
+                    .filter(|p| p.arch == arch)
+                {
+                    let identity = Identity {
+                        name: pkg.name.clone(),
+                        version: pkg.version.clone(),
+                        abi_tag: pkg.abi_tag,
+                        opt_tag: pkg.opt_tag.parse().unwrap_or_else(|_| OptTag::none()),
+                        arch: pkg.arch,
+                    };
+                    let dir = root.join(identity.store_dir_name());
+                    if !dir.is_dir() {
+                        continue; // already reported by scan_store above
+                    }
+                    if let Err(e) = pkg_build::cache::verify_manifest(&dir) {
+                        println!("  store[{arch}]: {}: {e}", pkg.name);
+                        content_failures += 1;
+                    }
+                }
+                if content_failures > 0 {
+                    return Err(PkgError::Db(format!(
+                        "{content_failures} store content mismatch(es) under {}",
                         root.display()
                     )));
                 }

@@ -33,8 +33,8 @@ use std::path::{Path, PathBuf};
 
 use pkg_core::{Arch, Identity, PkgError, PkgResult, Track};
 use pkg_db::queries;
-use pkg_db::schema::{GenerationKind, GenerationPackageRow, SCHEMA_VERSION};
-use rusqlite::Connection;
+use pkg_db::schema::{GenerationKind, GenerationPackageRow, GenerationRow, SCHEMA_VERSION};
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::cache;
 use crate::orchestrator::PlanNode;
@@ -400,6 +400,32 @@ where
         .map_err(|e| PkgError::Db(e.to_string()))?;
     let tx_result = (|| -> PkgResult<i64> {
         for (identity, _) in &deactivate {
+            // `dependencies` references package ids through plain
+            // (non-cascading) foreign keys, so both edge directions
+            // must go before the row itself — otherwise the FK check
+            // rejects the delete.
+            let dep_id: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM packages
+                     WHERE name = ?1 AND version = ?2 AND abi_tag = ?3 AND opt_tag = ?4 AND arch = ?5",
+                    rusqlite::params![
+                        identity.name,
+                        identity.version.to_string(),
+                        identity.abi_tag.to_string(),
+                        identity.opt_tag.to_string(),
+                        identity.arch.to_string(),
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| PkgError::Db(e.to_string()))?;
+            if let Some(id) = dep_id {
+                conn.execute(
+                    "DELETE FROM dependencies WHERE package_id = ?1 OR depends_on_id = ?1",
+                    rusqlite::params![id],
+                )
+                .map_err(|e| PkgError::Db(e.to_string()))?;
+            }
             conn.execute(
                 "DELETE FROM packages
                  WHERE name = ?1 AND version = ?2 AND abi_tag = ?3 AND opt_tag = ?4 AND arch = ?5",
@@ -506,13 +532,20 @@ pub fn activate_built_package(
     let command = command.to_string();
     let cascade = cascade_id.map(str::to_string);
     let command_for_gen = command.clone();
+    // Dependency edges (§9) are part of the same commit as the package
+    // row: removal protection, autoremove, and `pkg why` all read them.
+    let edges = node.recipe.manifest.dependency_edges();
+    let name_for_edges = node.name.clone();
+    let arch_for_edges = node.arch;
     activate_identities(conn, &target, store_roots, move |c| {
-        queries::record_generation(
+        let gen = queries::record_generation(
             c,
             &command_for_gen,
             GenerationKind::Upgrade,
             cascade.as_deref(),
-        )
+        )?;
+        queries::record_dependency_edges(c, &name_for_edges, arch_for_edges, &edges)?;
+        Ok(gen)
     })?;
     Ok(())
 }
@@ -532,14 +565,56 @@ pub struct UndoReport {
     pub notes: Vec<String>,
 }
 
+/// The generation id whose package set is currently live: for a normal
+/// latest generation, itself; after an undo, the pre-transaction state
+/// the undo restored. Undo rows must NOT count as the live transaction
+/// themselves — otherwise a second `pkg undo` could only ever re-apply
+/// what the first one reverted (toggle), never step further back the
+/// way §5.3's sequential chain requires.
+pub fn live_state_gen(gens: &[GenerationRow]) -> PkgResult<i64> {
+    let latest = gens.last().ok_or_else(|| {
+        PkgError::NotFound("no generations recorded; nothing to undo".into())
+    })?;
+    Ok(match (latest.kind, latest.undoes) {
+        (GenerationKind::Undo, Some(undone)) => pre_transaction_gen(gens, undone),
+        _ => latest.id,
+    })
+}
+
+/// First generation of the cascade transaction `t` belongs to — `t`
+/// itself when it has no `cascade_id`. A rebuild cascade is N
+/// per-package transactions sharing one `cascade_id` (§4.2.5); undo
+/// treats them as a single unit.
+fn cascade_first(gens: &[GenerationRow], t: i64) -> i64 {
+    gens.iter()
+        .find(|g| g.id == t)
+        .and_then(|g| g.cascade_id.clone())
+        .map(|c| {
+            gens.iter()
+                .filter(|g| g.cascade_id.as_deref() == Some(c.as_str()))
+                .map(|g| g.id)
+                .min()
+                .unwrap_or(t)
+        })
+        .unwrap_or(t)
+}
+
+/// The generation whose package set was live before transaction `t`
+/// ran — counting `t`'s whole cascade as one transaction. `pkg undo n`
+/// restores exactly this state.
+pub fn pre_transaction_gen(gens: &[GenerationRow], t: i64) -> i64 {
+    cascade_first(gens, t) - 1
+}
+
 /// Restores the package set of generation `gen_id` (`pkg undo`,
 /// Issue 5).
 ///
 /// Hard rules enforced here, in order:
 ///
-/// 1. **Sequential-only (§5.3):** `gen_id` must be the generation
-///    immediately preceding the most recent one. Anything older is
-///    refused with an explanation and the sequential path
+/// 1. **Sequential-only (§5.3):** `gen_id` must be the state
+///    immediately preceding the live one (the live state is computed
+///    through [`live_state_gen`], so undo rows don't toggle). Anything
+///    older is refused with an explanation and the sequential path
 ///    (`pkg undo` × k) named.
 /// 2. **Schema version (§5.8):** a generation recorded under a
 ///    different DB schema version is non-restorable, forever.
@@ -566,15 +641,16 @@ pub fn undo_to_generation(
     })?;
 
     // (1) Sequential-only.
-    if gen_id != latest.id - 1 {
+    let live = live_state_gen(&gens)?;
+    let expected = pre_transaction_gen(&gens, live);
+    if gen_id != expected {
         return Err(PkgError::Resolution(format!(
             "undo is strictly sequential: generation {gen_id} is not the state \
-             immediately preceding the current one (generation {}).\n\
+             immediately preceding the current one (generation {live}).\n\
              Out-of-order undo would require re-solving against historical \
              constraints the system no longer has; sequential undo steps \
              through states the system provably occupied.\n\
-             To go back further: run `pkg undo` repeatedly.",
-            latest.id
+             To go back further: run `pkg undo` repeatedly."
         )));
     }
 

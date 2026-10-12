@@ -426,6 +426,27 @@ impl PackageManifest {
         }
     }
 
+    /// The manifest's concrete dependency edges as `(package name,
+    /// kind)` pairs — what gets recorded into the DB's `dependencies`
+    /// table when the package is activated. Virtuals and OR-groups are
+    /// excluded: they resolve to one concrete provider during
+    /// resolution, which the manifest layer can't know.
+    pub fn dependency_edges(&self) -> Vec<(String, DependencyKind)> {
+        let mut out = Vec::new();
+        for (deps, kind) in [
+            (&self.link_deps, DependencyKind::Link),
+            (&self.runtime_deps, DependencyKind::Runtime),
+            (&self.build_deps, DependencyKind::Build),
+        ] {
+            for d in deps {
+                if let Dependency::Package { name, .. } = d {
+                    out.push((name.clone(), kind));
+                }
+            }
+        }
+        out
+    }
+
     // -----------------------------------------------------------------
     // v3: option selection
     // -----------------------------------------------------------------

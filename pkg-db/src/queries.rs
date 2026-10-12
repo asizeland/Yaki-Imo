@@ -436,6 +436,63 @@ pub fn insert_dependency(
     Ok(conn.last_insert_rowid())
 }
 
+/// The id of the installed row for (`name`, `arch`), if any.
+pub fn package_id_by_name_arch(
+    conn: &Connection,
+    name: &str,
+    arch: Arch,
+) -> PkgResult<Option<i64>> {
+    conn.query_row(
+        "SELECT id FROM packages WHERE name = ?1 AND arch = ?2",
+        params![name, arch.to_string()],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|e| PkgError::Db(e.to_string()))
+}
+
+/// Records the resolved dependency edges of the installed package
+/// (`name`, `arch`), idempotently: `INSERT OR IGNORE` against the
+/// `UNIQUE(package_id, depends_on_id, kind)` constraint, so re-running
+/// after an undo or a re-activation is a no-op, not a conflict.
+///
+/// Entries naming a package with no installed row under the same arch
+/// are skipped — by the time activation records edges the resolver has
+/// already guaranteed the dep is installed, so a missing row means the
+/// edge points outside this arch's world (or races a removal), neither
+/// of which should fail the enclosing transaction. Self-edges are
+/// skipped as meaningless. Returns how many edges the package has.
+///
+/// `kind` is pkg-core's manifest-level `DependencyKind` — the single
+/// source of truth for the vocabulary the `CHECK` constraint enforces
+/// (this crate's own `schema::DependencyKind` mirrors it).
+pub fn record_dependency_edges(
+    conn: &Connection,
+    name: &str,
+    arch: Arch,
+    deps: &[(String, pkg_core::DependencyKind)],
+) -> PkgResult<usize> {
+    let Some(pkg_id) = package_id_by_name_arch(conn, name, arch)? else {
+        return Ok(0);
+    };
+    let mut count = 0;
+    for (dep_name, kind) in deps {
+        if dep_name == name {
+            continue;
+        }
+        let Some(dep_id) = package_id_by_name_arch(conn, dep_name, arch)? else {
+            continue;
+        };
+        conn.execute(
+            "INSERT OR IGNORE INTO dependencies (package_id, depends_on_id, kind) VALUES (?1, ?2, ?3)",
+            params![pkg_id, dep_id, kind.to_string()],
+        )
+        .map_err(|e| PkgError::Db(e.to_string()))?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 /// The dependency kinds that block removal: `Link` and `Runtime`.
 /// `Build` edges are consumed during the build and never block removal
 /// of the thing they built — see `removal_blockers`.
@@ -954,6 +1011,39 @@ pub fn generation_package_set(
         .map_err(|e| PkgError::Db(e.to_string()))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| PkgError::Db(e.to_string()))
+}
+
+/// Every store dir name pinned by ANY recorded generation for `arch`
+/// (Issue 2 §3: generation membership pins store dirs against
+/// `pkg clean`). `scan_store` treats these as recognized residents —
+/// after an undo or upgrade, the superseded dirs are retained for
+/// restorability, not orphaned.
+pub fn generation_pinned_dir_names(
+    conn: &Connection,
+    arch: Arch,
+) -> PkgResult<std::collections::HashSet<String>> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT {GENERATION_PACKAGE_COLUMNS} FROM generation_packages
+             WHERE arch = ?1"
+        ))
+        .map_err(|e| PkgError::Db(e.to_string()))?;
+    let rows = stmt
+        .query_map([arch.to_string()], map_generation_package_row)
+        .map_err(|e| PkgError::Db(e.to_string()))?;
+    let mut out = std::collections::HashSet::new();
+    for row in rows {
+        let row = row.map_err(|e| PkgError::Db(e.to_string()))?;
+        let identity = Identity {
+            name: row.name,
+            version: row.version,
+            abi_tag: row.abi_tag,
+            opt_tag: row.opt_tag.parse().unwrap_or_else(|_| OptTag::none()),
+            arch: row.arch,
+        };
+        out.insert(identity.store_dir_name());
+    }
+    Ok(out)
 }
 
 /// Whether every store dir a generation pins still exists under

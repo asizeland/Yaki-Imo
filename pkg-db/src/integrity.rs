@@ -195,9 +195,15 @@ pub fn scan_store(
         .collect();
     let mut discrepancies = Vec::new();
 
+    // Store dirs retained for restorability (any recorded generation's
+    // package set, Issue 2 §3) are legitimate residents: after an
+    // upgrade or undo, superseded dirs stay until `pkg clean` releases
+    // them. Not orphans — seed the known set with them.
+    let mut known_names: HashSet<String> =
+        crate::queries::generation_pinned_dir_names(conn, arch)?;
+
     // DB -> disk: every installed package (of this arch) should have a
     // directory.
-    let mut known_names: HashSet<String> = HashSet::new();
     for pkg in &installed {
         // Compare against `Identity::store_dir_name`, not
         // `PackageId::to_string`: store directories append `+p<opt_tag>`
