@@ -362,6 +362,29 @@ fn installed_versions(conn: &Connection) -> PkgResult<HashMap<String, Version>> 
         .collect())
 }
 
+/// How many compile jobs this invocation may use: `--jobs` (strongest)
+/// > `[build] jobs` in config.toml > the machine's core count
+/// (Issue 4.2.1's "sched_tokens = ncpu (configurable)").
+fn effective_jobs(cli_jobs: Option<u32>) -> PkgResult<u32> {
+    if cli_jobs == Some(0) {
+        return Err(PkgError::Parse("--jobs must be ≥ 1".into()));
+    }
+    let par = orchestrator::build_parallelism_from_config(&at(orchestrator::CONFIG_PATH))?;
+    Ok(cli_jobs.or(par.jobs).unwrap_or_else(orchestrator::host_parallelism))
+}
+
+/// Applies config-file and command-line parallelism limits to a
+/// scheduler config (`--jobs` / `[build] jobs` → the token pool,
+/// `[build] max_pkg_jobs` → the per-package `make -j` cap).
+fn apply_parallelism(cfg: &mut SchedConfig, cli_jobs: Option<u32>) -> PkgResult<()> {
+    let par = orchestrator::build_parallelism_from_config(&at(orchestrator::CONFIG_PATH))?;
+    if let Some(m) = par.max_pkg_jobs {
+        cfg.max_pkg_jobs = m;
+    }
+    cfg.sched_tokens = effective_jobs(cli_jobs)?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------
 // abi_tag derivation (v14 §5.1 formula)
 // ---------------------------------------------------------------------
@@ -468,7 +491,7 @@ pub fn dispatch(cli: Cli) -> PkgResult<()> {
         }
         Command::Isolate { path, args } => cmd_isolate(&path, args),
         Command::Fetch { name } => cmd_fetch(&name),
-        Command::Build { name, opts, no_cache } => cmd_build(&name, opts, no_cache),
+        Command::Build { name, opts, jobs, no_cache } => cmd_build(&name, opts, jobs, no_cache),
         Command::Key { action } => cmd_key(action),
         Command::Db { action } => cmd_db(action),
         Command::Bootstrap { verify_layout } => cmd_bootstrap(verify_layout),
@@ -668,9 +691,7 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
     // -- dry-run preview (Issue 4.4.1), then stop --------------------
     if flags.dry_run {
         let plan = build_plan(&conn, &cascade_plan, &direct, &selection)?;
-        let cores = std::thread::available_parallelism()
-            .map(|n| n.get() as u32)
-            .unwrap_or(1);
+        let cores = effective_jobs(flags.jobs)?;
         let mut etas = BTreeMap::new();
         for name in plan.nodes.keys() {
             if let Some(eta) = orchestrator::scaled_eta(&conn, name, cores)? {
@@ -748,6 +769,7 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
 
     // -- execute ------------------------------------------------------
     let mut cfg = SchedConfig::with_defaults();
+    apply_parallelism(&mut cfg, flags.jobs)?;
     cfg.command_line = format!("pkg {kind} {}", specs.join(" "));
     cfg.cascade_id = Some(new_cascade_id());
     cfg.store_roots = store_roots();
@@ -2054,6 +2076,7 @@ fn cmd_rebuild(affected: bool, assume_yes: bool) -> PkgResult<()> {
     }
 
     let mut cfg = SchedConfig::with_defaults();
+    apply_parallelism(&mut cfg, None)?;
     cfg.command_line = "pkg rebuild --affected".to_string();
     cfg.cascade_id = Some(new_cascade_id());
     cfg.store_roots = store_roots();
@@ -3045,7 +3068,7 @@ fn cmd_fetch(name: &str) -> PkgResult<()> {
     Ok(())
 }
 
-fn cmd_build(name: &str, opts: Vec<String>, no_cache: bool) -> PkgResult<()> {
+fn cmd_build(name: &str, opts: Vec<String>, jobs: Option<u32>, no_cache: bool) -> PkgResult<()> {
     let selection = parse_opts(&opts)?;
     let _lock = lock_exclusive()?;
     let conn = open_db()?;
@@ -3072,6 +3095,7 @@ fn cmd_build(name: &str, opts: Vec<String>, no_cache: bool) -> PkgResult<()> {
         },
     );
     let mut cfg = SchedConfig::with_defaults();
+    apply_parallelism(&mut cfg, jobs)?;
     cfg.command_line = format!("pkg build {name}");
     cfg.cascade_id = None; // standalone build (Issue 4.2.5)
     cfg.store_roots = store_roots();
@@ -3399,6 +3423,7 @@ fn cmd_cascade(at: Option<String>, execute_pending: bool, ignore_power: bool) ->
             defer_security: None,
             background: false,
             no_repro_check: false,
+            jobs: None,
             assume_yes: true,
         };
         return run_transaction("upgrade", Vec::new(), &flags);

@@ -30,6 +30,13 @@ System config lives in `/etc/pkg/config.toml`. Supported sections:
 [cache]
 compiler = "ccache"
 
+# Build parallelism: total compile jobs across the machine (default:
+# core count) and the per-package `make -j` cap (default: 4).
+# `pkg install --jobs N` overrides `jobs` for one invocation.
+[build]
+jobs = 8
+max_pkg_jobs = 4
+
 # Relocate individual state paths from their spec (FHS-style)
 # defaults. Keys are the default absolute paths; values must be
 # absolute.

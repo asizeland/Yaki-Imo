@@ -47,6 +47,12 @@ pub struct TransactionFlags {
     #[arg(long)]
     pub no_repro_check: bool,
 
+    /// Total compile jobs Yakimo may run at once (scheduler token pool;
+    /// Issue 4.2.1). Overrides `[build] jobs` in config.toml; default
+    /// is the machine's core count.
+    #[arg(long, value_name = "N")]
+    pub jobs: Option<u32>,
+
     /// Assume yes to interactive confirmations (§16.3).
     #[arg(short = 'y', long)]
     pub assume_yes: bool,
@@ -258,6 +264,9 @@ pub enum Command {
         name: String,
         #[arg(long = "opt", value_name = "name=val")]
         opts: Vec<String>,
+        /// Total compile jobs for this build (see `--jobs` on install).
+        #[arg(long, value_name = "N")]
+        jobs: Option<u32>,
         /// Bypass the personal artifact cache (Issue 4.5: "exists for
         /// paranoia").
         #[arg(long)]

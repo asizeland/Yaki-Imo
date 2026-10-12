@@ -323,6 +323,66 @@ pub fn compiler_wrapper_from_config(path: &std::path::Path) -> PkgResult<Option<
     }
 }
 
+// ---------------------------------------------------------------------
+// [build] parallelism config (Issue 4.2.1: "sched_tokens = ncpu
+// (configurable)")
+// ---------------------------------------------------------------------
+
+/// Parallelism limits from the config file's `[build]` section:
+/// `jobs` overrides the total scheduler token pool (how many compile
+/// jobs Yakimo may run across the whole machine at once; default
+/// `ncpu`), `max_pkg_jobs` the cap on one package's `make -j`
+/// (default 4). Both absent → spec defaults.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BuildParallelism {
+    pub jobs: Option<u32>,
+    pub max_pkg_jobs: Option<u32>,
+}
+
+/// Parses `[build] jobs` / `[build] max_pkg_jobs` from config TOML
+/// text. Values must be integers ≥ 1; anything else — a string, a
+/// negative, zero — is a hard error, per §4.3's "unknown config is
+/// loud, never silently ignored" philosophy.
+pub fn parse_build_parallelism(config_text: &str) -> PkgResult<BuildParallelism> {
+    let value: toml::Value =
+        toml::from_str(config_text).map_err(|e| PkgError::Parse(format!("config TOML: {e}")))?;
+    let read = |key: &str| -> PkgResult<Option<u32>> {
+        let Some(v) = value.get("build").and_then(|b| b.get(key)) else {
+            return Ok(None);
+        };
+        let Some(n) = v.as_integer() else {
+            return Err(PkgError::Parse(format!(
+                "[build] {key} must be an integer ≥ 1"
+            )));
+        };
+        if n < 1 {
+            return Err(PkgError::Parse(format!("[build] {key} must be ≥ 1, got {n}")));
+        }
+        Ok(Some(n as u32))
+    };
+    Ok(BuildParallelism {
+        jobs: read("jobs")?,
+        max_pkg_jobs: read("max_pkg_jobs")?,
+    })
+}
+
+/// Reads `[build]` parallelism from the config file at `path`. A
+/// missing file means spec defaults; an unreadable or invalid file is
+/// a hard error.
+pub fn build_parallelism_from_config(path: &std::path::Path) -> PkgResult<BuildParallelism> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => parse_build_parallelism(&text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BuildParallelism::default()),
+        Err(e) => Err(PkgError::Io(e)),
+    }
+}
+
+/// The machine's hardware parallelism — the spec default for
+/// `sched_tokens` when neither config nor `--jobs` speaks.
+pub fn host_parallelism() -> u32 {
+    available_parallelism()
+}
+
 /// What happened to one node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeOutcome {
@@ -1420,6 +1480,31 @@ mod tests {
         let mut pool = TokenPool::new(4);
         pool.release(100); // bug-tolerant clamp
         assert_eq!(pool.free(), 4);
+    }
+
+    #[test]
+    fn build_parallelism_absent_means_defaults() {
+        assert_eq!(parse_build_parallelism("").unwrap(), BuildParallelism::default());
+        assert_eq!(
+            parse_build_parallelism("[cache]\ncompiler = \"off\"\n").unwrap(),
+            BuildParallelism::default()
+        );
+    }
+
+    #[test]
+    fn build_parallelism_reads_jobs_and_max_pkg_jobs() {
+        let parsed =
+            parse_build_parallelism("[build]\njobs = 8\nmax_pkg_jobs = 2\n").unwrap();
+        assert_eq!(parsed.jobs, Some(8));
+        assert_eq!(parsed.max_pkg_jobs, Some(2));
+    }
+
+    #[test]
+    fn build_parallelism_rejects_bad_values_loudly() {
+        assert!(parse_build_parallelism("[build]\njobs = 0\n").is_err());
+        assert!(parse_build_parallelism("[build]\njobs = -2\n").is_err());
+        assert!(parse_build_parallelism("[build]\njobs = \"all\"\n").is_err());
+        assert!(parse_build_parallelism("[build]\nmax_pkg_jobs = 0\n").is_err());
     }
 
     #[test]

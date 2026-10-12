@@ -239,5 +239,31 @@ fi
 "$PKG" db check >/dev/null 2>&1 || fail "final db check"
 pass "final db check clean"
 
+# ---------------------------------------------------------------
+# 7. Parallelism control: [build] jobs in config.toml + --jobs.
+# ---------------------------------------------------------------
+printf '[build]\njobs = 2\nmax_pkg_jobs = 2\n' > "$ROOT/etc/pkg/config.toml"
+# Reinstall the default (quiet) variant — its store dir was pruned by
+# --garbage, so this also exercises rebuild-after-GC.
+"$PKG" install -y greeter --opt loud=0 >/dev/null 2>&1 || fail "install with [build] jobs config"
+[ "$("$ROOT/usr/bin/greeter")" = "greeting from pkg e2e" ] || fail "quiet greeter after jobs config"
+pass "[build] jobs/max_pkg_jobs config accepted"
+
+"$PKG" install -y greeter --opt loud=1 --jobs 1 >/dev/null 2>&1 || fail "install with --jobs 1"
+[ "$("$ROOT/usr/bin/greeter")" = "GREETING FROM PKG E2E" ] || fail "loud greeter after --jobs 1"
+pass "--jobs flag overrides config"
+
+printf '[build]\njobs = 0\n' > "$ROOT/etc/pkg/config.toml"
+if "$PKG" install -y greeter >/dev/null 2>"$E2E/jobs.err"; then
+    fail "jobs = 0 accepted"
+else
+    grep -q "jobs" "$E2E/jobs.err" \
+        && pass "invalid [build] jobs is a hard error" \
+        || fail "jobs=0 error should name the setting"
+fi
+rm -f "$ROOT/etc/pkg/config.toml"
+"$PKG" db check >/dev/null 2>&1 || fail "db check after jobs tests"
+pass "db check clean after jobs tests"
+
 echo
 echo "OPTIONS E2E PASSED"
