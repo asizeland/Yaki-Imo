@@ -66,6 +66,7 @@ use crate::cli::{
     TransactionFlags,
 };
 use crate::preview::{format_dry_run_preview, DryRunPlan};
+use crate::options;
 
 // ---------------------------------------------------------------------
 // Paths & small helpers
@@ -524,6 +525,25 @@ fn cmd_upgrade(specs: Vec<String>, all: bool, flags: TransactionFlags) -> PkgRes
 /// Shared install/upgrade flow: resolve → cascade → preview or build.
 fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> PkgResult<()> {
     let selection = parse_opts(&flags.opts)?;
+    // Split `name[opt:key=val]` brackets off the specs (§4.3 CLI
+    // pseudo-dependency surface); the plain specs drive resolution,
+    // the bracketed requests join the per-command option tier.
+    let mut clean_specs = Vec::with_capacity(specs.len());
+    let mut spec_reqs = Vec::new();
+    for spec in &specs {
+        let (plain, reqs) = options::split_opt_bracket(spec)?;
+        let pname = parse_spec(&plain).0;
+        for (key, value) in reqs {
+            spec_reqs.push(options::OptionRequest {
+                package: Some(pname.clone()),
+                key,
+                value,
+                requester: spec.clone(),
+            });
+        }
+        clean_specs.push(plain);
+    }
+    let specs = clean_specs;
     let _lock = lock_exclusive()?;
     let conn = open_db()?;
     // §10.5.6/§16.4: unacknowledged supply-chain hard findings block
@@ -557,13 +577,6 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
                 .map_err(|_| PkgError::Parse(format!("bad version in {spec:?}")))?,
             None => recipe.manifest.version.clone(),
         };
-        // The selection is transaction-wide: this root sees only the
-        // keys it declares (transaction-level typo protection runs
-        // after resolution, once every selected recipe is known).
-        let _dep_set = recipe
-            .manifest
-            .dep_set(&recipe.manifest.filter_selection(&selection))
-            .map_err(PkgError::from)?;
         let profile_constraints = active_profile_constraints(&pins);
         match graph.resolve_with_constraints(
             &name,
@@ -578,32 +591,29 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
         }
     }
 
-    // Transaction-level option validation (Issue 1 §5): the selection
-    // applies across the whole plan, so a key NO selected package
-    // declares is a typo and a hard error; per-manifest accessors then
-    // receive their filtered view (filter_selection).
-    if !selection.is_empty() {
-        let mut declared = std::collections::BTreeSet::new();
-        for name in selected.keys() {
-            if let Ok(recipe) = load_recipe(name) {
-                declared.extend(recipe.manifest.options.keys().cloned());
-            }
-        }
-        for key in selection.keys() {
-            if !declared.contains(key) {
-                return Err(PkgError::Parse(format!(
-                    "unknown option in selection: '{key}' \
-                     (no package in this transaction declares it)"
-                )));
-            }
-        }
-    }
+    // Effective per-package option selections (§4.3): --opt flags and
+    // spec brackets (strongest) over /etc/pkg/options.toml per-package
+    // entries over its [defaults]. Assembly is where the loudness rules
+    // live: undeclared keys, option-less packages, and per-command
+    // widen-else-conflict are hard errors naming the offender.
+    let option_config = options::option_config_from(&at(options::OPTIONS_PATH))?;
+    let selected_names: Vec<String> = selected.keys().cloned().collect();
+    let manifest_lookup = |n: &str| load_recipe(n).ok().map(|r| r.manifest);
+    let selections = options::effective_selections(
+        &selected_names,
+        &manifest_lookup,
+        &option_config,
+        &selection,
+        &spec_reqs,
+    )?;
     // §7.6.4(d) pre-build gate: a package requiring glibc ≥ the
     // staged-pending target is rejected here, not after a multi-hour
     // build produced binaries the running libc can't execute.
     for (name, version) in &selected {
         let recipe = load_recipe(name)?;
-        if let Some(floor) = glibc_floor_of(&recipe.manifest, &selection)? {
+        if let Some(floor) =
+            glibc_floor_of(&recipe.manifest, options::selection_of(&selections, name))?
+        {
             enforce_glibc_pending_gate(&conn, name, version, &floor)?;
         }
     }
@@ -628,7 +638,7 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
                 let recipe = load_recipe(name)?;
                 let opt_tag = recipe
                     .manifest
-                    .opt_tag(&recipe.manifest.filter_selection(&selection))
+                    .opt_tag(options::selection_of(&selections, name))
                     .map_err(PkgError::from)?;
                 if installed_identities.contains(&(
                     name.clone(),
@@ -690,7 +700,7 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
 
     // -- dry-run preview (Issue 4.4.1), then stop --------------------
     if flags.dry_run {
-        let plan = build_plan(&conn, &cascade_plan, &direct, &selection)?;
+        let plan = build_plan(&conn, &cascade_plan, &direct, &selections)?;
         let cores = effective_jobs(flags.jobs)?;
         let mut etas = BTreeMap::new();
         for name in plan.nodes.keys() {
@@ -744,9 +754,9 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
         // generation exactly as if freshly installed (Issue 4.4.2) —
         // recorded as state for `pkg clean` / `pkg cascade`.
         record_pending_deferral(&cascade_names)?;
-        retain_requested(build_plan(&conn, &cascade_plan, &direct, &selection)?, &requested)
+        retain_requested(build_plan(&conn, &cascade_plan, &direct, &selections)?, &requested)
     } else {
-        build_plan(&conn, &cascade_plan, &direct, &selection)?
+        build_plan(&conn, &cascade_plan, &direct, &selections)?
     };
 
     if effective_plan.nodes.is_empty() {
@@ -796,7 +806,7 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
     if effective_plan.nodes.contains_key("glibc") {
         if let (Some(old), Some(new)) = (installed.get("glibc"), selected.get("glibc")) {
             if old != new {
-                handle_glibc_update(&conn, &selection, old, new, flags.assume_yes)?;
+                handle_glibc_update(&conn, options::selection_of(&selections, "glibc"), old, new, flags.assume_yes)?;
             }
         }
     }
@@ -1059,11 +1069,14 @@ fn enforce_supply_chain_gate(conn: &Connection) -> PkgResult<()> {
 
 /// Assembles the executor's plan from the cascade result: one node per
 /// package to build, with recipes, identities, and in-cascade edges.
+/// `selections` is the per-package effective option map from
+/// [`options::effective_selections`]; a package with no entry builds at
+/// its all-default selection.
 fn build_plan(
     conn: &Connection,
     cascade_plan: &cascade::CascadePlan,
     direct: &[(String, Version)],
-    selection: &BTreeMap<String, bool>,
+    selections: &HashMap<String, BTreeMap<String, bool>>,
 ) -> PkgResult<BuildPlan> {
     let mut plan = BuildPlan::default();
     let mut all: BTreeMap<String, (Version, BTreeSet<String>)> = BTreeMap::new();
@@ -1081,6 +1094,7 @@ fn build_plan(
     let plan_names: BTreeSet<String> = all.keys().cloned().collect();
     for (name, (version, deps)) in all {
         let recipe = load_recipe(&name)?;
+        let selection = options::selection_of(selections, &name);
         let abi_tag = compute_abi_tag(conn, &recipe.manifest, selection)?;
         let filtered = recipe.manifest.filter_selection(selection);
         let opt_tag = recipe.manifest.opt_tag(&filtered).map_err(PkgError::from)?;
@@ -2041,15 +2055,27 @@ fn cmd_rebuild(affected: bool, assume_yes: bool) -> PkgResult<()> {
     }
 
     let mut plan = BuildPlan::default();
-    let selection = BTreeMap::new();
+    // Persisted option config applies to rebuilds too (§4.3: it is the
+    // system's standing selection, --opt being the per-command tier).
+    let option_config = options::option_config_from(&at(options::OPTIONS_PATH))?;
+    let selected_vec: Vec<String> = selected.keys().cloned().collect();
+    let manifest_lookup = |n: &str| load_recipe(n).ok().map(|r| r.manifest);
+    let selections = options::effective_selections(
+        &selected_vec,
+        &manifest_lookup,
+        &option_config,
+        &BTreeMap::new(),
+        &[],
+    )?;
     let selected_names: BTreeSet<String> = selected.keys().cloned().collect();
     for (name, version) in &selected {
         let recipe = load_recipe(name)?;
-        let abi_tag = compute_abi_tag(&conn, &recipe.manifest, &selection)?;
-        let opt_tag = recipe.manifest.opt_tag(&selection).map_err(PkgError::from)?;
+        let selection = options::selection_of(&selections, name);
+        let abi_tag = compute_abi_tag(&conn, &recipe.manifest, selection)?;
+        let opt_tag = recipe.manifest.opt_tag(selection).map_err(PkgError::from)?;
         let deps_in_cascade = recipe
             .manifest
-            .dep_set(&selection)
+            .dep_set(selection)
             .map_err(PkgError::from)?
             .into_iter()
             .filter_map(|d| match d {
@@ -3069,10 +3095,23 @@ fn cmd_fetch(name: &str) -> PkgResult<()> {
 }
 
 fn cmd_build(name: &str, opts: Vec<String>, jobs: Option<u32>, no_cache: bool) -> PkgResult<()> {
-    let selection = parse_opts(&opts)?;
+    let cli_opts = parse_opts(&opts)?;
     let _lock = lock_exclusive()?;
     let conn = open_db()?;
     let recipe = load_recipe(name)?;
+    // Single package, so the effective selection is just config under
+    // --opt; an --opt key the recipe doesn't declare is a hard error
+    // here (effective_selections' typo protection).
+    let option_config = options::option_config_from(&at(options::OPTIONS_PATH))?;
+    let manifest_lookup = |n: &str| load_recipe(n).ok().map(|r| r.manifest);
+    let selections = options::effective_selections(
+        &[name.to_string()],
+        &manifest_lookup,
+        &option_config,
+        &cli_opts,
+        &[],
+    )?;
+    let selection = options::selection_of(&selections, name).clone();
     let abi_tag = compute_abi_tag(&conn, &recipe.manifest, &selection)?;
     let opt_tag = recipe.manifest.opt_tag(&selection).map_err(PkgError::from)?;
 

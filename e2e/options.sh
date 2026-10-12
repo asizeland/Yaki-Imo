@@ -240,7 +240,53 @@ fi
 pass "final db check clean"
 
 # ---------------------------------------------------------------
-# 7. Parallelism control: [build] jobs in config.toml + --jobs.
+# 7. Persisted selections: /etc/pkg/options.toml + spec brackets.
+# ---------------------------------------------------------------
+# Back to quiet first — via the name[opt:key=val] spec bracket.
+"$PKG" install -y 'greeter[opt:loud=0]' >/dev/null 2>&1 || fail "spec bracket install"
+[ "$("$ROOT/usr/bin/greeter")" = "greeting from pkg e2e" ] || fail "bracket selection applied"
+pass "name[opt:key=val] spec bracket applies"
+
+# A persisted per-package entry drives plain installs.
+printf '[package.greeter]\nloud = true\n' > "$ROOT/etc/pkg/options.toml"
+"$PKG" install -y greeter >/dev/null 2>&1 || fail "install honoring options.toml"
+[ "$("$ROOT/usr/bin/greeter")" = "GREETING FROM PKG E2E" ] || fail "options.toml selection applied"
+pass "options.toml [package] entry drives plain installs"
+
+# --opt overrides the file for one transaction...
+"$PKG" install -y greeter --opt loud=0 >/dev/null 2>&1 || fail "--opt override of options.toml"
+[ "$("$ROOT/usr/bin/greeter")" = "greeting from pkg e2e" ] || fail "--opt beats options.toml"
+pass "--opt overrides options.toml for the transaction"
+
+# ...and the file wins again next time (the override is not persisted).
+"$PKG" install -y greeter >/dev/null 2>&1 || fail "reinstall honors options.toml again"
+[ "$("$ROOT/usr/bin/greeter")" = "GREETING FROM PKG E2E" ] || fail "options.toml re-applies"
+pass "options.toml re-applies on the next transaction"
+
+# Two per-command requests assigning the same key differently conflict.
+if "$PKG" install -y 'greeter[opt:loud=1]' --opt loud=0 >/dev/null 2>"$E2E/conflict.err"; then
+    fail "conflicting per-command requests accepted"
+else
+    grep -q "option conflict" "$E2E/conflict.err" && grep -q -- "--opt" "$E2E/conflict.err" \
+        && pass "per-command conflict names both requesters" \
+        || fail "conflict error should name requesters"
+fi
+
+# An undeclared option in the file is a hard error, not a warning.
+printf '[package.greeter]\nwayland = true\n' > "$ROOT/etc/pkg/options.toml"
+if "$PKG" install -y greeter >/dev/null 2>"$E2E/undeclared.err"; then
+    fail "undeclared option in options.toml accepted"
+else
+    grep -q "undeclared option" "$E2E/undeclared.err" \
+        && pass "undeclared options.toml key is a hard error" \
+        || fail "undeclared-key error wording"
+fi
+rm -f "$ROOT/etc/pkg/options.toml"
+"$PKG" db check >/dev/null 2>&1 || fail "db check after options.toml tests"
+pass "db check clean after options.toml tests"
+
+# ---------------------------------------------------------------
+# 8. Parallelism control: [build] jobs in config.toml + --jobs.
 # ---------------------------------------------------------------
 printf '[build]\njobs = 2\nmax_pkg_jobs = 2\n' > "$ROOT/etc/pkg/config.toml"
 # Reinstall the default (quiet) variant — its store dir was pruned by

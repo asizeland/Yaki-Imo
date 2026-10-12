@@ -218,7 +218,9 @@ pub fn run_recipe(
 ) -> PkgResult<BuildOutcome> {
     let started = unix_now();
     let clock = Instant::now();
-    let opt_tag = recipe.manifest.opt_tag(&ctx.selection)?;
+    let opt_tag = recipe
+        .manifest
+        .opt_tag(&recipe.manifest.filter_selection(&ctx.selection))?;
 
     let outcome = run_recipe_phases(recipe, ctx);
     let duration = clock.elapsed();

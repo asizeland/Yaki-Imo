@@ -710,6 +710,7 @@ dependencies = [
  "pkg-scanner",
  "rusqlite",
  "sha2",
+ "toml",
 ]
 
 [[package]]
