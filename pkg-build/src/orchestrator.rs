@@ -1199,12 +1199,15 @@ fn record_build_metadata_inner(
 
     // Every row of a package carries the same aggregate hash — the
     // cascade compares interfaces per package, not per soname (see
-    // queries::link_interface_hash).
+    // queries::link_interface_hash). The header fingerprint (§7.7.2's
+    // public-header-fingerprint) is measured from the shipped tree and
+    // feeds both the per-row column and the aggregate.
     let interfaces = collect_link_interfaces(store_dir).unwrap_or_default();
+    let header_fp = pkg_scanner::public_header_fingerprint(store_dir).unwrap_or_default();
     let aggregate = if interfaces.is_empty() {
         String::new()
     } else {
-        pkg_scanner::link_interface_hash(&interfaces, "")
+        pkg_scanner::link_interface_hash(&interfaces, &header_fp)
     };
     for li in &interfaces {
         queries::insert_link_interface(
@@ -1213,7 +1216,7 @@ fn record_build_metadata_inner(
                 package_id: row.id,
                 soname: li.soname.clone(),
                 symbol_versions: li.symbol_versions.iter().cloned().collect::<Vec<_>>().join("\n"),
-                header_fingerprint: String::new(),
+                header_fingerprint: header_fp.clone(),
                 link_interface_hash: aggregate.clone(),
             },
         )?;
@@ -1245,7 +1248,11 @@ fn record_build_metadata_inner(
             package_id: row.id,
             recipe_commit: node.recipe.recipe_commit.clone(),
             source_hashes,
-            index_version: 0,
+            index_version: pkg_repo::sync::cached_index_version(&cfg.repo_cache)
+                .ok()
+                .flatten()
+                .map(|v| v as i64)
+                .unwrap_or(0),
             attestations,
             build_host: format!("{hostname} (linux {osrelease})"),
             builder_version: format!(

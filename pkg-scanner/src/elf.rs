@@ -201,6 +201,55 @@ pub fn link_interface_hash(interfaces: &[LinkInterface], header_fp: &str) -> Str
     digest[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The public-header fingerprint of a built tree (§7.7.2's
+/// `public-header-fingerprint`): a SHA-256 over the sorted
+/// `(relative-path, content-sha256)` pairs of every regular file under
+/// `<tree>/usr/include`. `None` when the tree ships no public headers
+/// — the fingerprint column then records the empty string and the
+/// interface hash is computed with `header_fp = ""`.
+///
+/// This fingerprints the headers a package *ships* — what its
+/// consumers will compile against — so a header-only change (no
+/// soname or symbol change) still perturbs the link interface and
+/// triggers the cascade for dependents.
+pub fn public_header_fingerprint(tree: &Path) -> Option<String> {
+    let include_root = tree.join("usr/include");
+    if !include_root.is_dir() {
+        return None;
+    }
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut stack = vec![include_root.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).ok()? {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            let ft = entry.file_type().ok()?;
+            if ft.is_dir() {
+                stack.push(path);
+            } else if ft.is_file() {
+                let rel = path.strip_prefix(&include_root).ok()?.to_string_lossy().into_owned();
+                let bytes = std::fs::read(&path).ok()?;
+                let digest = sha2::Sha256::digest(&bytes);
+                let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+                entries.push((rel, hex));
+            }
+        }
+    }
+    if entries.is_empty() {
+        return None;
+    }
+    entries.sort();
+    let mut canonical = String::new();
+    for (rel, hex) in &entries {
+        canonical.push_str(rel);
+        canonical.push(':');
+        canonical.push_str(hex);
+        canonical.push('\n');
+    }
+    let digest = sha2::Sha256::digest(canonical.as_bytes());
+    Some(digest.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 /// Which of `archive_paths` the artifact at `artifact` statically
 /// consumed, detected by symbol-table comparison (v2).
 ///
@@ -414,6 +463,30 @@ mod tests {
             soname: soname.to_string(),
             symbol_versions: versions.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn public_header_fingerprint_covers_shipped_headers() {
+        let dir = tempdir().unwrap();
+        let inc = dir.path().join("usr/include/foo");
+        std::fs::create_dir_all(&inc).unwrap();
+        std::fs::write(inc.join("foo.h"), b"int foo_answer(void);\n").unwrap();
+        std::fs::write(dir.path().join("usr/include/z.h"), b"#define Z 1\n").unwrap();
+        let fp1 = public_header_fingerprint(dir.path()).unwrap();
+        assert_eq!(fp1.len(), 64, "full sha256 hex: {fp1}");
+
+        // Content changes perturb it; layout-identical copies agree.
+        let fp2 = public_header_fingerprint(dir.path()).unwrap();
+        assert_eq!(fp1, fp2, "deterministic over the same tree");
+        std::fs::write(inc.join("foo.h"), b"int foo_answer(void); /* v2 */\n").unwrap();
+        let fp3 = public_header_fingerprint(dir.path()).unwrap();
+        assert_ne!(fp1, fp3, "header content change must perturb the fingerprint");
+
+        // No /usr/include (or an empty one) → None.
+        let empty = tempdir().unwrap();
+        assert!(public_header_fingerprint(empty.path()).is_none());
+        std::fs::create_dir_all(empty.path().join("usr/include")).unwrap();
+        assert!(public_header_fingerprint(empty.path()).is_none());
     }
 
     #[test]

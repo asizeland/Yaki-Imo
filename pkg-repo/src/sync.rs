@@ -144,6 +144,13 @@ fn read_meta(cache_dir: &Path) -> PkgResult<Option<CacheMeta>> {
     }
 }
 
+/// The index version of the currently cached (verified) index, for
+/// provenance recording (§9.2.1: `index_version` is the signed index
+/// the recipe pin came from). `None` when never synced.
+pub fn cached_index_version(cache_dir: &Path) -> PkgResult<Option<u64>> {
+    Ok(read_meta(cache_dir)?.map(|m| m.index_version))
+}
+
 /// HTTP GET with a size cap, returning the body. Any failure (DNS,
 /// TLS, HTTP status, read) is an error string so mirror fallback can
 /// record it and move on — no failure of one mirror is fatal.

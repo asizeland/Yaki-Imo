@@ -65,9 +65,15 @@ mkdir -p "$SRC/libfoo-1.0" "$SRC/hello-1.0"
 cat > "$SRC/libfoo-1.0/foo.c" <<'EOF'
 int foo_answer(void) { return 42; }
 EOF
+cat > "$SRC/libfoo-1.0/foo.h" <<'EOF'
+#ifndef FOO_H
+#define FOO_H
+int foo_answer(void);
+#endif
+EOF
 cat > "$SRC/hello-1.0/hello.c" <<'EOF'
 #include <stdio.h>
-extern int foo_answer(void);
+#include <foo.h>
 int main(void) { printf("hello from pkg e2e: %d\n", foo_answer()); return 0; }
 EOF
 tar -czf "$SRC/libfoo-1.0.tar.gz" -C "$SRC" libfoo-1.0
@@ -138,8 +144,9 @@ cd libfoo-1.0
 cc -O2 -fPIC -shared -Wl,-soname,libfoo.so.1 -o libfoo.so.1.0 foo.c
 EOF
 cat > "$ROOT/var/lib/pkg/recipes/libfoo/install" <<'EOF'
-mkdir -p "$PKGDIR/usr/lib"
+mkdir -p "$PKGDIR/usr/lib" "$PKGDIR/usr/include"
 cp libfoo-1.0/libfoo.so.1.0 "$PKGDIR/usr/lib/"
+cp libfoo-1.0/foo.h "$PKGDIR/usr/include/"
 ln -s libfoo.so.1.0 "$PKGDIR/usr/lib/libfoo.so.1"
 ln -s libfoo.so.1.0 "$PKGDIR/usr/lib/libfoo.so"
 EOF
@@ -160,7 +167,7 @@ cd hello-1.0
 # (PKG_ROOT-prefixed on this host).
 LIBFOO=\$(echo $ROOT/usr/lib/pkg/.store/libfoo-*/usr/lib)
 echo "linking against: \$LIBFOO"
-cc -O2 -o hello hello.c -L "\$LIBFOO" -lfoo -Wl,-rpath,/usr/lib
+cc -O2 -o hello hello.c -I "\$LIBFOO/../include" -L "\$LIBFOO" -lfoo -Wl,-rpath,/usr/lib
 EOF
 cat > "$ROOT/var/lib/pkg/recipes/hello/install" <<'EOF'
 mkdir -p "$PKGDIR/usr/bin"
@@ -297,6 +304,18 @@ pass "[paths] override relocated the artifact cache"
 [ -e "$ROOT/usr/lib/libfoo.so.1.0" ] || fail "libfoo activated symlink"
 pass "libfoo activated into live tree"
 
+# Provenance honesty: libfoo ships a public header, so its link-interface
+# row must carry a real header fingerprint, and provenance must record
+# the repo index version the build resolved against.
+hfp=$(sqlite3 "$ROOT/var/lib/pkg/db/pkg.sqlite" \
+    "SELECT li.header_fingerprint FROM link_interface li JOIN packages p ON p.id=li.package_id WHERE p.name='libfoo'")
+[ -n "$hfp" ] || fail "libfoo header_fingerprint should be recorded"
+pass "libfoo header_fingerprint recorded ($hfp)"
+idxv=$(sqlite3 "$ROOT/var/lib/pkg/db/pkg.sqlite" \
+    "SELECT pv.index_version FROM provenance pv JOIN packages p ON p.id=pv.package_id WHERE p.name='libfoo'")
+[ "$idxv" = "1" ] || { echo "index_version: $idxv" >&2; fail "provenance index_version"; }
+pass "provenance records index_version = 1"
+
 "$PKG" install -y hello >/dev/null 2>&1 || fail "pkg install hello"
 pass "pkg install hello (dependency resolved)"
 out=$(LD_LIBRARY_PATH="$ROOT/usr/lib" "$ROOT/usr/bin/hello") \
@@ -321,6 +340,13 @@ mkdir -p "$SRC/libfoo-1.1"
 cat > "$SRC/libfoo-1.1/foo.c" <<'EOF'
 int foo_answer(void) { return 43; }
 int foo_extra(void) { return 1; }
+EOF
+cat > "$SRC/libfoo-1.1/foo.h" <<'EOF'
+#ifndef FOO_H
+#define FOO_H
+int foo_answer(void);
+int foo_extra(void);
+#endif
 EOF
 tar -czf "$SRC/libfoo-1.1.tar.gz" -C "$SRC" libfoo-1.1
 
