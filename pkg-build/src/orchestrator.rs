@@ -771,7 +771,7 @@ fn spawn_worker(
     recipe_manifest: &Arc<pkg_repo::RecipeManifest>,
 ) {
     let node = plan.nodes.get(&name).expect("node exists").clone();
-    let gate_deps = gate_deps_for(conn, &node, cfg);
+    let gate_deps = gate_deps_for(conn, plan, &node, cfg);
     let cfg = cfg.clone();
     let tx = tx.clone();
     let recipe_manifest = recipe_manifest.clone();
@@ -784,12 +784,19 @@ fn spawn_worker(
 /// Resolves a node's declared *runtime* deps to the installed store
 /// dirs the post-build gate scans for provided sonames
 /// (`pkg_scanner::DeclaredDep`). A dep with no installed row — one
-/// being built earlier in this same cascade — is skipped: `gate_build`
-/// tolerates a partial view (its undeclared-soname check simply can't
-/// attribute sonames provided by not-yet-installed deps). Runs on the
-/// scheduler thread (DB access); failures degrade to a partial/empty
-/// view with a warning rather than failing the build.
-fn gate_deps_for(conn: &Connection, node: &PlanNode, cfg: &SchedConfig) -> Vec<DeclaredDep> {
+/// being built earlier in this same cascade — is resolved through the
+/// plan instead: the node's identity is fixed at plan time, so its
+/// store dir is predictable, and the readiness rule (a node spawns
+/// only after its in-cascade deps are *activated*) guarantees the dir
+/// exists by the time this build runs. Runs on the scheduler thread
+/// (DB access); failures degrade to a partial/empty view with a
+/// warning rather than failing the build.
+fn gate_deps_for(
+    conn: &Connection,
+    plan: &BuildPlan,
+    node: &PlanNode,
+    cfg: &SchedConfig,
+) -> Vec<DeclaredDep> {
     let installed = match queries::list_installed_packages(conn) {
         Ok(rows) => rows,
         Err(e) => {
@@ -797,33 +804,46 @@ fn gate_deps_for(conn: &Connection, node: &PlanNode, cfg: &SchedConfig) -> Vec<D
             return Vec::new();
         }
     };
+    let Ok(root) = staging::store_root_for(node.arch, &cfg.store_roots) else {
+        return Vec::new();
+    };
     let mut deps = Vec::new();
     for dep in &node.recipe.manifest.runtime_deps {
         let pkg_core::Dependency::Package { name, .. } = dep else {
             continue; // virtuals/OR-groups have no single concrete store dir
         };
-        let Some(row) = installed
+        let identity = match installed
             .iter()
             .find(|r| &r.name == name && r.arch == node.arch)
-        else {
-            continue; // being built in this cascade — see fn docs
-        };
-        let Ok(opt_tag) = row.opt_tag.parse::<OptTag>() else {
-            eprintln!(
-                "pkg: warning: bad opt_tag on installed row for {}; skipping it for the gate",
-                row.name
-            );
-            continue;
-        };
-        let identity = pkg_core::Identity {
-            name: row.name.clone(),
-            version: row.version.clone(),
-            abi_tag: row.abi_tag,
-            opt_tag,
-            arch: row.arch,
-        };
-        let Ok(root) = staging::store_root_for(node.arch, &cfg.store_roots) else {
-            continue;
+        {
+            Some(row) => {
+                let Ok(opt_tag) = row.opt_tag.parse::<OptTag>() else {
+                    eprintln!(
+                        "pkg: warning: bad opt_tag on installed row for {}; skipping it for the gate",
+                        row.name
+                    );
+                    continue;
+                };
+                pkg_core::Identity {
+                    name: row.name.clone(),
+                    version: row.version.clone(),
+                    abi_tag: row.abi_tag,
+                    opt_tag,
+                    arch: row.arch,
+                }
+            }
+            None => match plan.nodes.get(name) {
+                // Built earlier in this same cascade — activated before
+                // this node spawned, so the store dir exists.
+                Some(dep_node) => pkg_core::Identity {
+                    name: dep_node.name.clone(),
+                    version: dep_node.version.clone(),
+                    abi_tag: dep_node.abi_tag,
+                    opt_tag: dep_node.opt_tag.clone(),
+                    arch: dep_node.arch,
+                },
+                None => continue,
+            },
         };
         deps.push(DeclaredDep {
             name: name.clone(),

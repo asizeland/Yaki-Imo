@@ -976,10 +976,29 @@ fn build_plan(
     // interface against what its dependents consume TODAY — the
     // installed (pre-upgrade) package's recorded interface hash (§7.7.2).
     let installed = queries::list_installed_packages(conn)?;
+    let plan_names: BTreeSet<String> = all.keys().cloned().collect();
     for (name, (version, deps)) in all {
         let recipe = load_recipe(&name)?;
         let abi_tag = compute_abi_tag(conn, &recipe.manifest, selection)?;
         let opt_tag = recipe.manifest.opt_tag(selection).map_err(PkgError::from)?;
+        // Cascade edges only exist for packages with an installed row
+        // (they come from reverse_dependents). For fresh installs —
+        // nothing in the plan is installed yet — derive the same
+        // ordering edges from the recipe's declared deps, so a
+        // dependency is built and activated before its dependent's
+        // sandbox tries to bind its store dir.
+        let mut deps = deps;
+        for d in recipe
+            .manifest
+            .dep_set(selection)
+            .map_err(PkgError::from)?
+        {
+            if let Dependency::Package { name: dn, .. } = d {
+                if dn != name && plan_names.contains(&dn) {
+                    deps.insert(dn);
+                }
+            }
+        }
         let consumed_hash_at_plan = installed
             .iter()
             .find(|r| r.name == name && r.arch == Arch::Amd64)
