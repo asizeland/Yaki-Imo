@@ -145,6 +145,26 @@ pub fn run_sandboxed_with_deps(
     scratch_dir: &Path,
     env: &[(String, String)],
 ) -> PkgResult<SandboxOutcome> {
+    let binds: Vec<(PathBuf, PathBuf)> = extra_bind_ro
+        .iter()
+        .map(|p| (p.clone(), p.clone()))
+        .collect();
+    run_sandboxed_with_binds(profile, &binds, cmd, scratch_dir, env)
+}
+
+/// [`run_sandboxed_with_deps`] with an explicit in-sandbox destination
+/// per bind: each pair is `(host source, in-sandbox path)`. This lets
+/// the caller expose a dependency at a *stable* alias (pkg-build uses
+/// `/pkg/deps/<name>`) in addition to its identity-hashed real store
+/// path, so recipes reference `-I /pkg/deps/foo/usr/include` instead of
+/// globbing `.store/<identity>` (which changes with every rebuild).
+pub fn run_sandboxed_with_binds(
+    profile: &SandboxProfile,
+    extra_binds_ro: &[(PathBuf, PathBuf)],
+    cmd: &[String],
+    scratch_dir: &Path,
+    env: &[(String, String)],
+) -> PkgResult<SandboxOutcome> {
     if cmd.is_empty() {
         return Err(PkgError::Build(
             "run_sandboxed: empty command".to_string(),
@@ -155,7 +175,6 @@ pub fn run_sandboxed_with_deps(
         .find(|(k, _)| k == "PKGDIR")
         .map(|(_, v)| PathBuf::from(v));
     let mut data = profile.resolve(scratch_dir, pkgdir.as_deref());
-    data.bind_ro.extend(extra_bind_ro.iter().cloned());
     // A bind source that doesn't exist on this host (e.g. `/lib` on a
     // NixOS-style layout) would make bwrap refuse the whole invocation;
     // there is nothing to protect at a path that isn't there, so drop it
@@ -170,7 +189,21 @@ pub fn run_sandboxed_with_deps(
         }
         exists
     });
-    let argv = build_argv(&data, cmd, scratch_dir, env);
+    let binds: Vec<(PathBuf, PathBuf)> = extra_binds_ro
+        .iter()
+        .filter(|(src, _)| {
+            let exists = src.exists();
+            if !exists {
+                eprintln!(
+                    "pkg: sandbox: bind source {} does not exist; skipping",
+                    src.display()
+                );
+            }
+            exists
+        })
+        .cloned()
+        .collect();
+    let argv = build_argv_impl(&data, &binds, cmd, scratch_dir, env);
 
     let mut child = Command::new(&argv[0])
         .args(&argv[1..])
@@ -244,6 +277,9 @@ pub fn run_sandboxed_with_deps(
 /// - `--ro-bind <src> <src>` for each `bind_ro`: toolchain/dep tree
 ///   read-only at its real path (paths stay where the toolchain's
 ///   compiled-in prefixes expect them).
+/// - `--ro-bind <src> <dst>` for each aliased bind passed via
+///   [`run_sandboxed_with_binds`]: read-only at a caller-chosen
+///   in-sandbox path (stable dep aliases like `/pkg/deps/<name>`).
 /// - `--bind <src> <src>` for each `bind_rw`: the only writable host
 ///   paths — for Build, exactly scratch + `$PKGDIR` (Issue 3.4).
 /// - `--chdir <scratch>`: start in the writable workspace, not wherever
@@ -255,6 +291,19 @@ pub fn run_sandboxed_with_deps(
 ///   untouched (no shell interpolation anywhere).
 pub fn build_argv(
     data: &ProfileData,
+    cmd: &[String],
+    scratch_dir: &Path,
+    env: &[(String, String)],
+) -> Vec<String> {
+    build_argv_impl(data, &[], cmd, scratch_dir, env)
+}
+
+/// [`build_argv`] plus aliased read-only binds: `(host source,
+/// in-sandbox destination)` pairs emitted as `--ro-bind src dst`.
+/// See [`run_sandboxed_with_binds`].
+fn build_argv_impl(
+    data: &ProfileData,
+    binds_ro: &[(PathBuf, PathBuf)],
     cmd: &[String],
     scratch_dir: &Path,
     env: &[(String, String)],
@@ -286,6 +335,11 @@ pub fn build_argv(
         argv.push("--ro-bind".into());
         argv.push(path.display().to_string());
         argv.push(path.display().to_string());
+    }
+    for (src, dst) in binds_ro {
+        argv.push("--ro-bind".into());
+        argv.push(src.display().to_string());
+        argv.push(dst.display().to_string());
     }
     for path in &data.bind_rw {
         argv.push("--bind".into());
@@ -433,6 +487,42 @@ mod tests {
         // write; we go further and don't bind it at all).
         assert!(!ro.iter().any(|p| p.starts_with("/etc")));
         assert!(!rw.iter().any(|p| p.starts_with("/etc")));
+    }
+
+    #[test]
+    fn aliased_binds_use_explicit_in_sandbox_destination() {
+        let scratch = Path::new("/var/lib/pkg/build/1");
+        let cmd = vec!["make".to_string()];
+        let binds = vec![
+            (
+                PathBuf::from("/var/lib/pkg/store/libfoo-abc123"),
+                PathBuf::from("/pkg/deps/libfoo"),
+            ),
+            (
+                PathBuf::from("/var/lib/pkg/store/libfoo-abc123"),
+                PathBuf::from("/var/lib/pkg/store/libfoo-abc123"),
+            ),
+        ];
+        let argv = build_argv_impl(
+            &build_data(scratch, None),
+            &binds,
+            &cmd,
+            scratch,
+            &[],
+        );
+        let pairs: Vec<(&str, &str)> = argv
+            .windows(3)
+            .filter(|w| w[0] == "--ro-bind")
+            .map(|w| (w[1].as_str(), w[2].as_str()))
+            .collect();
+        assert!(pairs.contains(&(
+            "/var/lib/pkg/store/libfoo-abc123",
+            "/pkg/deps/libfoo"
+        )));
+        assert!(pairs.contains(&(
+            "/var/lib/pkg/store/libfoo-abc123",
+            "/var/lib/pkg/store/libfoo-abc123"
+        )));
     }
 
     #[test]

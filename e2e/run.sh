@@ -163,11 +163,10 @@ EOF
 cat > "$ROOT/var/lib/pkg/recipes/hello/build" <<EOF
 tar xzf hello-1.0.tar.gz
 cd hello-1.0
-# Dep store dirs are RO-bound into the sandbox at their real paths
-# (PKG_ROOT-prefixed on this host).
-LIBFOO=\$(echo $ROOT/usr/lib/pkg/.store/libfoo-*/usr/lib)
-echo "linking against: \$LIBFOO"
-cc -O2 -o hello hello.c -I "\$LIBFOO/../include" -L "\$LIBFOO" -lfoo -Wl,-rpath,/usr/lib
+# Deps are RO-bound into the sandbox at the stable alias
+# /pkg/deps/<name> (no .store/<identity> globbing needed).
+cc -O2 -o hello hello.c -I /pkg/deps/libfoo/usr/include \
+   -L /pkg/deps/libfoo/usr/lib -lfoo -Wl,-rpath,/usr/lib
 EOF
 cat > "$ROOT/var/lib/pkg/recipes/hello/install" <<'EOF'
 mkdir -p "$PKGDIR/usr/bin"

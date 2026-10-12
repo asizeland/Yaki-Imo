@@ -34,7 +34,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use pkg_core::manifest::PackageManifest;
 use pkg_core::{AbiTag, PkgError, PkgResult, Version};
 use pkg_db::queries::{self, BuildRecord};
-use pkg_sandbox::{run_sandboxed_with_deps, SandboxProfile};
+use pkg_sandbox::{run_sandboxed_with_binds, SandboxProfile};
 use rusqlite::Connection;
 
 /// Recipe phase names, in execution order after `Fetch`.
@@ -323,12 +323,24 @@ fn run_recipe_phases_impl(
 
     let env = build_env(ctx, recipe)?;
     let profile = SandboxProfile::Build;
-    // The resolved dependency tree, RO-bound into the build sandbox at
-    // its real store paths so the build can link against it (v12 §9).
-    let dep_binds: Vec<PathBuf> = ctx
+    // The resolved dependency tree, RO-bound into the build sandbox
+    // twice (v12 §9): at its real store paths (the gate scans those,
+    // and any baked-in rpaths resolve) and at a stable per-name alias
+    // `/pkg/deps/<name>`, so recipes reference e.g.
+    // `-I /pkg/deps/libfoo/usr/include` without globbing the
+    // identity-hashed store path (which changes on every rebuild).
+    let dep_binds: Vec<(PathBuf, PathBuf)> = ctx
         .gate_deps
         .iter()
-        .map(|d| d.store_dir.clone())
+        .flat_map(|d| {
+            [
+                (d.store_dir.clone(), d.store_dir.clone()),
+                (
+                    d.store_dir.clone(),
+                    PathBuf::from(format!("/pkg/deps/{}", d.name)),
+                ),
+            ]
+        })
         .collect();
 
     // -- prepare / build / check / install ----------------------------
@@ -356,7 +368,7 @@ fn run_recipe_phases_impl(
             local_script.display().to_string(),
         ];
         let outcome =
-            run_sandboxed_with_deps(&profile, &dep_binds, &cmd, &ctx.scratch_dir, &env)?;
+            run_sandboxed_with_binds(&profile, &dep_binds, &cmd, &ctx.scratch_dir, &env)?;
         phase_logs.push((phase, outcome.stderr_tail.clone()));
         if !outcome.success() {
             return Err(PkgError::Build(format!(
