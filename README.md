@@ -47,3 +47,7 @@ max_pkg_jobs = 4
 For testing, `PKG_ROOT=/some/dir` prefixes every state path (including
 `[paths]` overrides) so the whole toolchain can run against a
 throwaway root.
+
+## License
+
+BSD 3-Clause (see [LICENSE](LICENSE)).

@@ -16,7 +16,7 @@ members = [
 [workspace.package]
 edition = "2021"
 rust-version = "1.82"
-license = "MIT OR Apache-2.0"
+license = "BSD-3-Clause"
 
 # Dependency pins per SPEC.md "Crate layout & dependency pins".
 [workspace.dependencies]
