@@ -168,8 +168,14 @@ pub fn build_env(ctx: &BuildContext, recipe: &Recipe) -> PkgResult<Vec<(String, 
         ("LC_ALL".into(), "C".into()),
     ];
     // Issue 1 §2.4: one PKG_OPT_<NAME>=0|1 per declared option,
-    // including unmentioned options at their defaults.
-    env.extend(recipe.manifest.options_export_env(&ctx.selection)?);
+    // including unmentioned options at their defaults. The selection is
+    // transaction-wide, so filter it down to the options this package
+    // actually declares (typo protection happened at plan time).
+    env.extend(
+        recipe
+            .manifest
+            .options_export_env(&recipe.manifest.filter_selection(&ctx.selection))?,
+    );
     match (&ctx.compiler_wrapper, recipe.manifest.compiler_cache) {
         (Some(wrapper), true) => {
             env.push(("CC".into(), format!("{wrapper} cc")));
@@ -536,9 +542,12 @@ default = false
     }
 
     #[test]
-    fn unknown_option_is_a_hard_error() {
-        // Issue 1 §5: unknown option names are hard errors at parse
-        // time, never silently ignored.
+    fn undeclared_options_are_filtered_out_of_the_env() {
+        // The selection is transaction-wide: keys a package does not
+        // declare belong to other packages in the plan and must not
+        // fail (or leak into) this package's build env. Typo protection
+        // lives at the transaction level (pkg-cli run_transaction
+        // rejects keys NO selected package declares).
         let manifest = manifest_with_options();
         let recipe = Recipe {
             manifest,
@@ -546,7 +555,12 @@ default = false
             recipe_commit: "abc".into(),
         };
         let sel = BTreeMap::from([("wayland".to_string(), true)]);
-        assert!(build_env(&ctx(sel), &recipe).is_err());
+        let env = build_env(&ctx(sel), &recipe).unwrap();
+        assert!(!env.iter().any(|(k, _)| k == "PKG_OPT_WAYLAND"));
+        // Declared options still export at their (default) values.
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        assert_eq!(get("PKG_OPT_X11").as_deref(), Some("1"));
+        assert_eq!(get("PKG_OPT_PULSEAUDIO").as_deref(), Some("0"));
     }
 
     #[test]

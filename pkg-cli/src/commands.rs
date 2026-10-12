@@ -411,7 +411,13 @@ pub fn compute_abi_tag(
         for hash in &iface_hashes {
             hasher.update(hash.as_bytes());
         }
-        hasher.update(manifest.opt_tag(selection).map_err(PkgError::from)?.as_str().as_bytes());
+        hasher.update(
+            manifest
+                .abi_opt_tag(&manifest.filter_selection(selection))
+                .map_err(PkgError::from)?
+                .as_str()
+                .as_bytes(),
+        );
     }
     let digest = hasher.finalize();
     Ok(AbiTag(u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]])))
@@ -528,9 +534,13 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
                 .map_err(|_| PkgError::Parse(format!("bad version in {spec:?}")))?,
             None => recipe.manifest.version.clone(),
         };
-        // Option validation happens against the recipe's manifest:
-        // unknown keys are hard errors (Issue 1 §5).
-        let _dep_set = recipe.manifest.dep_set(&selection).map_err(PkgError::from)?;
+        // The selection is transaction-wide: this root sees only the
+        // keys it declares (transaction-level typo protection runs
+        // after resolution, once every selected recipe is known).
+        let _dep_set = recipe
+            .manifest
+            .dep_set(&recipe.manifest.filter_selection(&selection))
+            .map_err(PkgError::from)?;
         let profile_constraints = active_profile_constraints(&pins);
         match graph.resolve_with_constraints(
             &name,
@@ -545,6 +555,26 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
         }
     }
 
+    // Transaction-level option validation (Issue 1 §5): the selection
+    // applies across the whole plan, so a key NO selected package
+    // declares is a typo and a hard error; per-manifest accessors then
+    // receive their filtered view (filter_selection).
+    if !selection.is_empty() {
+        let mut declared = std::collections::BTreeSet::new();
+        for name in selected.keys() {
+            if let Ok(recipe) = load_recipe(name) {
+                declared.extend(recipe.manifest.options.keys().cloned());
+            }
+        }
+        for key in selection.keys() {
+            if !declared.contains(key) {
+                return Err(PkgError::Parse(format!(
+                    "unknown option in selection: '{key}' \
+                     (no package in this transaction declares it)"
+                )));
+            }
+        }
+    }
     // §7.6.4(d) pre-build gate: a package requiring glibc ≥ the
     // staged-pending target is rejected here, not after a multi-hour
     // build produced binaries the running libc can't execute.
@@ -560,10 +590,46 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
     let mut direct = Vec::new();
     let requested: BTreeSet<String> =
         specs.iter().map(|s| parse_spec(s).0).collect();
+    // Installed identities at (name, version, opt_tag) granularity: the
+    // same version under a different effective option selection is a
+    // DIFFERENT build (§4.3 identity), not an "already installed" no-op.
+    let installed_identities: BTreeSet<(String, Version, String)> =
+        queries::list_installed_packages(&conn)?
+            .into_iter()
+            .map(|r| (r.name, r.version, r.opt_tag))
+            .collect();
     for (name, version) in &selected {
         let is_direct = requested.contains(name);
         match installed.get(name) {
-            Some(v) if v == version => continue, // already installed
+            Some(v) if v == version => {
+                let recipe = load_recipe(name)?;
+                let opt_tag = recipe
+                    .manifest
+                    .opt_tag(&recipe.manifest.filter_selection(&selection))
+                    .map_err(PkgError::from)?;
+                if installed_identities.contains(&(
+                    name.clone(),
+                    version.clone(),
+                    opt_tag.as_str().to_string(),
+                )) {
+                    continue; // this exact identity is already installed
+                }
+                // Same version, different option selection: reinstall.
+                // The new build's interface is unmeasured at plan time
+                // (None counts as "changed" — conservative cascade),
+                // and post-build re-measurement prunes dependents whose
+                // consumed interface turns out unchanged.
+                if is_direct {
+                    direct.push((name.clone(), version.clone()));
+                }
+                bumped.push(BumpedPackage {
+                    name: name.clone(),
+                    old_version: version.clone(),
+                    new_version: version.clone(),
+                    old_link_hash: queries::link_interface_hash(&conn, name, version)?,
+                    new_link_hash: None,
+                });
+            }
             Some(old) => {
                 let old_hash = queries::link_interface_hash(&conn, name, old)?;
                 let new_hash = queries::link_interface_hash(&conn, name, version)?;
@@ -726,7 +792,12 @@ fn glibc_floor_of(
     manifest: &PackageManifest,
     selection: &BTreeMap<String, bool>,
 ) -> PkgResult<Option<Version>> {
-    for dep in manifest.dep_set(selection).map_err(PkgError::from)? {
+    // The selection is transaction-wide; only the keys this manifest
+    // declares apply to it (see PackageManifest::filter_selection).
+    for dep in manifest
+        .dep_set(&manifest.filter_selection(selection))
+        .map_err(PkgError::from)?
+    {
         if let Dependency::Package { name, constraint } = dep {
             if name == "glibc" {
                 return Ok(match constraint {
@@ -781,7 +852,10 @@ fn handle_glibc_update(
 ) -> PkgResult<()> {
     let recipe = load_recipe("glibc")?;
     let abi_tag = compute_abi_tag(conn, &recipe.manifest, selection)?;
-    let opt_tag = recipe.manifest.opt_tag(selection).map_err(PkgError::from)?;
+    let opt_tag = recipe
+        .manifest
+        .opt_tag(&recipe.manifest.filter_selection(selection))
+        .map_err(PkgError::from)?;
     let identity = Identity {
         name: "glibc".to_string(),
         version: new_version.clone(),
@@ -986,7 +1060,8 @@ fn build_plan(
     for (name, (version, deps)) in all {
         let recipe = load_recipe(&name)?;
         let abi_tag = compute_abi_tag(conn, &recipe.manifest, selection)?;
-        let opt_tag = recipe.manifest.opt_tag(selection).map_err(PkgError::from)?;
+        let filtered = recipe.manifest.filter_selection(selection);
+        let opt_tag = recipe.manifest.opt_tag(&filtered).map_err(PkgError::from)?;
         // Cascade edges only exist for packages with an installed row
         // (they come from reverse_dependents). For fresh installs —
         // nothing in the plan is installed yet — derive the same
@@ -994,11 +1069,7 @@ fn build_plan(
         // dependency is built and activated before its dependent's
         // sandbox tries to bind its store dir.
         let mut deps = deps;
-        for d in recipe
-            .manifest
-            .dep_set(selection)
-            .map_err(PkgError::from)?
-        {
+        for d in recipe.manifest.dep_set(&filtered).map_err(PkgError::from)? {
             if let Dependency::Package { name: dn, .. } = d {
                 if dn != name && plan_names.contains(&dn) {
                     deps.insert(dn);

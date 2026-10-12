@@ -44,10 +44,11 @@
 //!   `build_dep_set(selection)` (base build deps plus `add_build_deps`),
 //!   `opt_tag(selection)` (the `OptTag` contract from package.rs v3:
 //!   8-hex truncated SHA-256 of the canonical sorted `name=value,` list
-//!   over **ABI-affecting** options only — superseded in v4 to delegate
-//!   to `OptTag::from_selection` over the deviation set; EMPTY string
-//!   when every ABI-affecting option sits at its declared default —
-//!   including the no-options case), and
+//!   over every option deviating from its declared default — delegated
+//!   to `OptTag::from_selection`; EMPTY string for the all-default
+//!   selection, including the no-options case), `abi_opt_tag(selection)`
+//!   (the abi-affecting subset of the deviation set — the option feed of
+//!   the package's own `abi_tag`, spec §4.3 "abi_affecting split"), and
 //!   `options_export_env(selection)` (`PKG_OPT_<NAME>=0|1`, name
 //!   uppercased, `-`→`_`, every declared option exported). All three
 //!   validate selection keys against the declared options and fail with
@@ -465,6 +466,26 @@ impl PackageManifest {
         Ok(())
     }
 
+    /// The subset of `selection` naming options THIS manifest declares.
+    /// A transaction-level `--opt` selection applies across every
+    /// package in the plan, but an option only means something to a
+    /// package that declares it — per-manifest accessors must receive
+    /// this filtered view, or any optionful package in a transaction
+    /// poisons the optionless ones with `UnknownOption`. Typo
+    /// protection stays at the transaction level: the caller checks
+    /// the full selection against the UNION of all selected packages'
+    /// declared options before filtering per manifest.
+    pub fn filter_selection(
+        &self,
+        selection: &BTreeMap<String, bool>,
+    ) -> BTreeMap<String, bool> {
+        selection
+            .iter()
+            .filter(|(k, _)| self.options.contains_key(*k))
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
+    }
+
     /// The effective value of a declared option under `selection`:
     /// the selection's explicit override when present, the declared
     /// `default` otherwise.
@@ -526,17 +547,18 @@ impl PackageManifest {
     ///
     /// Two decisions pinned here so every caller agrees on them:
     ///
-    /// - Only `abi_affecting` options participate. A non-ABI-affecting
-    ///   option can't change the built package's interface, so letting
-    ///   it change the tag would cascade pointless rebuilds of every
-    ///   dependent. Corollary: an all-default *ABI-affecting* selection
-    ///   yields the empty tag even if a non-ABI-affecting option is
-    ///   flipped away from its default.
-    /// - The canonical list covers exactly the ABI-affecting options
-    ///   whose effective value *deviates from their declared default*,
-    ///   rendered `name=0,` / `name=1,` — the same spelling the
+    /// - The canonical list covers exactly the options whose effective
+    ///   value *deviates from their declared default*, rendered
+    ///   `name=0,` / `name=1,` — the same spelling the
     ///   `PKG_OPT_<NAME>` exports use. An all-default selection is an
     ///   empty deviation set, which is precisely the empty-tag case.
+    /// - EVERY declared option participates, abi-affecting or not
+    ///   (spec §4.3 "Identity": a selection is hashed into the opt_tag;
+    ///   "`abi_affecting = false` changes `opt_tag` only"). A
+    ///   non-ABI-affecting deviation still prices the build into a
+    ///   distinct identity; what it must not do is perturb the
+    ///   `abi_tag`, which is why [`Self::abi_opt_tag`] exists as the
+    ///   abi_tag's option feed.
     /// - The hashing itself is delegated to [`OptTag::from_selection`]
     ///   so the canonical serialization and digest exist in exactly one
     ///   place (package.rs v3); this function's job is only the
@@ -544,9 +566,30 @@ impl PackageManifest {
     ///   defaults live here.
     pub fn opt_tag(&self, selection: &BTreeMap<String, bool>) -> Result<OptTag, ManifestError> {
         self.validate_selection(selection)?;
-        let mut deviations: BTreeMap<String, bool> = BTreeMap::new();
+        Ok(OptTag::from_selection(&self.deviations(selection, false)))
+    }
+
+    /// The abi_affecting subset of the deviation set, hashed the same
+    /// way as [`Self::opt_tag`] — the option component of the package's
+    /// own `abi_tag` (spec §4.3 "abi_affecting split": only
+    /// abi-affecting options perturb the tag dependents derive from, so
+    /// flipping `docs` never cascades pointless rebuilds).
+    pub fn abi_opt_tag(&self, selection: &BTreeMap<String, bool>) -> Result<OptTag, ManifestError> {
+        self.validate_selection(selection)?;
+        Ok(OptTag::from_selection(&self.deviations(selection, true)))
+    }
+
+    /// Options whose effective value under `selection` differs from
+    /// their declared default. `abi_only` restricts the set to
+    /// abi-affecting options.
+    fn deviations(
+        &self,
+        selection: &BTreeMap<String, bool>,
+        abi_only: bool,
+    ) -> BTreeMap<String, bool> {
+        let mut deviations = BTreeMap::new();
         for (name, option) in &self.options {
-            if !option.abi_affecting {
+            if abi_only && !option.abi_affecting {
                 continue;
             }
             let value = self.option_enabled(name, selection);
@@ -554,7 +597,7 @@ impl PackageManifest {
                 deviations.insert(name.clone(), value);
             }
         }
-        Ok(OptTag::from_selection(&deviations))
+        deviations
     }
 
     /// The environment a build runs with for this option selection (v3):
@@ -1403,12 +1446,27 @@ mod tests {
             m.opt_tag(&selection(&[("ssl-weak", false), ("docs", true)])).unwrap(),
             OptTag(String::new())
         );
-        // Flipping only a NON-abi-affecting option still yields the empty
-        // tag — it can't change the built package's ABI.
+    }
+
+    #[test]
+    fn opt_tag_prices_non_abi_deviations_but_abi_tag_feed_does_not() {
+        // Spec §4.3: `abi_affecting = false` changes `opt_tag` ONLY —
+        // the deviation is priced into identity (a docs-less build is a
+        // different build) without perturbing the abi_tag its
+        // dependents derive from.
+        let m = PackageManifest::from_toml_str(OPTIONS_TOML).unwrap();
+        let flipped = m.opt_tag(&selection(&[("docs", false)])).unwrap();
+        assert!(!flipped.is_default());
+        assert_eq!(flipped.0.len(), 8);
         assert_eq!(
-            m.opt_tag(&selection(&[("docs", false)])).unwrap(),
-            OptTag(String::new())
+            m.abi_opt_tag(&selection(&[("docs", false)])).unwrap(),
+            OptTag(String::new()),
+            "non-abi-affecting deviations must not feed the abi_tag"
         );
+        // An abi-affecting deviation feeds both.
+        let abi = m.abi_opt_tag(&selection(&[("ssl-weak", true)])).unwrap();
+        assert!(!abi.is_default());
+        assert_ne!(abi, flipped);
     }
 
     #[test]
