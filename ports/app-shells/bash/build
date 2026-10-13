@@ -1,0 +1,8 @@
+tar xzf bash-5.3.tar.gz
+cd bash-5.3
+# bash's bundled readline wants a termcap library; point it at the
+# pkg-built ncurses.
+./configure --prefix=/usr --disable-nls --without-bash-malloc \
+    CPPFLAGS="-I/pkg/deps/ncurses/usr/include" \
+    LDFLAGS="-L/pkg/deps/ncurses/usr/lib"
+make

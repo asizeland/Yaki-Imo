@@ -1,0 +1,4 @@
+tar xJf tar-1.35.tar.xz
+cd tar-1.35
+./configure --prefix=/usr --disable-nls
+make

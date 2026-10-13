@@ -1,0 +1,6 @@
+name = "coreutils"
+version = "9.12"
+category = "sys-apps"
+
+[dependencies]
+runtime = ["glibc"]

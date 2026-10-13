@@ -1,0 +1,4 @@
+tar xJf sed-4.10.tar.xz
+cd sed-4.10
+./configure --prefix=/usr --disable-nls
+make

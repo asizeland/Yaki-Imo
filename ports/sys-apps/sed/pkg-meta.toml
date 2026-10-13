@@ -1,0 +1,6 @@
+name = "sed"
+version = "4.10"
+category = "sys-apps"
+
+[dependencies]
+runtime = ["glibc"]

@@ -1,0 +1,1 @@
+make -C bash-5.3 DESTDIR="$PKGDIR" install

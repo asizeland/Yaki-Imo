@@ -1,0 +1,4 @@
+tar xJf gawk-5.4.1.tar.xz
+cd gawk-5.4.1
+./configure --prefix=/usr --disable-nls
+make

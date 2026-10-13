@@ -1,0 +1,4 @@
+tar xzf xz-5.8.4.tar.gz
+cd xz-5.8.4
+./configure --prefix=/usr --disable-nls
+make

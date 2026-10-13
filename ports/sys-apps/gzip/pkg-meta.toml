@@ -1,0 +1,6 @@
+name = "gzip"
+version = "1.15"
+category = "sys-apps"
+
+[dependencies]
+runtime = ["glibc"]

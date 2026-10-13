@@ -32,6 +32,19 @@ tools).
 | sys-apps/man-pages | data only | none (install-only) | exercises the minimal-phase path |
 | games-misc/tty-solitaire | game | plain Makefile | ncurses; the distro is meant for gaming after all |
 | net-im/discord | binary blob | repackaging | `[build] binary = true`; **version pin expires** — bump `pkg-meta.toml` + `source.toml` together |
+| app-shells/bash | shell | autotools | the chrootable set's `/bin/sh` equivalent |
+| sys-apps/coreutils | core tools | autotools | large configure+compile |
+| sys-apps/grep | text tool | autotools | `--disable-perl-regexp` keeps pcre2 out of the closure |
+| sys-apps/sed | text tool | autotools | |
+| sys-apps/gawk | text tool | autotools | |
+| sys-apps/tar | archiver | autotools | |
+| sys-apps/gzip | compressor | autotools | |
+| sys-apps/xz | compressor + liblzma | autotools | watched via git tags |
+
+The bottom eight are the **chrootable set**: with them installed, the
+root can be chrooted into (`arch-chroot`-style, after mounting
+/proc /sys /dev) and testing continues inside — `e2e/ports.sh` proves
+this with a bwrap chroot-equivalence run.
 
 ## Turning the tree into a repository
 

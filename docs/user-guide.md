@@ -367,11 +367,26 @@ that's the next milestone, and this guide is its dress rehearsal.
 
 The `ports/` directory in the Yakimo source tree is a small
 Gentoo-ports-style recipe collection (zlib, ncurses, readline, sqlite,
-lua, less, man-pages, tty-solitaire, discord) meant for exactly this
+lua, less, man-pages, tty-solitaire, discord, plus the chrootable set:
+bash, coreutils, grep, sed, gawk, tar, gzip, xz) meant for exactly this
 kind of live testing: diverse build systems, real programs, one binary
 blob. `ports/README.md` has the full recipe for turning it into a
 signed local repository (`ports2repo`) and installing it into a
 `PKG_ROOT`; `e2e/ports.sh` automates that flow end to end.
+
+Because activation links are written *relative*, a `PKG_ROOT`-installed
+tree is directly chrootable — on the live media the flow is:
+
+```
+# mount the target partition at /mnt/target
+$ export PKG_ROOT=/mnt/target
+$ sh ports/install.sh /path/to/repo && pkg sync
+$ pkg install bash coreutils grep sed gawk tar gzip xz less lua
+# mount /proc /sys /dev (arch-chroot does this for you), then:
+$ chroot /mnt/target /usr/bin/bash
+```
+
+and testing — more installs, watch runs, real usage — continues inside.
 
 Recipes always pin exact versions and distfile hashes — there is no
 "install the latest" pointer for a client to follow, by design. The

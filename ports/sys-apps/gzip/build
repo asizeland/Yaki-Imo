@@ -1,0 +1,4 @@
+tar xJf gzip-1.15.tar.xz
+cd gzip-1.15
+./configure --prefix=/usr --disable-nls
+make

@@ -26,6 +26,15 @@
 //!   `pkg_db::schema`; `pkg_db::queries` does not re-export them. The
 //!   imports and the `GenerationKind::Upgrade` reference now use the
 //!   schema path.
+//!
+//! ## v3
+//!
+//! - [MAJOR] Activation links are written with **relative** targets
+//!   (`relative_target`): an absolute target bakes the `PKG_ROOT`
+//!   prefix into the tree, so every link dangled the moment the root
+//!   was entered via chroot or booted as `/`. Deactivation compares
+//!   lexically-resolved targets (`resolve_link_target`) so links
+//!   written by pre-v3 builds (absolute text) still deactivate cleanly.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -55,10 +64,67 @@ pub const STAGE_DIR_NAME: &str = ".stage";
 pub struct SymlinkOp {
     /// Absolute FHS path of the link, e.g. `/usr/lib/libfoo.so.1`.
     pub link_path: PathBuf,
-    /// What the link pointed at before (`None` = link created).
+    /// What the link pointed at before (`None` = link created), in the
+    /// raw form `read_link` returned.
     pub old_target: Option<PathBuf>,
-    /// What it points at after (`None` = link removed).
+    /// What it points at after (`None` = link removed). New links are
+    /// written with a *relative* target (see [`relative_target`]): an
+    /// absolute target would bake the `PKG_ROOT` prefix into the tree,
+    /// dangling every link the moment the root is entered via chroot or
+    /// booted as `/`.
     pub new_target: Option<PathBuf>,
+}
+
+/// Computes the link text for a symlink at `link` pointing at `target`
+/// (both absolute, sharing a filesystem root): `target` expressed
+/// relative to the link's parent directory. Relative targets resolve
+/// identically from outside the root, inside a chroot, and after the
+/// target partition is booted as `/` — the chroot-safe activation
+/// contract.
+fn relative_target(link: &Path, target: &Path) -> PathBuf {
+    use std::path::Component;
+    let parent = link.parent().unwrap_or(link);
+    let mut p = parent.components().peekable();
+    let mut t = target.components().peekable();
+    while p.peek().is_some() && p.peek() == t.peek() {
+        p.next();
+        t.next();
+    }
+    let mut out = PathBuf::new();
+    for c in p {
+        // RootDir can't appear here (the common-prefix loop consumed
+        // it); every remaining parent component is one level to climb.
+        debug_assert!(matches!(c, Component::Normal(_) | Component::ParentDir));
+        out.push("..");
+    }
+    for c in t {
+        out.push(c.as_os_str());
+    }
+    out
+}
+
+/// The absolute path a symlink target stored at `link` resolves to,
+/// computed lexically (no filesystem access). Comparisons against
+/// planned targets go through this so links written by older pkg builds
+/// (absolute targets) still match their relative-form plans.
+fn resolve_link_target(link: &Path, target: &Path) -> PathBuf {
+    use std::path::Component;
+    let joined = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        link.parent().unwrap_or(link).join(target)
+    };
+    let mut out = PathBuf::new();
+    for c in joined.components() {
+        match c {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Computes the symlink ops that make `identity`'s store dir live under
@@ -86,10 +152,11 @@ pub fn plan_activation_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec<S
             if ftype.is_dir() {
                 stack.push(path);
             } else {
+                let link_path = fhs_root.join(rel);
                 ops.push(SymlinkOp {
-                    link_path: fhs_root.join(rel),
+                    new_target: Some(relative_target(&link_path, &path)),
+                    link_path,
                     old_target: None, // filled by `with_old_targets`
-                    new_target: Some(path),
                 });
             }
         }
@@ -112,13 +179,27 @@ pub fn with_old_targets(ops: &mut [SymlinkOp]) {
 /// store dir could own are considered — we walk the store dir's own
 /// file list, so a foreign package's link at the same path is left
 /// alone (a same-path collision would have been rejected at install).
+/// The current-vs-planned comparison resolves both sides lexically, so
+/// links written with absolute targets (pre-relative-target pkg builds)
+/// still deactivate cleanly.
 pub fn plan_deactivation_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec<SymlinkOp>> {
     let planned = plan_activation_ops(store_dir, fhs_root)?;
     let mut ops = Vec::new();
     for mut op in planned {
         let current = fs::read_link(&op.link_path).ok();
-        if current.as_deref() == op.new_target.as_deref() {
-            op.old_target = op.new_target.take(); // becomes a removal
+        let owned = match (&current, &op.new_target) {
+            (Some(cur), Some(new)) => {
+                resolve_link_target(&op.link_path, cur)
+                    == resolve_link_target(&op.link_path, new)
+            }
+            _ => false,
+        };
+        if owned {
+            // Keep the RAW current text as old_target: the removal guard
+            // in apply_symlink_ops compares it against a fresh read_link,
+            // and the two must share a representation.
+            op.old_target = current;
+            op.new_target = None; // becomes a removal
             ops.push(op);
         }
     }
@@ -846,7 +927,14 @@ mod tests {
         with_old_targets(&mut ops);
         apply_symlink_ops(&ops).unwrap();
         let link = fhs.join("usr/lib/libfoo.so.1");
-        assert_eq!(fs::read_link(&link).unwrap(), store.join("usr/lib/libfoo.so.1"));
+        // The link text is relative (chroot-safe) and resolves to the
+        // store file.
+        let text = fs::read_link(&link).unwrap();
+        assert!(text.is_relative(), "link text must be relative: {text:?}");
+        assert_eq!(
+            resolve_link_target(&link, &text),
+            store.join("usr/lib/libfoo.so.1")
+        );
 
         // Re-point the same link at a new store dir: rename swap, and
         // old_target recorded.
@@ -855,9 +943,13 @@ mod tests {
         fs::write(store2.join("usr/lib/libfoo.so.1"), b"elf2").unwrap();
         let mut ops2 = plan_activation_ops(&store2, &fhs).unwrap();
         with_old_targets(&mut ops2);
-        assert_eq!(ops2[0].old_target, Some(store.join("usr/lib/libfoo.so.1")));
+        assert_eq!(ops2[0].old_target, Some(text));
         apply_symlink_ops(&ops2).unwrap();
-        assert_eq!(fs::read_link(&link).unwrap(), store2.join("usr/lib/libfoo.so.1"));
+        let text2 = fs::read_link(&link).unwrap();
+        assert_eq!(
+            resolve_link_target(&link, &text2),
+            store2.join("usr/lib/libfoo.so.1")
+        );
 
         // Deactivation removes only links still pointing into store2.
         let rm = plan_deactivation_ops(&store2, &fhs).unwrap();
@@ -865,5 +957,37 @@ mod tests {
         assert!(rm[0].new_target.is_none());
         apply_symlink_ops(&rm).unwrap();
         assert!(!link.exists() && !link.is_symlink());
+    }
+
+    #[test]
+    fn deactivation_matches_legacy_absolute_targets() {
+        // A link written by a pre-relative-target build (absolute text)
+        // must still deactivate: the comparison resolves both sides.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store/foo-1.0+ab1");
+        fs::create_dir_all(store.join("usr/lib")).unwrap();
+        fs::write(store.join("usr/lib/libfoo.so.1"), b"elf").unwrap();
+        let fhs = tmp.path().join("fhs");
+        let link = fhs.join("usr/lib/libfoo.so.1");
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(store.join("usr/lib/libfoo.so.1"), &link).unwrap();
+
+        let rm = plan_deactivation_ops(&store, &fhs).unwrap();
+        assert_eq!(rm.len(), 1, "absolute-target link must be recognized");
+        apply_symlink_ops(&rm).unwrap();
+        assert!(!link.exists() && !link.is_symlink());
+    }
+
+    #[test]
+    fn relative_target_climbs_from_link_parent() {
+        let link = Path::new("/usr/bin/sqlite3");
+        let target =
+            Path::new("/usr/lib/pkg/.store/sqlite-3.45.3+ab1/usr/bin/sqlite3");
+        assert_eq!(
+            relative_target(link, target),
+            PathBuf::from("../lib/pkg/.store/sqlite-3.45.3+ab1/usr/bin/sqlite3")
+        );
+        // Round-trip through the lexical resolver.
+        assert_eq!(resolve_link_target(link, &relative_target(link, target)), target);
     }
 }

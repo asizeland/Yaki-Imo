@@ -1,0 +1,5 @@
+type = "release-regex"
+url = "https://ftp.gnu.org/gnu/gzip/"
+regex = 'gzip-([0-9.]+)\.tar\.(gz|xz)'
+stable_regex = '^[0-9]+\.[0-9]'
+url_template = "https://ftp.gnu.org/gnu/gzip/gzip-{version}.tar.gz"

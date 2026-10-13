@@ -245,5 +245,121 @@ pass "sqlite: fts5=0 earned a +p opt_tag identity"
 "$PKG" db check >/dev/null 2>&1 || fail "final db check"
 pass "final db check clean"
 
+# ---------------------------------------------------------------
+# 9. The chrootable set + chroot-equivalence: with the root bound at /
+#    (bwrap stands in for chroot — same filesystem view, no root
+#    needed), the installed shell and tools must run self-contained.
+#    This is what makes the live-media flow work: PKG_ROOT-install,
+#    then chroot in and continue testing.
+#
+#    Host-quirk note: the /nix/store bind + LD_LIBRARY_PATH emulate what
+#    a normal FHS host provides natively. This NixOS host's gcc burns a
+#    /nix/store interpreter path into every binary, and the glibc
+#    package is the host-wrapper — inside the bound root the loader
+#    must come from /nix/store. On the Gentoo live media the
+#    interpreter is the packaged /lib64/ld-linux and /usr/lib is a
+#    default search path, so neither bind is needed there.
+# ---------------------------------------------------------------
+"$PKG" install -y bash coreutils grep sed gawk tar gzip xz \
+    >"$E2E/chrootable.log" 2>&1 \
+    || { tail -30 "$E2E/chrootable.log" >&2; fail "chrootable set install"; }
+pass "installed the chrootable set (bash, coreutils, grep, sed, gawk, tar, gzip, xz)"
+
+# Activation links must be RELATIVE (no $PKG_ROOT baked in) or every
+# one of them dangles the moment the root becomes /.
+if find "$ROOT/usr/bin" -type l -lname "$ROOT/*" | grep -q .; then
+    fail "activation wrote absolute symlinks (chroot-unsafe)"
+fi
+pass "activation links are relative (chroot-safe)"
+
+CHROOT_OUT=$("$REAL_BWRAP" --unshare-all --bind "$ROOT" / \
+    --ro-bind /nix/store /nix/store \
+    --proc /proc --dev /dev \
+    --setenv PATH /usr/bin:/bin --setenv HOME /root \
+    --setenv LD_LIBRARY_PATH /usr/lib \
+    -- /usr/bin/bash -ec '
+        ls /usr/bin | wc -l
+        echo "hello yakimo" | grep -c yakimo
+        echo abc | sed s/b/B/
+        echo "1 2" | awk "{print \$2}"
+        echo data | gzip | gzip -d
+        echo data | xz | xz -d
+        echo data | bzip2 | bzip2 -d
+        tar cf - -C /usr/bin lua | tar tf - | wc -l
+        lua -e "print(2+2)"
+        sqlite3 :memory: "select sqlite_version();"
+        less --version | head -1
+    ' 2>&1) || { echo "$CHROOT_OUT" >&2; fail "chroot-equivalence run"; }
+pass "chroot-equivalence: $(echo "$CHROOT_OUT" | head -1) binaries in /usr/bin, all tools run"
+
+[ "$(echo "$CHROOT_OUT" | sed -n 2p)" = "1" ] || fail "grep inside chroot"
+[ "$(echo "$CHROOT_OUT" | sed -n 3p)" = "aBc" ] || fail "sed inside chroot"
+[ "$(echo "$CHROOT_OUT" | sed -n 6p)" = "data" ] || fail "xz inside chroot"
+[ "$(echo "$CHROOT_OUT" | sed -n 7p)" = "data" ] || fail "bzip2 inside chroot"
+[ "$(echo "$CHROOT_OUT" | sed -n 8p)" = "1" ] || fail "tar round-trip inside chroot"
+[ "$(echo "$CHROOT_OUT" | sed -n 9p)" = "4" ] || fail "lua inside chroot (rpath/relative-link chain)"
+[ "$(echo "$CHROOT_OUT" | sed -n 10p)" = "3.45.3" ] || fail "sqlite inside chroot"
+pass "chroot-equivalence: grep/sed/gzip/xz/bzip2/tar/lua/sqlite/less all work from inside"
+
+"$PKG" db check >/dev/null 2>&1 || fail "db check after chrootable set"
+pass "db check clean after chrootable set"
+
+# ---------------------------------------------------------------
+# 10. Packaging aid: a new recipe that underdeclares its deps must get a
+#    gate failure that names the PROVIDING package, not just the soname.
+#    badlink links the host's zlib with explicit -I/-L (the sandbox
+#    binds the host toolchain tree RO — what a packager hits on a
+#    normal FHS host where /usr/include/zlib.h is simply there) but
+#    declares only glibc.
+# ---------------------------------------------------------------
+ZLIB_OUT=$(nix build --no-link --print-out-paths nixpkgs#zlib)
+ZLIB_DEV=$(nix build --no-link --print-out-paths nixpkgs#zlib.dev)
+
+mkdir -p "$E2E/overlay3/app-misc/badlink"
+cat > "$E2E/overlay3/app-misc/badlink/pkg-meta.toml" <<'EOF'
+name = "badlink"
+version = "1.0"
+category = "app-misc"
+
+[dependencies]
+runtime = ["glibc"]
+EOF
+cat > "$E2E/overlay3/app-misc/badlink/build" <<EOF
+cat > badlink.c <<'C'
+#include <stdio.h>
+#include <zlib.h>
+int main(void) {
+    unsigned char dst[64]; unsigned long n = sizeof dst;
+    const unsigned char src[] = "yakimo";
+    if (compress2(dst, &n, src, sizeof src, 6) != Z_OK) return 1;
+    printf("compressed %lu\n", n);
+    return 0;
+}
+C
+cc -O2 -I$ZLIB_DEV/include badlink.c -o badlink -L$ZLIB_OUT/lib -lz
+EOF
+cat > "$E2E/overlay3/app-misc/badlink/install" <<'EOF'
+mkdir -p "$PKGDIR/usr/bin"
+cp badlink "$PKGDIR/usr/bin/"
+EOF
+: > "$E2E/overlay3/app-misc/badlink/source.toml"
+
+"$PORTS2REPO" "$REPO" "$BASE" --distfiles "$DIST" \
+    "$WS/ports" "$E2E/overlay" "$E2E/overlay3" >/dev/null
+sh ports/install.sh "$REPO" >/dev/null
+"$PKG" sync --force >/dev/null 2>&1
+
+if "$PKG" build badlink >"$E2E/badlink.log" 2>&1; then
+    fail "badlink build should have been rejected by the gate"
+fi
+grep -q "undeclared dependencies: libz.so.1" "$E2E/badlink.log" \
+    || { cat "$E2E/badlink.log"; fail "gate did not name the undeclared soname"; }
+pass "undeclared-dep gate failure names the soname"
+grep -q "libz.so.1 — provided by installed package zlib" "$E2E/badlink.log" \
+    || { cat "$E2E/badlink.log"; fail "no provider hint in the failure report"; }
+pass "failure report hints the providing package (add it to [dependencies])"
+
+"$PKG" db check >/dev/null 2>&1 || fail "db check after rejected build"
+pass "db check clean after the rejected build"
 echo
 echo "PORTS E2E PASSED"

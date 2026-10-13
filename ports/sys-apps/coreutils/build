@@ -1,0 +1,4 @@
+tar xJf coreutils-9.12.tar.xz
+cd coreutils-9.12
+./configure --prefix=/usr --disable-nls
+make

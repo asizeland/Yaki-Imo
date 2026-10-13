@@ -1,0 +1,6 @@
+name = "grep"
+version = "3.12"
+category = "sys-apps"
+
+[dependencies]
+runtime = ["glibc"]

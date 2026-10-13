@@ -1,0 +1,7 @@
+name = "bash"
+version = "5.3"
+category = "app-shells"
+
+[dependencies]
+link = ["ncurses"]
+runtime = ["glibc", "ncurses"]

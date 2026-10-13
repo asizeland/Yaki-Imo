@@ -1,0 +1,6 @@
+name = "gawk"
+version = "5.4.1"
+category = "sys-apps"
+
+[dependencies]
+runtime = ["glibc"]
