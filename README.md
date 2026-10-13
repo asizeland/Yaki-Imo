@@ -40,6 +40,23 @@ or rebuilt itself with Yakimo yet. That is the next milestone, and the
 ports tree, the chrootable set, and the user guide exist specifically
 to rehearse it.
 
+Past the bootstrap, the roadmap is a set of deliberately deferred
+designs rather than blank space. A **binary repository** is the big
+one: deferred indefinitely on paper, but the groundwork is already
+load-bearing — builds are content-addressed and reproducible with
+recorded provenance, so "the artifact your build would have produced,
+fetched instead of compiled" is an evolution of the store, not a new
+subsystem; what is missing is the index, the signatures, and the trust
+policy around them. **Reproducibility verification tiers**
+(multi-builder cross-checking) are deferred in favor of a local
+double-build of the critical set. **DKMS integration** for out-of-tree
+kernel modules is specified (a canonical `[dkms]` recipe table) but
+unimplemented. And the ports tree itself is the largest piece of
+future work: from nineteen recipes toward a coverage set, with
+`watch.toml` automation already in place to keep versions current once
+the tree grows. None of these are promises with dates; they are the
+shape of where the project goes once a machine boots itself with it.
+
 ## Why it might be worth your attention
 
 The short version: Gentoo's flexibility with a modern resolver and a
@@ -55,6 +72,28 @@ packager's side: when your recipe links a library you did not declare,
 the build fails and tells you which installed package provides it.
 Source-only does not have to mean opaque, fragile, or unverifiable —
 that combination is the bet this project makes.
+
+What that should feel like in daily use: `pkg install` answers with a
+plan, not a leap of faith — what will be built, in what order, why each
+package is there (`pkg why`), and how long it should take, with ETAs
+that get *better* the longer you use the system because they are learned
+from your own build history. Builds run sandboxed and unattended; you
+watch progress, not scrollback. When something goes wrong, the failure
+is meant to be a sentence you can act on — an undeclared dependency
+naming its provider, a conflicting option naming both requesters — and
+the recovery is `pkg undo`, not an afternoon of reinstalling. Curiosity
+is a first-class workflow too: `pkg explain` walks you through the
+resolver's reasoning, `pkg history` shows what the system has done, and
+`pkg audit` maps installed packages against security advisories. Some
+of the polish is deliberately deferred and you will notice the seams:
+rebuild cascades can be postponed (`pkg upgrade --skip-rebuilds`, with
+a deliberately un-ergonomic `--defer-security=I-understand` guard when
+an advisory is open; the spec's config-side `[defer]` lists are
+written down but not wired up yet), reproducibility assurance
+is a local double-build of the critical set rather than full
+multi-builder verification tiers, and DKMS for out-of-tree kernel
+modules is designed but not implemented — so today, kernel module
+building is on you.
 
 ## The honest downsides
 
