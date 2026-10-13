@@ -1,0 +1,8 @@
+cd ncurses-6.5
+make DESTDIR="$PKGDIR" install
+# Non-wide compatibility: dependents linking `-lncurses`/`-lcurses`
+# get the wide library (LFS-style).
+for lib in ncurses form panel menu; do
+    ln -sf "lib${lib}w.so" "$PKGDIR/usr/lib/lib${lib}.so"
+done
+ln -sf libncursesw.so "$PKGDIR/usr/lib/libcurses.so"

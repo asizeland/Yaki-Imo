@@ -1,0 +1,6 @@
+# Plain-Makefile package (no configure). The shared library is a
+# separate make target upstream.
+tar xzf bzip2-1.0.8.tar.gz
+cd bzip2-1.0.8
+make -f Makefile-libbz2_so
+make

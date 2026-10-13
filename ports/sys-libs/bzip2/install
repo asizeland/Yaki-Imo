@@ -1,0 +1,7 @@
+cd bzip2-1.0.8
+make PREFIX="$PKGDIR/usr" install
+# `make install` only ships the static lib; add the shared one.
+mkdir -p "$PKGDIR/usr/lib"
+cp -a libbz2.so.1.0.8 libbz2.so.1.0 "$PKGDIR/usr/lib/"
+ln -sf libbz2.so.1.0.8 "$PKGDIR/usr/lib/libbz2.so"
+ln -sf libbz2.so.1.0.8 "$PKGDIR/usr/lib/libbz2.so.1"

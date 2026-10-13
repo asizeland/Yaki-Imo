@@ -1,0 +1,6 @@
+# Discord deletes old versioned tarballs; bump version + hash together
+# (the unversioned `?platform=linux&format=tar.gz` endpoint always
+# redirects to the current one).
+[[source]]
+url = "https://dl.discordapp.net/apps/linux/1.0.161/discord-1.0.161.tar.gz"
+sha256 = "5f1e2349a5602b98fabbbfe222c51bbb5c59c77ffc1e7b1d7bc0d86f96ef0af8"

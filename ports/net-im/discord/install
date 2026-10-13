@@ -1,0 +1,10 @@
+tar xzf discord-1.0.161.tar.gz
+mkdir -p "$PKGDIR/usr/lib/discord" "$PKGDIR/usr/bin" \
+         "$PKGDIR/usr/share/applications" "$PKGDIR/usr/share/pixmaps"
+cp -r Discord/. "$PKGDIR/usr/lib/discord/"
+# The vendor launcher is a shell script that bootstraps the real client
+# into the user's config dir on first run; install it as the command.
+cp Discord/discord "$PKGDIR/usr/bin/discord"
+chmod 755 "$PKGDIR/usr/bin/discord"
+cp Discord/discord.desktop "$PKGDIR/usr/share/applications/"
+cp Discord/discord.png "$PKGDIR/usr/share/pixmaps/discord.png"

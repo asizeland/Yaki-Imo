@@ -1,0 +1,6 @@
+name = "man-pages"
+version = "6.9"
+category = "sys-apps"
+
+[dependencies]
+runtime = ["glibc"]

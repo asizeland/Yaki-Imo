@@ -1,0 +1,14 @@
+name = "sqlite"
+version = "3.45.3"
+category = "dev-db"
+
+[dependencies]
+runtime = ["glibc"]
+
+# fts5 changes the feature set but not the C ABI — the
+# `abi_affecting = false` escape valve: it earns a `+p` opt_tag
+# (distinct identity) without cascading rebuilds of dependents.
+[options.fts5]
+default = true
+abi_affecting = false
+description = "Full-text search (FTS4/FTS5) support"

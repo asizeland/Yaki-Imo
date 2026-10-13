@@ -40,6 +40,15 @@
 //!   post-build gate; deps being built in the same cascade are skipped
 //!   (partial view — see `gate_deps_for`).
 //!
+//! ## v4
+//!
+//! - [FIX] `gate_deps_for` now resolves the node's full
+//!   `manifest.dep_set(selection)` — base link+runtime deps plus
+//!   enabled options' `add_deps` — instead of the static `runtime_deps`
+//!   field alone. An option-pulled dep (e.g. lua's readline) previously
+//!   got no `/pkg/deps/<name>` bind, so the recipe's `-I
+//!   /pkg/deps/readline/usr/include` silently pointed at nothing.
+//!
 //! ## v3
 //!
 //! - [MAJOR] `SchedConfig.compiler_wrapper` now comes from `[cache]
@@ -841,16 +850,18 @@ fn spawn_worker(
     });
 }
 
-/// Resolves a node's declared *runtime* deps to the installed store
-/// dirs the post-build gate scans for provided sonames
-/// (`pkg_scanner::DeclaredDep`). A dep with no installed row — one
-/// being built earlier in this same cascade — is resolved through the
-/// plan instead: the node's identity is fixed at plan time, so its
-/// store dir is predictable, and the readiness rule (a node spawns
-/// only after its in-cascade deps are *activated*) guarantees the dir
-/// exists by the time this build runs. Runs on the scheduler thread
-/// (DB access); failures degrade to a partial/empty view with a
-/// warning rather than failing the build.
+/// Resolves a node's dependency set — base link+runtime deps plus the
+/// `add_deps` of every enabled option (`manifest.dep_set`) — to the
+/// installed store dirs the post-build gate scans for provided sonames
+/// (`pkg_scanner::DeclaredDep`) and the recipe build binds at
+/// `/pkg/deps/<name>`. A dep with no installed row — one being built
+/// earlier in this same cascade — is resolved through the plan instead:
+/// the node's identity is fixed at plan time, so its store dir is
+/// predictable, and the readiness rule (a node spawns only after its
+/// in-cascade deps are *activated*) guarantees the dir exists by the
+/// time this build runs. Runs on the scheduler thread (DB access);
+/// failures degrade to a partial/empty view with a warning rather than
+/// failing the build.
 fn gate_deps_for(
     conn: &Connection,
     plan: &BuildPlan,
@@ -867,8 +878,22 @@ fn gate_deps_for(
     let Ok(root) = staging::store_root_for(node.arch, &cfg.store_roots) else {
         return Vec::new();
     };
+    // The transaction-wide selection must be filtered to this package's
+    // declared options before dep_set validates it (typo protection
+    // already happened at plan time).
+    let filtered = node.recipe.manifest.filter_selection(&node.selection);
+    let dep_set = match node.recipe.manifest.dep_set(&filtered) {
+        Ok(deps) => deps,
+        Err(e) => {
+            eprintln!(
+                "pkg: warning: cannot compute {}'s dependency set for the build gate: {e}",
+                node.name
+            );
+            return Vec::new();
+        }
+    };
     let mut deps = Vec::new();
-    for dep in &node.recipe.manifest.runtime_deps {
+    for dep in &dep_set {
         let pkg_core::Dependency::Package { name, .. } = dep else {
             continue; // virtuals/OR-groups have no single concrete store dir
         };

@@ -1,0 +1,7 @@
+name = "less"
+version = "643"
+category = "sys-apps"
+
+[dependencies]
+link = ["ncurses"]
+runtime = ["glibc", "ncurses"]

@@ -1,0 +1,11 @@
+name = "discord"
+version = "1.0.161"
+category = "net-im"
+
+[dependencies]
+runtime = ["glibc"]
+
+# Vendor binary repackaging: relaxes the scanner's undeclared-soname
+# check to warnings (the blob ships its own bundled libs).
+[build]
+binary = true

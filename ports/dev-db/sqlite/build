@@ -1,0 +1,14 @@
+tar xzf sqlite-autoconf-3450300.tar.gz
+cd sqlite-autoconf-3450300
+# Recipe-owned feature plumbing (the §4.3 contract: the PM declares the
+# option, the recipe owns what it does). sqlite-autoconf's configure
+# defaults --enable-fts5=yes, so the OFF branch must disable explicitly
+# — merely omitting the -D flags is not enough.
+if [ "$PKG_OPT_FTS5" = "1" ]; then
+    export CFLAGS="-O2 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_FTS4"
+    FTS5=--enable-fts5
+else
+    FTS5=--disable-fts5
+fi
+./configure --prefix=/usr "$FTS5"
+make

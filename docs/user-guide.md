@@ -360,9 +360,25 @@ $ pkg sync && pkg install hello
 This is exactly how the project's end-to-end suite runs (`e2e/run.sh`
 and siblings fabricate a signed toy repo, build real packages in a
 bubblewrap sandbox, and exercise install → upgrade → undo → GC). To see
-a real system bootstrap, the missing piece is installation media and a
-seed recipe set — that's the next milestone, and this guide is its
-dress rehearsal.
+a real system bootstrap, the missing piece is installation media —
+that's the next milestone, and this guide is its dress rehearsal.
+
+### 10.1 The seed ports tree
+
+The `ports/` directory in the Yakimo source tree is a small
+Gentoo-ports-style recipe collection (zlib, ncurses, readline, sqlite,
+lua, less, man-pages, tty-solitaire, discord) meant for exactly this
+kind of live testing: diverse build systems, real programs, one binary
+blob. `ports/README.md` has the full recipe for turning it into a
+signed local repository (`ports2repo`) and installing it into a
+`PKG_ROOT`; `e2e/ports.sh` automates that flow end to end.
+
+Recipes always pin exact versions and distfile hashes — there is no
+"install the latest" pointer for a client to follow, by design. The
+maintenance-side question "which recipes are behind upstream?" is
+answered by `ports/watch.sh` (per-recipe `watch.toml`, report-only by
+default, `--apply` to bump the pin in place), and any resulting bump
+goes through review and attestation like any other tree change.
 
 ---
 

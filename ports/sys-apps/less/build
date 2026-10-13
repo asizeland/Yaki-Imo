@@ -1,0 +1,6 @@
+tar xzf less-643.tar.gz
+cd less-643
+./configure --prefix=/usr \
+    CPPFLAGS="-I/pkg/deps/ncurses/usr/include" \
+    LDFLAGS="-L/pkg/deps/ncurses/usr/lib -Wl,-rpath,/usr/lib"
+make

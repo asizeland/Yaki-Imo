@@ -1,0 +1,13 @@
+# Plain-Makefile package; upstream 5.4 has explicit
+# linux / linux-readline targets for the option to select between.
+tar xzf lua-5.4.7.tar.gz
+cd lua-5.4.7
+if [ "$PKG_OPT_READLINE" = "1" ]; then
+    make linux-readline \
+        MYCFLAGS="-I/pkg/deps/readline/usr/include" \
+        MYLIBS="-L/pkg/deps/readline/usr/lib -lreadline \
+                -L/pkg/deps/ncurses/usr/lib -lncursesw \
+                -Wl,-rpath,/usr/lib"
+else
+    make linux MYLIBS="-Wl,-rpath,/usr/lib"
+fi

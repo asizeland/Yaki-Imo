@@ -1,0 +1,16 @@
+# Full autotools build with a data payload (the terminfo database is
+# compiled by the freshly built `tic` during install). No C++ or Ada
+# bindings: nothing in the tree uses them, and the C++ binding misdetects
+# bool on modern GCC.
+tar xzf ncurses-6.5.tar.gz
+cd ncurses-6.5
+./configure --prefix=/usr \
+    --with-shared \
+    --without-normal \
+    --without-debug \
+    --without-ada \
+    --without-cxx \
+    --without-cxx-binding \
+    --enable-widec \
+    --with-pkg-config-libdir=/usr/lib/pkgconfig
+make

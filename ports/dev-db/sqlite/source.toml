@@ -1,0 +1,4 @@
+# Upstream's version is 3.45.3; the tarball uses the concatenated form.
+[[source]]
+url = "https://sqlite.org/2024/sqlite-autoconf-3450300.tar.gz"
+sha256 = "b2809ca53124c19c60f42bf627736eae011afdcc205bb48270a5ee9a38191531"

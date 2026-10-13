@@ -1,0 +1,7 @@
+tar xzf readline-8.2.tar.gz
+cd readline-8.2
+./configure --prefix=/usr --disable-static --with-curses \
+    CPPFLAGS="-I/pkg/deps/ncurses/usr/include" \
+    LDFLAGS="-L/pkg/deps/ncurses/usr/lib"
+# The shared libs must record their ncurses dependency themselves.
+make SHLIB_LIBS="-L/pkg/deps/ncurses/usr/lib -lncursesw"

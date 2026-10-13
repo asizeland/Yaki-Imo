@@ -597,15 +597,59 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
     // live: undeclared keys, option-less packages, and per-command
     // widen-else-conflict are hard errors naming the offender.
     let option_config = options::option_config_from(&at(options::OPTIONS_PATH))?;
-    let selected_names: Vec<String> = selected.keys().cloned().collect();
     let manifest_lookup = |n: &str| load_recipe(n).ok().map(|r| r.manifest);
-    let selections = options::effective_selections(
-        &selected_names,
-        &manifest_lookup,
-        &option_config,
-        &selection,
-        &spec_reqs,
-    )?;
+    // Widen fixpoint (§4.3 "enabling is always safe"): an enabled
+    // option's add_deps pull new packages into the selected set, and
+    // those packages' own selections can add further deps. Options are
+    // additive-only over a finite package set, so this terminates.
+    let selections = loop {
+        let selected_names: Vec<String> = selected.keys().cloned().collect();
+        let selections = options::effective_selections(
+            &selected_names,
+            &manifest_lookup,
+            &option_config,
+            &selection,
+            &spec_reqs,
+        )?;
+        let mut added: BTreeMap<String, pkg_core::VersionConstraint> = BTreeMap::new();
+        for name in &selected_names {
+            let Some(manifest) = manifest_lookup(name) else { continue };
+            for dep in manifest
+                .dep_set(options::selection_of(&selections, name))
+                .map_err(PkgError::from)?
+            {
+                if let Dependency::Package { name: dn, constraint } = dep {
+                    if !selected.contains_key(&dn) {
+                        added.insert(dn, constraint);
+                    }
+                }
+            }
+        }
+        if added.is_empty() {
+            break selections;
+        }
+        for (dn, constraint) in added {
+            let recipe = load_recipe(&dn)?;
+            let version = recipe.manifest.version.clone();
+            if !constraint.matches(&version) {
+                return Err(PkgError::Resolution(format!(
+                    "an enabled option requires {dn} ({constraint}), but the tree carries {version}"
+                )));
+            }
+            let profile_constraints = active_profile_constraints(&pins);
+            match graph.resolve_with_constraints(
+                &dn,
+                version,
+                &pins,
+                &profile_constraints,
+                &installed,
+            ) {
+                Ok(solution) => selected.extend(solution),
+                Err(ResolveError::NoSolution(tree)) => return Err(explain_from_tree(&tree)),
+                Err(other) => return Err(PkgError::Resolution(other.to_string())),
+            }
+        }
+    };
     // §7.6.4(d) pre-build gate: a package requiring glibc ≥ the
     // staged-pending target is rejected here, not after a multi-hour
     // build produced binaries the running libc can't execute.

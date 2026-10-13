@@ -302,8 +302,18 @@ fn run_recipe_phases_impl(
     let sources: Vec<PathBuf> =
         pkg_repo::fetch_sources(manifest_entry, &ctx.source_cache)?;
 
-    fs::create_dir_all(&ctx.scratch_dir).map_err(PkgError::Io)?;
-    fs::create_dir_all(&ctx.pkgdir).map_err(PkgError::Io)?;
+    // A build always starts from a pristine tree (design 4.3.2: no
+    // incremental rebuilds — autotools caches and generated headers
+    // bake in the previous build's answers; an option flip would link
+    // stale objects). The artifact cache, not the scratch tree, is the
+    // sanctioned reuse mechanism. (4.3.2's same-tag retry carve-out
+    // would need the phase-marker machinery, which doesn't exist yet.)
+    for dir in [&ctx.scratch_dir, &ctx.pkgdir] {
+        if dir.exists() {
+            fs::remove_dir_all(dir).map_err(PkgError::Io)?;
+        }
+        fs::create_dir_all(dir).map_err(PkgError::Io)?;
+    }
 
     // Materialize the fetched sources into the scratch dir: the Build
     // profile's only RW bind is scratch, so a tarball left in the

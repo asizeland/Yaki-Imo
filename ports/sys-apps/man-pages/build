@@ -1,0 +1,3 @@
+# Data-only package: the build phase is just the unpack (a package
+# with nothing to compile still goes through the phase pipeline).
+tar xJf man-pages-6.9.tar.xz
