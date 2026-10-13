@@ -1113,16 +1113,18 @@ const PROVENANCE_COLUMNS: &str = "package_id, recipe_commit, source_hashes, inde
      attestations, build_host, builder_version, started_at, finished_at, reproducibility";
 
 /// Appends the provenance record for an installed artifact (§3.5). One
-/// row per package (`package_id` is the PRIMARY KEY); a duplicate
-/// insert errors rather than overwriting — the log is append-only by
-/// construction.
+/// row per package (`package_id` is the PRIMARY KEY). A rebuild-in-place
+/// (same identity, changed recipe) re-activates the same package row, so
+/// the insert replaces: the newest build is the truth about the
+/// installed artifact. (A same-content rebuild would produce the same
+/// row anyway — the recorded fields are all inputs to the build.)
 ///
 /// Lock precondition (§9.4): mutating; the caller must hold the
 /// exclusive `/var/lib/pkg/lock` for the enclosing critical section.
 pub fn insert_provenance(conn: &Connection, row: &ProvenanceRow) -> PkgResult<()> {
     conn.execute(
         &format!(
-            "INSERT INTO provenance ({PROVENANCE_COLUMNS})
+            "INSERT OR REPLACE INTO provenance ({PROVENANCE_COLUMNS})
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
         ),
         params![
@@ -1994,9 +1996,15 @@ mod tests {
         insert_provenance(&conn, &row).unwrap();
         assert_eq!(provenance_for_package(&conn, pkg).unwrap(), Some(row.clone()));
 
-        // Append-only: package_id is the PRIMARY KEY, a second insert
-        // for the same package errors rather than overwriting.
-        assert!(insert_provenance(&conn, &row).is_err());
+        // Rebuild-in-place: a second insert for the same package
+        // replaces the provenance row (a rebuilt package gets fresh
+        // provenance, not a UNIQUE violation).
+        let rebuilt = ProvenanceRow {
+            recipe_commit: "cafebabe".to_string(),
+            ..row.clone()
+        };
+        insert_provenance(&conn, &rebuilt).unwrap();
+        assert_eq!(provenance_for_package(&conn, pkg).unwrap(), Some(rebuilt));
     }
 
     #[test]

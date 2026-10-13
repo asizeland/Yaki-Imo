@@ -35,6 +35,11 @@
 //!   was entered via chroot or booted as `/`. Deactivation compares
 //!   lexically-resolved targets (`resolve_link_target`) so links
 //!   written by pre-v3 builds (absolute text) still deactivate cleanly.
+//! - [FIX] Rebuild-in-place (same identity, changed recipe — e.g. a
+//!   recipe edit via `pkg build`) previously replaced the store dir but
+//!   never re-synced the FHS link tree: new files got no links, dropped
+//!   files left stale ones. `activate_built_package` now detects the
+//!   same-identity case and applies `plan_resync_ops`.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -416,6 +421,63 @@ impl ActivationSet {
     }
 }
 
+/// Re-sync ops for a *rebuild-in-place*: the store dir was just
+/// replaced with new content under the same identity, so the
+/// package-set diff is empty — but the new build may add files (new
+/// links needed) or drop files (old links now stale). Returns:
+///
+/// 1. activation ops for every file in the fresh store dir (rename
+///    swap re-points existing links harmlessly), and
+/// 2. removal ops for every live FHS link that points into this store
+///    dir but has no counterpart in the new file list.
+///
+/// The walk is bounded to the top-level directories the store dir
+/// actually ships (usr, bin, sbin, …) — never the whole root.
+pub fn plan_resync_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec<SymlinkOp>> {
+    let mut ops = plan_activation_ops(store_dir, fhs_root)?;
+    let planned: std::collections::BTreeSet<PathBuf> =
+        ops.iter().map(|o| o.link_path.clone()).collect();
+
+    for entry in fs::read_dir(store_dir).map_err(PkgError::Io)? {
+        let entry = entry.map_err(PkgError::Io)?;
+        let top = entry.file_name();
+        if top == cache::MANIFEST_NAME {
+            continue;
+        }
+        let walk_root = fhs_root.join(&top);
+        if !walk_root.is_dir() {
+            continue;
+        }
+        let mut stack = vec![walk_root];
+        while let Some(dir) = stack.pop() {
+            for entry in fs::read_dir(&dir).map_err(PkgError::Io)?.flatten() {
+                let path = entry.path();
+                let Ok(ftype) = entry.file_type() else { continue };
+                if ftype.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if !ftype.is_symlink() || planned.contains(&path) {
+                    continue;
+                }
+                let Ok(target) = fs::read_link(&path) else { continue };
+                let resolved = resolve_link_target(&path, &target);
+                // A live link pointing into this store dir with no file
+                // in the new build: stale, remove it.
+                if resolved.starts_with(store_dir) && !resolved.exists() {
+                    ops.push(SymlinkOp {
+                        link_path: path,
+                        old_target: Some(target),
+                        new_target: None,
+                    });
+                }
+            }
+        }
+    }
+    ops.sort_by(|a, b| a.link_path.cmp(&b.link_path));
+    Ok(ops)
+}
+
 /// The one stage→activate→commit path. `target` is the complete
 /// post-transaction set. Caller supplies the generation-recording
 /// closure so the same path serves `record_generation` (normal) and
@@ -595,7 +657,21 @@ pub fn activate_built_package(
         arch: node.arch,
     };
     let root = store_root_for(node.arch, store_roots)?;
+
+    // A rebuild-in-place (same identity, recipe changed) produces an
+    // empty package-set diff below — without help, the fresh store
+    // dir's *new* files would never get FHS links and dropped files
+    // would leave stale ones. Detect it BEFORE staging and re-sync the
+    // link tree against the new content after it.
+    let rebuild_in_place = ActivationSet::current(conn)?
+        .members
+        .get(&(identity.name.clone(), identity.arch))
+        .is_some_and(|(cur, _)| cur == &identity);
+
     stage_into_store(pkgdir, &identity, &root)?;
+    if rebuild_in_place {
+        apply_symlink_ops(&plan_resync_ops(&root.join(identity.store_dir_name()), pkg_core::paths::root())?)?;
+    }
 
     // The target set = current set with this identity swapped in.
     // Explicitness: an existing row's flag is preserved; a first
@@ -989,5 +1065,44 @@ mod tests {
         );
         // Round-trip through the lexical resolver.
         assert_eq!(resolve_link_target(link, &relative_target(link, target)), target);
+    }
+
+    #[test]
+    fn resync_adds_new_removes_stale_keeps_working() {
+        // Simulate a rebuild-in-place: the store dir is replaced with
+        // different content under the SAME name.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store/foo-1.0+ab1");
+        fs::create_dir_all(store.join("usr/bin")).unwrap();
+        fs::write(store.join("usr/bin/keep"), b"k").unwrap();
+        fs::write(store.join("usr/bin/dropped"), b"d").unwrap();
+        let fhs = tmp.path().join("fhs");
+        fs::create_dir_all(&fhs).unwrap();
+        apply_symlink_ops(&plan_activation_ops(&store, &fhs).unwrap()).unwrap();
+        assert!(fhs.join("usr/bin/dropped").is_symlink());
+
+        // The "rebuild": replace the store dir — keep `keep`, drop
+        // `dropped`, add `added`.
+        fs::remove_dir_all(&store).unwrap();
+        fs::create_dir_all(store.join("usr/bin")).unwrap();
+        fs::write(store.join("usr/bin/keep"), b"k2").unwrap();
+        fs::write(store.join("usr/bin/added"), b"a").unwrap();
+
+        let ops = plan_resync_ops(&store, &fhs).unwrap();
+        apply_symlink_ops(&ops).unwrap();
+        assert!(fhs.join("usr/bin/added").is_symlink(), "new file linked");
+        assert!(
+            !fhs.join("usr/bin/dropped").exists()
+                && !fhs.join("usr/bin/dropped").is_symlink(),
+            "stale link removed"
+        );
+        assert_eq!(
+            resolve_link_target(
+                &fhs.join("usr/bin/keep"),
+                &fs::read_link(fhs.join("usr/bin/keep")).unwrap()
+            ),
+            store.join("usr/bin/keep"),
+            "kept link still resolves into the store"
+        );
     }
 }

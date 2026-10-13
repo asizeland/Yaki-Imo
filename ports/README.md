@@ -40,11 +40,15 @@ tools).
 | sys-apps/tar | archiver | autotools | |
 | sys-apps/gzip | compressor | autotools | |
 | sys-apps/xz | compressor + liblzma | autotools | watched via git tags |
+| sys-apps/sysvinit | init system | plain Makefile | no `sulogin` (needs libxcrypt, not packaged); boots as PID 1 |
 
-The bottom eight are the **chrootable set**: with them installed, the
-root can be chrooted into (`arch-chroot`-style, after mounting
-/proc /sys /dev) and testing continues inside — `e2e/ports.sh` proves
-this with a bwrap chroot-equivalence run.
+The bottom eight (bash through xz) are the **chrootable set**: with
+them installed, the root can be chrooted into (`arch-chroot`-style,
+after mounting /proc /sys /dev) and testing continues inside —
+`e2e/ports.sh` proves this with a bwrap chroot-equivalence run, and
+goes one step further: with `sysvinit` installed it boots the tree's
+`/sbin/init` as PID 1 inside a user namespace and verifies the inittab
+sysinit action runs.
 
 ## Turning the tree into a repository
 

@@ -1,0 +1,4 @@
+# Same SBIN override as the build phase (sulogin dropped — no libcrypt).
+make -C sysvinit-3.14/src ROOT="$PKGDIR" \
+    SBIN="init halt shutdown runlevel killall5 fstab-decode logsave bootlogd" \
+    install

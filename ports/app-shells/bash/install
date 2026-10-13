@@ -1,1 +1,5 @@
 make -C bash-5.3 DESTDIR="$PKGDIR" install
+# /bin/sh: init, configure scripts, and half of unix spawn it by that
+# exact path. bash running as "sh" is POSIX mode — the standard stand-in.
+mkdir -p "$PKGDIR/bin"
+ln -s ../usr/bin/bash "$PKGDIR/bin/sh"

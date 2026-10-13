@@ -72,9 +72,9 @@ EOF
 cat > "$E2E/overlay/sys-libs/glibc/build" <<EOF
 cp $LIBC_PATH libc.so.6
 cp $LD_PATH ld-linux-x86-64.so.2
-# Programs linking -lm/-ldl/-lpthread/-lrt need those sonames provided
-# by the glibc package (modern glibc ships them as stub DSOs).
-for lib in libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1; do
+# Programs linking -lm/-ldl/-lpthread/-lrt/-lutil need those sonames
+# provided by the glibc package (modern glibc ships them as stub DSOs).
+for lib in libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 libutil.so.1; do
     p=\$(dirname $LIBC_PATH)/\$lib
     [ -e "\$p" ] && cp "\$p" "\$lib"
 done
@@ -83,7 +83,7 @@ cat > "$E2E/overlay/sys-libs/glibc/install" <<'EOF'
 mkdir -p "$PKGDIR/usr/lib" "$PKGDIR/lib64"
 cp libc.so.6 "$PKGDIR/usr/lib/"
 cp ld-linux-x86-64.so.2 "$PKGDIR/lib64/"
-for lib in libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1; do
+for lib in libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 libutil.so.1; do
     [ -e "$lib" ] && cp "$lib" "$PKGDIR/usr/lib/"
 done
 EOF
@@ -305,7 +305,52 @@ pass "chroot-equivalence: grep/sed/gzip/xz/bzip2/tar/lua/sqlite/less all work fr
 pass "db check clean after chrootable set"
 
 # ---------------------------------------------------------------
-# 10. Packaging aid: a new recipe that underdeclares its deps must get a
+# 10. sysvinit as PID 1 — the strongest "the installed tree works"
+#     proof available: boot a container whose init comes from the
+#     tree, and have it run a userspace action from inittab.
+# ---------------------------------------------------------------
+"$PKG" install -y sysvinit >"$E2E/sysvinit.log" 2>&1 \
+    || { tail -20 "$E2E/sysvinit.log" >&2; fail "sysvinit install"; }
+[ -e "$ROOT/sbin/init" ] || fail "init activated"
+pass "sysvinit: installed (/sbin/init in the live tree)"
+
+# A one-action test inittab: at sysinit, prove userspace ran by writing
+# a marker into the (RW-bound) root.
+cat > "$ROOT/etc/inittab" <<'EOF'
+id:3:initdefault:
+si::sysinit:/usr/bin/bash -c "echo yakimo-booted > /boot-marker"
+EOF
+rm -f "$ROOT/boot-marker"
+
+# PID 1 inside a pid namespace: --as-pid-1 makes the payload PID 1
+# (bwrap otherwise installs its own reaper), --uid 0 because init
+# refuses non-root. --dev gives the minimal device set; init writes to
+# /dev/console when present and tolerates its absence. (Same host-quirk
+# binds as the chroot test: /nix/store + LD_LIBRARY_PATH stand in for
+# the NixOS interpreter path; unneeded on a normal FHS host.)
+timeout 60 "$REAL_BWRAP" --unshare-all --as-pid-1 --uid 0 --gid 0 \
+    --bind "$ROOT" / --ro-bind /nix/store /nix/store \
+    --proc /proc --dev /dev --tmpfs /run --tmpfs /tmp \
+    --setenv PATH /usr/bin:/bin:/sbin:/usr/sbin \
+    --setenv HOME /root --setenv LD_LIBRARY_PATH /usr/lib \
+    -- /sbin/init >"$E2E/boot.log" 2>&1 &
+BOOT_PID=$!
+for _ in $(seq 1 50); do
+    [ -f "$ROOT/boot-marker" ] && break
+    sleep 0.2
+done
+kill "$BOOT_PID" 2>/dev/null || true
+wait "$BOOT_PID" 2>/dev/null || true
+[ "$(cat "$ROOT/boot-marker" 2>/dev/null)" = "yakimo-booted" ] \
+    || { cat "$E2E/boot.log" >&2; fail "init did not run the sysinit action"; }
+pass "sysvinit as PID 1: booted and ran the inittab sysinit action"
+rm -f "$ROOT/boot-marker" "$ROOT/etc/inittab"
+
+"$PKG" db check >/dev/null 2>&1 || fail "db check after sysvinit"
+pass "db check clean after sysvinit"
+
+# ---------------------------------------------------------------
+# 11. Packaging aid: a new recipe that underdeclares its deps must get a
 #    gate failure that names the PROVIDING package, not just the soname.
 #    badlink links the host's zlib with explicit -I/-L (the sandbox
 #    binds the host toolchain tree RO — what a packager hits on a
