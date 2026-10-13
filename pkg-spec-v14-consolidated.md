@@ -206,7 +206,11 @@ terms.
 name=value` (transaction-scoped, not persisted) > per-package `/etc/pkg/options.toml` entries > profile
 `[options]` sections (§10.3) > global `[defaults]`. Unknown option names, undeclared values, or options on
 packages declaring none are **hard errors at parse time** — a silently ignored `x11 = false` is the
-config-file twin of silent divergence. `pkg info` shows deltas from recipe default. **CI:** builds cover the
+config-file twin of silent divergence. `pkg info` shows deltas from recipe default; `pkg options [name]`
+shows the standing configuration or, for one package, every declared option's effective value, default,
+description, and origin. **`options.toml` may split across files:** a top-level `include = ["sound.toml", …]`
+pulls in plain-named sibling files (no absolute paths, no `..`, one level deep), merged in listed order with
+the main file strongest; every value records its source file so origins stay auditable. **CI:** builds cover the
 two extreme corners (all-default, all-on); middle points are uncovered, accepted, documented.
 
 **Still forbidden (§20, amended wording):** arbitrary `CFLAGS`/`RUSTFLAGS` injection (toolchain flags are the

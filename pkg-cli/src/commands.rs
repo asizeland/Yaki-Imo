@@ -479,6 +479,7 @@ pub fn dispatch(cli: Cli) -> PkgResult<()> {
         Command::Check { target, verbose, depth, nss, suggest } => {
             cmd_check(target, verbose, depth, nss, suggest)
         }
+        Command::Options { name } => cmd_options(name.as_deref()),
         Command::Autoremove { assume_yes } => cmd_autoremove(assume_yes),
         Command::Clean { garbage, cache } => cmd_clean(garbage, cache),
         Command::History { generation, json } => cmd_history(generation, json),
@@ -1793,6 +1794,92 @@ fn cmd_info(name: &str) -> PkgResult<()> {
         }
     }
     Ok(())
+}
+
+/// `pkg options [name]` — build-option visibility (§4.3: options are
+/// the user-facing "USE flags"; they must be discoverable, not buried
+/// in recipe files).
+fn cmd_options(name: Option<&str>) -> PkgResult<()> {
+    let config = options::option_config_from(&at(options::OPTIONS_PATH))?;
+    match name {
+        None => {
+            if config.defaults.is_empty() && config.packages.is_empty() {
+                println!("no standing option configuration ({})", at(options::OPTIONS_PATH).display());
+                return Ok(());
+            }
+            if !config.defaults.is_empty() {
+                println!("[defaults] (every package declaring the key):");
+                for (k, v) in &config.defaults {
+                    println!("  {k} = {v}   ({})", origin_of(&config, &format!("defaults.{k}")));
+                }
+            }
+            for (pkg, entries) in &config.packages {
+                println!("[package.{pkg}]:");
+                for (k, v) in entries {
+                    println!(
+                        "  {k} = {v}   ({})",
+                        origin_of(&config, &format!("package.{pkg}.{k}"))
+                    );
+                }
+            }
+            Ok(())
+        }
+        Some(name) => {
+            let recipe = load_recipe(name)?;
+            let manifest = &recipe.manifest;
+            if manifest.options.is_empty() {
+                println!("{name} declares no build options");
+                return Ok(());
+            }
+            // The installed selection, when the package is installed —
+            // "what you have" next to "what a rebuild would use".
+            let installed: BTreeMap<String, bool> = (|| -> PkgResult<BTreeMap<String, bool>> {
+                let conn = open_db()?;
+                let rows = queries::list_installed_packages(&conn)?;
+                let Some(row) = rows.iter().find(|r| r.name == name) else {
+                    return Ok(BTreeMap::new());
+                };
+                Ok(queries::package_options(&conn, row.id)?
+                    .into_iter()
+                    .map(|o| (o.name, o.value))
+                    .collect())
+            })()
+            .unwrap_or_default();
+
+            println!("{name} {}", manifest.version);
+            for (key, opt) in &manifest.options {
+                let configured = config
+                    .packages
+                    .get(name)
+                    .and_then(|t| t.get(key))
+                    .or_else(|| config.defaults.get(key));
+                let effective = configured.copied().unwrap_or(opt.default);
+                let abi = if opt.abi_affecting { ", abi-affecting" } else { "" };
+                println!("  {key} = {effective}   (default: {}{abi})", opt.default);
+                println!("      {}", opt.description);
+                if let Some(v) = configured {
+                    let scope = if config.packages.get(name).and_then(|t| t.get(key)).is_some() {
+                        format!("package.{name}.{key}")
+                    } else {
+                        format!("defaults.{key}")
+                    };
+                    println!("      configured: {v} ({})", origin_of(&config, &scope));
+                }
+                if let Some(&v) = installed.get(key) {
+                    println!("      installed build: {v}");
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn origin_of(config: &options::OptionConfig, key: &str) -> String {
+    config
+        .origins
+        .get(key)
+        .cloned()
+        .unwrap_or_else(|| "unknown source".to_string())
 }
 
 fn cmd_why(name: &str) -> PkgResult<()> {

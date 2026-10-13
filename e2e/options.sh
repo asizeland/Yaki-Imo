@@ -281,7 +281,43 @@ else
         && pass "undeclared options.toml key is a hard error" \
         || fail "undeclared-key error wording"
 fi
-rm -f "$ROOT/etc/pkg/options.toml"
+# --- 7b. options.toml includes + pkg options visibility ---------
+# The main file pulls in a sibling; the sibling drives the build.
+printf 'include = ["sound.toml"]\n' > "$ROOT/etc/pkg/options.toml"
+printf '[package.greeter]\nloud = true\n' > "$ROOT/etc/pkg/sound.toml"
+"$PKG" install -y greeter >/dev/null 2>&1 || fail "install honoring an included file"
+[ "$("$ROOT/usr/bin/greeter")" = "GREETING FROM PKG E2E" ] || fail "included selection applied"
+pass "include: a sibling file drives the build"
+
+# The main file wins over the include.
+printf 'include = ["sound.toml"]\n[package.greeter]\nloud = false\n' > "$ROOT/etc/pkg/options.toml"
+"$PKG" install -y greeter >/dev/null 2>&1 || fail "main-wins install"
+[ "$("$ROOT/usr/bin/greeter")" = "greeting from pkg e2e" ] || fail "main file wins over include"
+pass "include: the main file wins over included files"
+
+# pkg options: effective value + which file it came from.
+printf '[package.greeter]\nloud = true\n' > "$ROOT/etc/pkg/options.toml"
+rm -f "$ROOT/etc/pkg/sound.toml"
+"$PKG" options greeter > "$E2E/opts.out" 2>&1 || fail "pkg options greeter"
+grep -q "loud = true" "$E2E/opts.out" && grep -q "(options.toml)" "$E2E/opts.out" \
+    && pass "pkg options shows the effective value and its origin file" \
+    || { cat "$E2E/opts.out"; fail "pkg options output"; }
+"$PKG" options > "$E2E/opts-all.out" 2>&1 || fail "pkg options (all)"
+grep -q '\[package.greeter\]' "$E2E/opts-all.out" \
+    && pass "pkg options dumps the standing configuration" \
+    || fail "pkg options dump"
+
+# A missing include is a hard error, not a warning.
+printf 'include = ["nope.toml"]\n' > "$ROOT/etc/pkg/options.toml"
+if "$PKG" install -y greeter >/dev/null 2>"$E2E/include.err"; then
+    fail "missing include accepted"
+else
+    grep -q "cannot read included file" "$E2E/include.err" \
+        && pass "missing include is a hard error naming the file" \
+        || fail "missing-include error wording"
+fi
+
+rm -f "$ROOT/etc/pkg/options.toml" "$ROOT/etc/pkg/sound.toml"
 "$PKG" db check >/dev/null 2>&1 || fail "db check after options.toml tests"
 pass "db check clean after options.toml tests"
 

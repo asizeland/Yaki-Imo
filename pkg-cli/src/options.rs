@@ -9,6 +9,25 @@
 //! 2. per-package `/etc/pkg/options.toml` `[package.<name>]` entries;
 //! 3. global `/etc/pkg/options.toml` `[defaults]`.
 //!
+//! ## Includes (v2)
+//!
+//! A heavy option setup need not live in one file: the main file may
+//! name sibling files to pull in —
+//!
+//! ```toml
+//! include = ["sound.toml", "desktop.toml"]
+//! ```
+//!
+//! Paths are relative to the directory holding `options.toml`;
+//! absolute paths and `..` escapes are hard errors (an include that
+//! reaches outside the config directory is a surprise, and surprises
+//! here are config bugs). Included files use the same `[defaults]` /
+//! `[package.<name>]` tables but may NOT themselves include (one level
+//! keeps the merge order something a user can hold in their head).
+//! Merge order is the include list's order, then the main file last —
+//! the main file always wins. Every entry records its source file so
+//! error messages and `pkg options` can say where a value came from.
+//!
 //! Two rules make this safe rather than merely convenient:
 //!
 //! - **Loud, never silent.** Unknown option names, non-boolean values,
@@ -21,6 +40,7 @@
 //!   resolves them.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::{Component, Path, PathBuf};
 
 use pkg_core::manifest::PackageManifest;
 use pkg_core::{PkgError, PkgResult};
@@ -28,23 +48,30 @@ use pkg_core::{PkgError, PkgResult};
 /// The persisted option-selection file (§4.3).
 pub const OPTIONS_PATH: &str = "/etc/pkg/options.toml";
 
-/// Parsed `/etc/pkg/options.toml`.
+/// Parsed `/etc/pkg/options.toml` (plus any included siblings).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct OptionConfig {
     /// `[defaults]` — applies to every package that declares the key.
     pub defaults: BTreeMap<String, bool>,
     /// `[package.<name>]` — applies to that package only.
     pub packages: BTreeMap<String, BTreeMap<String, bool>>,
+    /// Where each entry came from: `defaults.<key>` or
+    /// `package.<pkg>.<key>` → the file that set it (the main file is
+    /// shown by its bare file name). Display/audit only — merging
+    /// already applied precedence.
+    pub origins: BTreeMap<String, String>,
 }
 
-/// Parses options.toml text. A missing `[defaults]`/`[package]` table
-/// is simply absent; a non-boolean value or an unknown top-level table
-/// is a hard error.
-pub fn parse_option_config(text: &str) -> PkgResult<OptionConfig> {
-    let value: toml::Value = toml::from_str(text)
-        .map_err(|e| PkgError::Parse(format!("{OPTIONS_PATH}: {e}")))?;
+/// Parses options.toml text. `source` names the file in error
+/// messages. A missing `[defaults]`/`[package]` table is simply
+/// absent; a non-boolean value or an unknown top-level table is a hard
+/// error. Returns the config and the file's `include` list (unresolved
+/// — the caller owns path policy).
+fn parse_option_config_named(text: &str, source: &str) -> PkgResult<(OptionConfig, Vec<String>)> {
+    let value: toml::Value =
+        toml::from_str(text).map_err(|e| PkgError::Parse(format!("{source}: {e}")))?;
     let Some(table) = value.as_table() else {
-        return Err(PkgError::Parse(format!("{OPTIONS_PATH}: not a TOML table")));
+        return Err(PkgError::Parse(format!("{source}: not a TOML table")));
     };
     let bool_map = |t: &toml::value::Table, where_: &str| -> PkgResult<BTreeMap<String, bool>> {
         t.iter()
@@ -52,54 +79,144 @@ pub fn parse_option_config(text: &str) -> PkgResult<OptionConfig> {
                 v.as_bool()
                     .map(|b| (k.clone(), b))
                     .ok_or_else(|| {
-                        PkgError::Parse(format!(
-                            "{OPTIONS_PATH}: {where_}.{k} must be true or false"
-                        ))
+                        PkgError::Parse(format!("{source}: {where_}.{k} must be true or false"))
                     })
             })
             .collect()
     };
     let mut out = OptionConfig::default();
+    let mut includes = Vec::new();
     for (key, val) in table {
         match key.as_str() {
+            "include" => {
+                let list = val.as_array().ok_or_else(|| {
+                    PkgError::Parse(format!("{source}: include must be a list of file names"))
+                })?;
+                for entry in list {
+                    includes.push(
+                        entry
+                            .as_str()
+                            .ok_or_else(|| {
+                                PkgError::Parse(format!(
+                                    "{source}: include entries must be strings"
+                                ))
+                            })?
+                            .to_string(),
+                    );
+                }
+            }
             "defaults" => {
                 let t = val.as_table().ok_or_else(|| {
-                    PkgError::Parse(format!("{OPTIONS_PATH}: [defaults] must be a table"))
+                    PkgError::Parse(format!("{source}: [defaults] must be a table"))
                 })?;
-                out.defaults = bool_map(t, "defaults")?;
+                for (k, v) in bool_map(t, "defaults")? {
+                    out.origins.insert(format!("defaults.{k}"), source.to_string());
+                    out.defaults.insert(k, v);
+                }
             }
             "package" => {
                 let t = val.as_table().ok_or_else(|| {
-                    PkgError::Parse(format!("{OPTIONS_PATH}: [package] must be a table"))
+                    PkgError::Parse(format!("{source}: [package] must be a table"))
                 })?;
                 for (pkg, entries) in t {
                     let entries = entries.as_table().ok_or_else(|| {
-                        PkgError::Parse(format!(
-                            "{OPTIONS_PATH}: [package.{pkg}] must be a table"
-                        ))
+                        PkgError::Parse(format!("{source}: [package.{pkg}] must be a table"))
                     })?;
-                    out.packages
-                        .insert(pkg.clone(), bool_map(entries, &format!("package.{pkg}"))?);
+                    let entries = bool_map(entries, &format!("package.{pkg}"))?;
+                    for (k, _) in &entries {
+                        out.origins
+                            .insert(format!("package.{pkg}.{k}"), source.to_string());
+                    }
+                    out.packages.entry(pkg.clone()).or_default().extend(entries);
                 }
             }
             other => {
                 return Err(PkgError::Parse(format!(
-                    "{OPTIONS_PATH}: unknown table [{other}] (expected [defaults] or [package.<name>])"
+                    "{source}: unknown table [{other}] (expected [defaults], [package.<name>], or `include`)"
                 )))
             }
         }
     }
-    Ok(out)
+    Ok((out, includes))
 }
 
-/// Reads and parses the config file at `path`; a missing file is an
-/// empty config, an unreadable or invalid one a hard error.
-pub fn option_config_from(path: &std::path::Path) -> PkgResult<OptionConfig> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => parse_option_config(&text),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(OptionConfig::default()),
-        Err(e) => Err(PkgError::Io(e)),
+/// Parses options.toml text (tests only — production callers go through
+/// [`option_config_from`], which resolves includes against the file's
+/// directory). Includes are a file-level concept; parsing text alone
+/// yields none.
+#[cfg(test)]
+pub fn parse_option_config(text: &str) -> PkgResult<OptionConfig> {
+    Ok(parse_option_config_named(text, OPTIONS_PATH)?.0)
+}
+
+/// Validates one include entry and resolves it against the config
+/// directory: the name must be relative, must not escape via `..`, and
+/// the file must exist and parse. Included files may not include
+/// further (one level, deliberately — the merge order must stay
+/// holdable in one's head).
+fn load_include(dir: &Path, name: &str, main: &str) -> PkgResult<OptionConfig> {
+    let rel = Path::new(name);
+    let mut components = rel.components();
+    let plain_name = matches!(components.next(), Some(Component::Normal(_)))
+        && components.next().is_none();
+    if rel.is_absolute() || !plain_name {
+        return Err(PkgError::Parse(format!(
+            "{main}: include entry '{name}' must be a plain file name \
+             in the same directory (no absolute paths, no `..`, no subdirectories)"
+        )));
     }
+    let path = dir.join(rel);
+    let text = std::fs::read_to_string(&path).map_err(|e| {
+        PkgError::Parse(format!("{main}: cannot read included file {}: {e}", path.display()))
+    })?;
+    let (cfg, nested) = parse_option_config_named(&text, name)?;
+    if !nested.is_empty() {
+        return Err(PkgError::Parse(format!(
+            "{name}: included files may not themselves `include` (one level only)"
+        )));
+    }
+    Ok(cfg)
+}
+
+/// Reads and parses the config file at `path`, resolving its `include`
+/// list against the file's own directory. Merge order: includes in
+/// listed order, the main file last (it always wins). A missing main
+/// file is an empty config; an unreadable or invalid one is a hard
+/// error.
+pub fn option_config_from(path: &Path) -> PkgResult<OptionConfig> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(OptionConfig::default()),
+        Err(e) => return Err(PkgError::Io(e)),
+    };
+    let main_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| OPTIONS_PATH.to_string());
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let (main, includes) = parse_option_config_named(&text, &main_name)?;
+    // Includes apply in listed order (earlier = weaker); the main file
+    // is strongest and merges last.
+    let mut merged = OptionConfig::default();
+    for name in &includes {
+        let included = load_include(dir, name, &main_name)?;
+        merged = merge_configs(merged, included);
+    }
+    Ok(merge_configs(merged, main))
+}
+
+/// `weaker` merged under `stronger`: per-key, the stronger file's value
+/// wins; origins follow the winning write.
+fn merge_configs(weaker: OptionConfig, mut stronger: OptionConfig) -> OptionConfig {
+    let mut out = weaker;
+    for (k, v) in stronger.defaults {
+        out.defaults.insert(k, v);
+    }
+    for (pkg, entries) in stronger.packages {
+        out.packages.entry(pkg).or_default().extend(entries);
+    }
+    out.origins.extend(stronger.origins);
+    out
 }
 
 /// One per-command option request from a `name[opt:key=val]` spec
@@ -196,13 +313,13 @@ pub fn effective_selections(
                 for key in entries.keys() {
                     if !m.options.contains_key(key) {
                         return Err(PkgError::Parse(format!(
-                            "{OPTIONS_PATH}: [package.{pkg}] names undeclared option '{key}'"
+                            "options.toml: [package.{pkg}] names undeclared option '{key}'"
                         )));
                     }
                 }
             }
             None => eprintln!(
-                "pkg: warning: {OPTIONS_PATH} has entries for '{pkg}', which has no local recipe"
+                "pkg: warning: options.toml has entries for '{pkg}', which has no local recipe"
             ),
         }
     }
@@ -440,5 +557,84 @@ mod tests {
         .unwrap();
         assert_eq!(eff["greeter"].get("loud"), Some(&true));
         assert_eq!(eff["greeter"].get("docs"), Some(&false));
+    }
+
+    // --- includes (v2) ---
+
+    /// A unique temp dir per test (pkg-cli has no tempfile dev-dep;
+    /// same pattern as pkg-scanner's gate tests).
+    fn test_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pkg-options-test-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn include_merges_siblings_in_order_and_main_wins() {
+        let dir = test_dir("merge");
+        fs_write(&dir.join("a.toml"), "[defaults]\nnls = false\ndocs = false\n");
+        fs_write(&dir.join("b.toml"), "[defaults]\ndocs = true\n[package.greeter]\nloud = true\n");
+        fs_write(
+            &dir.join("options.toml"),
+            "include = [\"a.toml\", \"b.toml\"]\n[package.greeter]\nloud = false\n",
+        );
+        let cfg = option_config_from(&dir.join("options.toml")).unwrap();
+        assert_eq!(cfg.defaults.get("nls"), Some(&false), "only a sets it");
+        assert_eq!(cfg.defaults.get("docs"), Some(&true), "b later than a");
+        assert_eq!(cfg.packages["greeter"].get("loud"), Some(&false), "main file wins");
+        // Origins follow the winning write.
+        assert_eq!(cfg.origins["defaults.docs"], "b.toml");
+        assert_eq!(cfg.origins["package.greeter.loud"], "options.toml");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn include_rejects_absolute_and_parent_escapes() {
+        let dir = test_dir("escape");
+        for bad in ["/etc/passwd", "../escape.toml", "sub/dir.toml"] {
+            fs_write(
+                &dir.join("options.toml"),
+                &format!("include = [\"{bad}\"]\n"),
+            );
+            let err = option_config_from(&dir.join("options.toml")).unwrap_err();
+            assert!(err.to_string().contains("plain file name"), "{bad}: {err}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn include_missing_file_and_nested_include_are_hard_errors() {
+        let dir = test_dir("missing");
+        fs_write(&dir.join("options.toml"), "include = [\"nope.toml\"]\n");
+        assert!(option_config_from(&dir.join("options.toml")).is_err());
+
+        fs_write(&dir.join("nested.toml"), "include = [\"x.toml\"]\n");
+        fs_write(&dir.join("options.toml"), "include = [\"nested.toml\"]\n");
+        let err = option_config_from(&dir.join("options.toml")).unwrap_err();
+        assert!(err.to_string().contains("one level"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn include_errors_name_the_included_file() {
+        let dir = test_dir("named");
+        fs_write(&dir.join("bad.toml"), "[defaults]\nnls = \"maybe\"\n");
+        fs_write(&dir.join("options.toml"), "include = [\"bad.toml\"]\n");
+        let err = option_config_from(&dir.join("options.toml")).unwrap_err();
+        assert!(err.to_string().contains("bad.toml"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_option_config_still_works_without_files() {
+        // Text-only parsing (no includes possible) keeps working for
+        // callers that never touch the filesystem.
+        let cfg = parse_option_config("[defaults]\nnls = true\n").unwrap();
+        assert_eq!(cfg.defaults.get("nls"), Some(&true));
+    }
+
+    fn fs_write(path: &PathBuf, text: &str) {
+        std::fs::write(path, text).unwrap();
     }
 }

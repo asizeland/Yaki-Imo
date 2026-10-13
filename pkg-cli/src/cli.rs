@@ -165,6 +165,13 @@ pub enum Command {
         suggest: bool,
     },
 
+    /// Show build options — Yakimo's "USE flags" (§4.3). Without a
+    /// name: the standing configuration from options.toml (+ includes),
+    /// with the file each value came from. With a name: every option
+    /// the package's recipe declares — default, description, your
+    /// configured value, and the effective value a build would use.
+    Options { name: Option<String> },
+
     /// Remove dependency-only packages no longer required (§16.6).
     Autoremove {
         #[arg(short = 'y', long)]
