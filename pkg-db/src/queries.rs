@@ -1383,6 +1383,26 @@ pub fn link_interface_hash(
     .map_err(|e| PkgError::Db(e.to_string()))
 }
 
+/// Which installed packages provide `soname`, per their recorded
+/// `link_interface` rows. Feeds the build-failure provider hints: a
+/// packager whose recipe underdeclared a dependency learns *which*
+/// package to add, not just the soname that's missing.
+pub fn packages_providing_soname(conn: &Connection, soname: &str) -> PkgResult<Vec<String>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT p.name FROM link_interface li
+             JOIN packages p ON p.id = li.package_id
+             WHERE li.soname = ?1
+             ORDER BY p.name",
+        )
+        .map_err(|e| PkgError::Db(e.to_string()))?;
+    let rows = stmt
+        .query_map(params![soname], |row| row.get(0))
+        .map_err(|e| PkgError::Db(e.to_string()))?;
+    rows.collect::<rusqlite::Result<Vec<String>>>()
+        .map_err(|e| PkgError::Db(e.to_string()))
+}
+
 // ---------------------------------------------------------------------
 // cascades (spec v14, §4.2.5)
 // ---------------------------------------------------------------------
@@ -2097,6 +2117,23 @@ mod tests {
             header_fingerprint: "hfp123".to_string(),
             link_interface_hash: hash.to_string(),
         }
+    }
+
+    #[test]
+    fn packages_providing_soname_maps_back_to_package_names() {
+        let conn = fresh_db();
+        let z = insert_package(&conn, &test_id("zlib"), Track::Source, 0, true).unwrap();
+        let ssl = insert_package(&conn, &test_id("openssl"), Track::Source, 0, true).unwrap();
+        insert_link_interface(&conn, &test_link_interface(z, "libz.so.1", "hz")).unwrap();
+        insert_link_interface(&conn, &test_link_interface(ssl, "libssl.so.3", "h1")).unwrap();
+
+        assert_eq!(
+            packages_providing_soname(&conn, "libz.so.1").unwrap(),
+            vec!["zlib".to_string()]
+        );
+        assert!(packages_providing_soname(&conn, "libmystery.so.9")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

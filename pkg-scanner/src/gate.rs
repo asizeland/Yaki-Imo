@@ -102,8 +102,10 @@ pub enum LinkagePolicy {
 /// Returns `Ok(())` when verification passes (warnings — unversioned
 /// floors, unparseable non-binary files — do not fail the gate; they
 /// are available via [`verify_build`] for callers that want them), and
-/// `Err(PkgError::Gate)` on the two hard failures: foreign-libc
-/// linkage and undeclared DT_NEEDED linkage.
+/// `Err` on the two hard failures: foreign-libc linkage
+/// (`PkgError::Gate`) and undeclared DT_NEEDED linkage
+/// (`PkgError::GateUndeclared`, structured so the scheduler can attach
+/// provider hints).
 pub fn gate_build(
     store_dir: &Path,
     host_glibc: &Version,
@@ -204,12 +206,14 @@ pub fn verify_build_with_policy(
         }
         match policy {
             LinkagePolicy::Strict => {
-                return Err(PkgError::Gate(format!(
-                    "{}: links against undeclared dependencies: {} \
-                     (not provided by this package or any declared dep)",
-                    artifact.display(),
-                    missing.join(", ")
-                )));
+                // Structured variant (not the flat Gate string) so the
+                // build scheduler can turn the soname list into
+                // "provided by installed package X" hints for the
+                // packager — see orchestrator's undeclared_dep_hints.
+                return Err(PkgError::GateUndeclared {
+                    artifact: artifact.display().to_string(),
+                    sonames: missing,
+                });
             }
             LinkagePolicy::BinaryRedistributable => {
                 report.warnings.push(format!(

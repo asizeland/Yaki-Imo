@@ -48,6 +48,12 @@
 //!   field alone. An option-pulled dep (e.g. lua's readline) previously
 //!   got no `/pkg/deps/<name>` bind, so the recipe's `-I
 //!   /pkg/deps/readline/usr/include` silently pointed at nothing.
+//! - [MAJOR] Undeclared-soname gate failures (`PkgError::GateUndeclared`)
+//!   now surface **provider hints** in the failure report: which
+//!   installed package provides each missing soname, from the recorded
+//!   `link_interface` rows (`undeclared_dep_hints`). The packager
+//!   iterating on a new recipe learns the missing `[dependencies]`
+//!   entry, not just a bare soname.
 //!
 //! ## v3
 //!
@@ -413,6 +419,10 @@ pub struct FailedBuild {
     pub error: String,
     /// First [`FAILURE_LOG_LINES`] lines of the failing phase's log.
     pub log_head: Vec<String>,
+    /// Packaging hints for undeclared-soname gate failures: which
+    /// installed package provides each soname (the recipe author's
+    /// missing `[dependencies]` entry). Empty for non-gate failures.
+    pub dep_hints: Vec<String>,
 }
 
 /// The final cascade report (Issue 4.2.6 + §4.6 anomaly notices).
@@ -447,6 +457,9 @@ impl Report {
             out.push_str("  --- first log lines ---\n");
             for line in &f.log_head {
                 out.push_str(&format!("  | {line}\n"));
+            }
+            for hint in &f.dep_hints {
+                out.push_str(&format!("  hint: {hint}\n"));
             }
             let blocked: Vec<&str> = self
                 .blocked
@@ -647,6 +660,11 @@ struct WorkerDone {
     result: Result<WorkerOk, String>,
     /// stderr tail of the (last) failing phase, or of the build phase.
     log_tail: String,
+    /// Undeclared sonames when the failure was the linkage gate
+    /// (`PkgError::GateUndeclared`), extracted before the error is
+    /// stringified — the scheduler thread turns them into provider
+    /// hints via the DB.
+    undeclared_sonames: Vec<String>,
     duration: Duration,
     cache_hit: bool,
     started_at: i64,
@@ -975,6 +993,7 @@ fn build_node(
                     // the double-build did not run, so no self-match.
                     result: Ok(WorkerOk { pkgdir, repro_match: false }),
                     log_tail: String::new(),
+                    undeclared_sonames: Vec::new(),
                     duration: clock.elapsed(),
                     cache_hit: true,
                     started_at,
@@ -1055,6 +1074,14 @@ fn build_node(
 
     let duration = clock.elapsed();
 
+    // Extract the structured undeclared-soname list before the error is
+    // stringified for the channel — handle_worker_done turns it into
+    // "provided by installed package X" hints (DB access lives there).
+    let undeclared_sonames = match &result {
+        Err(PkgError::GateUndeclared { sonames, .. }) => sonames.clone(),
+        _ => Vec::new(),
+    };
+
     // -- populate the cache on success (Issue 4.5) --------------------
     if result.is_ok() {
         if let Some(cache) = &cfg.cache {
@@ -1076,6 +1103,7 @@ fn build_node(
         tokens_held: tokens,
         result: result.map(|_| WorkerOk { pkgdir, repro_match }).map_err(|e| e.to_string()),
         log_tail: tail,
+        undeclared_sonames,
         duration,
         cache_hit: false,
         started_at,
@@ -1204,11 +1232,13 @@ fn handle_worker_done(
                         &done.name,
                         format!("activation failed: {e}"),
                         first_lines(&done.log_tail, FAILURE_LOG_LINES),
+                        Vec::new(), // not a gate failure — no dep hints
                     );
                 }
             }
         }
         Err(err) => {
+            let dep_hints = undeclared_dep_hints(conn, &done.undeclared_sonames);
             mark_failed_and_block_subtree(
                 plan,
                 states,
@@ -1216,10 +1246,31 @@ fn handle_worker_done(
                 &done.name,
                 err,
                 first_lines(&done.log_tail, FAILURE_LOG_LINES),
+                dep_hints,
             );
         }
     }
     Ok(())
+}
+
+/// Turns the gate's undeclared-soname list into packaging hints: which
+/// *installed* package provides each soname (the recipe author's missing
+/// `[dependencies]` entry), or that no installed package does. Runs on
+/// the scheduler thread — the lookup is a DB query over the recorded
+/// `link_interface` rows.
+fn undeclared_dep_hints(conn: &Connection, sonames: &[String]) -> Vec<String> {
+    sonames
+        .iter()
+        .map(|soname| {
+            match queries::packages_providing_soname(conn, soname) {
+                Ok(names) if !names.is_empty() => format!(
+                    "{soname} — provided by installed package {} (add it to [dependencies])",
+                    names.join(", ")
+                ),
+                _ => format!("{soname} — not provided by any installed package"),
+            }
+        })
+        .collect()
 }
 
 /// Walks an activated store tree and returns the package's aggregate
@@ -1387,6 +1438,7 @@ fn mark_failed_and_block_subtree(
     name: &str,
     error: String,
     log_head: Vec<String>,
+    dep_hints: Vec<String>,
 ) {
     states.insert(name.to_string(), NodeState::Failed);
     let node = &plan.nodes[name];
@@ -1395,6 +1447,7 @@ fn mark_failed_and_block_subtree(
         version: node.version.clone(),
         error,
         log_head,
+        dep_hints,
     });
     // Everything depending on the failed node, transitively, is
     // blocked — the rest of the cascade continues (Issue 4.2.6).

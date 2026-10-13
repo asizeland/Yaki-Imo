@@ -66,6 +66,18 @@ pub enum PkgError {
     /// exit code 3.
     Gate(String),
 
+    /// The gate's undeclared-DT_NEEDED failure, kept structured (instead
+    /// of flattened into `Gate`'s message) so the build scheduler can
+    /// enrich the failure report with provider hints — which installed
+    /// package provides each soname. Same exit code and rendered message
+    /// as `Gate`.
+    GateUndeclared {
+        /// The built artifact carrying the undeclared linkage.
+        artifact: String,
+        /// The sonames no declared dependency provides.
+        sonames: Vec<String>,
+    },
+
     /// Something was requested by name (a package, a pin, a profile) that
     /// doesn't exist.
     NotFound(String),
@@ -117,7 +129,7 @@ impl PkgError {
         match self {
             PkgError::Resolution(_) => 1,
             PkgError::Build(_) => 2,
-            PkgError::Gate(_) => 3,
+            PkgError::Gate(_) | PkgError::GateUndeclared { .. } => 3,
             _ => 70,
         }
     }
@@ -131,6 +143,12 @@ impl fmt::Display for PkgError {
             PkgError::Resolution(msg) => write!(f, "dependency resolution failed: {msg}"),
             PkgError::Build(msg) => write!(f, "build failed: {msg}"),
             PkgError::Gate(msg) => write!(f, "scanner gate rejected build: {msg}"),
+            PkgError::GateUndeclared { artifact, sonames } => write!(
+                f,
+                "scanner gate rejected build: {artifact}: links against undeclared \
+                 dependencies: {} (not provided by this package or any declared dep)",
+                sonames.join(", ")
+            ),
             PkgError::GlibcPending { required, pending_target } => write!(
                 f,
                 "package requires glibc {required}, but {pending_target} is staged \
@@ -219,6 +237,14 @@ mod tests {
         assert_eq!(PkgError::Resolution("x".into()).exit_code(), 1);
         assert_eq!(PkgError::Build("x".into()).exit_code(), 2);
         assert_eq!(PkgError::Gate("x".into()).exit_code(), 3);
+        assert_eq!(
+            PkgError::GateUndeclared {
+                artifact: "/p/usr/bin/bad".into(),
+                sonames: vec!["libz.so.1".into()],
+            }
+            .exit_code(),
+            3
+        );
     }
 
     #[test]
