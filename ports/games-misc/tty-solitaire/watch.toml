@@ -1,0 +1,9 @@
+# tty-solitaire tags releases as v<version> on GitHub; the auto-archive
+# basename (v1.3.1.tar.gz) is ambiguous, so the tree stages the distfile
+# under a package-qualified filename.
+type = "git-tags"
+url = "https://github.com/mpereira/tty-solitaire.git"
+tag_prefix = "v"
+stable_regex = '^[0-9]+\.[0-9]+\.[0-9]+$'
+url_template = "https://github.com/mpereira/tty-solitaire/archive/refs/tags/v{version}.tar.gz"
+filename_template = "tty-solitaire-{version}.tar.gz"
