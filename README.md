@@ -110,6 +110,77 @@ an AI assistant — the docs are fresh, the community is nonexistent, and
 anyone adopting it today is signing up to help find the bugs the e2e
 suite does not know about yet.
 
+## The package manager, from a few angles
+
+**What is it, in one breath?** A source-based package manager for a
+conventional FHS Linux system. A signed recipe tree (ports-style)
+describes software; Yakimo resolves a plan, fetches pinned sources,
+builds each package in a network-less sandbox, and activates the result
+by swapping symlinks into a content-addressed store. The command is
+`pkg`.
+
+**Why source-only?** Because what you run should be what the recipe and
+the upstream source produced — no trusting a build farm you can't see.
+It also makes build options meaningful: a binary repo ships someone
+else's choices; here, `foo[readline]` is built for *your* system. The
+price is compile time, paid down with a compiler cache, parallelism
+knobs, and learned build-time estimates so you at least know the price
+before you pay it.
+
+**How is it different from apt, dnf, or pacman?** Those distribute
+binaries; installation is download-and-unpack, and "what options was
+this built with" is the distributor's business. Yakimo builds on your
+machine, so options are *your* business — and because every transaction
+is an atomic store swap with a recorded generation, there is no
+half-installed state to recover from: there is only the old generation
+and the new one.
+
+**How is it different from Gentoo's Portage?** Same philosophy,
+stricter mechanics. USE flags exist, but as declared boolean options the
+resolver reasons about: a requirement like `foo[x11=1]` is a
+pseudo-dependency, so two packages wanting incompatible variants fail at
+solve time with both requesters named — not at hour three of a compile.
+Options are visible (`pkg options`, `pkg info`), splittable across
+config files, and flipping one is an ordinary undoable transaction.
+Raw `CFLAGS` injection is deliberately forbidden: toolchain flags are
+the distribution's ABI contract, not a user knob.
+
+**Is it Nix?** No. It borrows Nix's *build correctness* — sandboxed
+builds with a closed input set, pinned sources, recorded provenance,
+an immutable store — but not its worldview. The system is a normal FHS
+tree of symlinks into the store, not a store-path universe; identity is
+`name-version+abi+opt_tag`, not an input hash; and immutability here is
+a means to atomic transactions and undo, not an end in itself.
+
+**What stops me from running garbage?** The chain is signed end to end:
+the repository index is signed, sources are fetched only if the repo
+pins their SHA-256, the sandbox has no network, and the build records
+its provenance (recipe commit, source hashes, builder) into the
+database. `pkg audit` then maps what you have installed against
+security advisories. The development placeholder keys in the tree are
+exactly that — a real deployment embeds a real root key set.
+
+**What happens when something breaks?** You go back. Every transaction
+records a generation; `pkg undo` restores a previous one. Integrity is
+checkable (`pkg check`), the database is inspectable (`pkg db check`),
+and when a build fails the error is designed to be a sentence you can
+act on, not a log to excavate.
+
+**Can I package my own software?** Yes — that is a design goal, not an
+afterthought. A recipe is a small directory: a `pkg-meta.toml`
+manifest, a `source.toml` pin, and plain `sh` phase scripts. The build
+pipeline helps you get it right: dependencies appear at stable paths,
+options arrive as `PKG_OPT_*` variables, and if your binary links
+something you didn't declare, the build fails and names the package
+that provides it. The user guide's packaging chapter walks the loop.
+
+**Who is this for?** Someone building or running a hobbyist,
+gaming-friendly source distribution who wants Gentoo-level control
+without resolver opacity — and who is willing to trade install speed
+for verifiability and to help shake down a young system. If you want
+five-thousand packages and five-second installs today, this is not
+that yet.
+
 ## Configuration
 
 System config lives in `/etc/pkg/config.toml`. Supported sections:
