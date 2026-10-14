@@ -40,7 +40,7 @@
 //!   resolves them.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use pkg_core::manifest::PackageManifest;
 use pkg_core::{PkgError, PkgResult};
@@ -207,7 +207,7 @@ pub fn option_config_from(path: &Path) -> PkgResult<OptionConfig> {
 
 /// `weaker` merged under `stronger`: per-key, the stronger file's value
 /// wins; origins follow the winning write.
-fn merge_configs(weaker: OptionConfig, mut stronger: OptionConfig) -> OptionConfig {
+fn merge_configs(weaker: OptionConfig, stronger: OptionConfig) -> OptionConfig {
     let mut out = weaker;
     for (k, v) in stronger.defaults {
         out.defaults.insert(k, v);
@@ -563,7 +563,7 @@ mod tests {
 
     /// A unique temp dir per test (pkg-cli has no tempfile dev-dep;
     /// same pattern as pkg-scanner's gate tests).
-    fn test_dir(tag: &str) -> PathBuf {
+    fn test_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("pkg-options-test-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -634,7 +634,7 @@ mod tests {
         assert_eq!(cfg.defaults.get("nls"), Some(&true));
     }
 
-    fn fs_write(path: &PathBuf, text: &str) {
+    fn fs_write(path: &std::path::PathBuf, text: &str) {
         std::fs::write(path, text).unwrap();
     }
 }

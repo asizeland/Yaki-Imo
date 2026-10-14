@@ -858,29 +858,81 @@ fn spawn_worker(
     recipe_manifest: &Arc<pkg_repo::RecipeManifest>,
 ) {
     let node = plan.nodes.get(&name).expect("node exists").clone();
-    let gate_deps = gate_deps_for(conn, plan, &node, cfg);
+    let (gate_deps, build_deps) = gate_deps_for(conn, plan, &node, cfg);
     let cfg = cfg.clone();
     let tx = tx.clone();
     let recipe_manifest = recipe_manifest.clone();
     thread::spawn(move || {
-        let done = build_node(&node, &cfg, tokens, recipe_manifest, gate_deps);
+        let done = build_node(&node, &cfg, tokens, recipe_manifest, gate_deps, build_deps);
         let _ = tx.send(done);
     });
 }
 
-/// Resolves a node's dependency set — base link+runtime deps plus the
-/// `add_deps` of every enabled option (`manifest.dep_set`) — to the
-/// installed store dirs the post-build gate scans for provided sonames
-/// (`pkg_scanner::DeclaredDep`) and the recipe build binds at
-/// `/pkg/deps/<name>`. A dep with no installed row — one being built
-/// earlier in this same cascade — is resolved through the plan instead:
-/// the node's identity is fixed at plan time, so its store dir is
-/// predictable, and the readiness rule (a node spawns only after its
-/// in-cascade deps are *activated*) guarantees the dir exists by the
-/// time this build runs. Runs on the scheduler thread (DB access);
-/// failures degrade to a partial/empty view with a warning rather than
-/// failing the build.
+/// Resolves a node's runtime dependency set — base link+runtime deps
+/// plus the `add_deps` of every enabled option (`manifest.dep_set`) —
+/// to the installed store dirs the post-build gate scans for provided
+/// sonames (`pkg_scanner::DeclaredDep`) and the recipe build binds at
+/// `/pkg/deps/<name>`. Build-kind deps are resolved separately
+/// (`build_dep_set`) and passed along for BINDS ONLY — they are
+/// excluded from the gate's provider set because a build-only dep may
+/// be absent at runtime, so linking one without a link/runtime
+/// declaration must still fail the gate. A dep with no installed row —
+/// one being built earlier in this same cascade — is resolved through
+/// the plan instead: the node's identity is fixed at plan time, so its
+/// store dir is predictable, and the readiness rule (a node spawns only
+/// after its in-cascade deps are *activated*) guarantees the dir exists
+/// by the time this build runs. Runs on the scheduler thread (DB
+/// access); failures degrade to a partial/empty view with a warning
+/// rather than failing the build.
 fn gate_deps_for(
+    conn: &Connection,
+    plan: &BuildPlan,
+    node: &PlanNode,
+    cfg: &SchedConfig,
+) -> (Vec<DeclaredDep>, Vec<DeclaredDep>) {
+    let resolve = |deps: &[pkg_core::Dependency]| -> Vec<DeclaredDep> {
+        resolve_dep_dirs(deps, conn, plan, node, cfg)
+    };
+    let filtered = node.recipe.manifest.filter_selection(&node.selection);
+    let runtime = node
+        .recipe
+        .manifest
+        .dep_set(&filtered)
+        .map(|d| resolve(&d))
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "pkg: warning: cannot compute {}'s dependency set for the build gate: {e}",
+                node.name
+            );
+            Vec::new()
+        });
+    let runtime_names: std::collections::BTreeSet<&str> =
+        runtime.iter().map(|d| d.name.as_str()).collect();
+    let build_only = node
+        .recipe
+        .manifest
+        .build_dep_set(&filtered)
+        .map(|d| resolve(&d))
+        .unwrap_or_else(|e| {
+            eprintln!(
+                "pkg: warning: cannot compute {}'s build dependency set: {e}",
+                node.name
+            );
+            Vec::new()
+        })
+        .into_iter()
+        // A dep declared both runtime and build binds once, as runtime
+        // (duplicate bwrap binds of one destination would collide).
+        .filter(|d| !runtime_names.contains(d.name.as_str()))
+        .collect();
+    (runtime, build_only)
+}
+
+/// The shared resolution half of [`gate_deps_for`]: map each concrete
+/// `Dependency::Package` to its store dir, preferring the installed
+/// row and falling back to the in-cascade plan node.
+fn resolve_dep_dirs(
+    dep_set: &[pkg_core::Dependency],
     conn: &Connection,
     plan: &BuildPlan,
     node: &PlanNode,
@@ -896,22 +948,8 @@ fn gate_deps_for(
     let Ok(root) = staging::store_root_for(node.arch, &cfg.store_roots) else {
         return Vec::new();
     };
-    // The transaction-wide selection must be filtered to this package's
-    // declared options before dep_set validates it (typo protection
-    // already happened at plan time).
-    let filtered = node.recipe.manifest.filter_selection(&node.selection);
-    let dep_set = match node.recipe.manifest.dep_set(&filtered) {
-        Ok(deps) => deps,
-        Err(e) => {
-            eprintln!(
-                "pkg: warning: cannot compute {}'s dependency set for the build gate: {e}",
-                node.name
-            );
-            return Vec::new();
-        }
-    };
     let mut deps = Vec::new();
-    for dep in &dep_set {
+    for dep in dep_set {
         let pkg_core::Dependency::Package { name, .. } = dep else {
             continue; // virtuals/OR-groups have no single concrete store dir
         };
@@ -964,6 +1002,7 @@ fn build_node(
     tokens: u32,
     recipe_manifest: Arc<pkg_repo::RecipeManifest>,
     gate_deps: Vec<DeclaredDep>,
+    build_deps: Vec<DeclaredDep>,
 ) -> WorkerDone {
     let started_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1017,6 +1056,7 @@ fn build_node(
             host_glibc: cfg.host_glibc.clone(),
             recipe_manifest: recipe_manifest.clone(),
             gate_deps: gate_deps.clone(),
+            build_deps: build_deps.clone(),
         };
         let outcome = run_recipe_phases(&node.recipe, &ctx);
         let tail = outcome
@@ -1058,6 +1098,7 @@ fn build_node(
             host_glibc: cfg.host_glibc.clone(),
             recipe_manifest: recipe_manifest.clone(),
             gate_deps: gate_deps.clone(),
+            build_deps: build_deps.clone(),
         };
         match crate::repro::double_build(
             &node.recipe,

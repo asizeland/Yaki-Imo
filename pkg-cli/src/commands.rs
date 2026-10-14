@@ -271,8 +271,20 @@ pub fn catalog_from_recipes(recipes_dir: &Path) -> PkgResult<Catalog> {
         }
         let text = fs::read_to_string(&meta).map_err(PkgError::Io)?;
         let manifest = PackageManifest::from_toml_str(&text)?;
+        // Base deps at the all-default selection (catalog shape, Issue 1
+        // §2.3) — PLUS base build deps: a build-only package
+        // (linux-headers for glibc) must still be resolved, built, and
+        // installed so the orchestrator can bind it into the builder's
+        // sandbox at /pkg/deps/<name>. Build deps never cascade (§7.7)
+        // and never feed the linkage gate — those halves stay separate.
         let deps = manifest
-            .dep_set(&BTreeMap::new()) // base deps: catalog shape (Issue 1 §2.3)
+            .dep_set(&BTreeMap::new())
+            .and_then(|mut d| {
+                manifest.build_dep_set(&BTreeMap::new()).map(|b| {
+                    d.extend(b);
+                    d
+                })
+            })
             .map_err(PkgError::from)?
             .into_iter()
             .filter_map(|d| match d {
@@ -335,8 +347,16 @@ pub fn graph_from_recipes(
         }
         let text = fs::read_to_string(&meta).map_err(PkgError::Io)?;
         let manifest = PackageManifest::from_toml_str(&text)?;
+        // Base deps at defaults, build deps included — see
+        // `catalog_from_recipes` for why build deps resolve too.
         let deps = manifest
-            .dep_set(&BTreeMap::new()) // base deps: catalog shape (Issue 1 §2.3)
+            .dep_set(&BTreeMap::new())
+            .and_then(|mut d| {
+                manifest.build_dep_set(&BTreeMap::new()).map(|b| {
+                    d.extend(b);
+                    d
+                })
+            })
             .map_err(PkgError::from)?;
         graph.add_package(manifest.name.clone(), manifest.version.clone(), &manifest.provides, deps);
     }
@@ -1150,7 +1170,12 @@ fn build_plan(
         // dependency is built and activated before its dependent's
         // sandbox tries to bind its store dir.
         let mut deps = deps;
-        for d in recipe.manifest.dep_set(&filtered).map_err(PkgError::from)? {
+        // Ordering edges come from ALL dependency kinds: a build dep
+        // (linux-headers for glibc) must likewise be built and
+        // activated before the dependent's sandbox binds it.
+        let mut declared = recipe.manifest.dep_set(&filtered).map_err(PkgError::from)?;
+        declared.extend(recipe.manifest.build_dep_set(&filtered).map_err(PkgError::from)?);
+        for d in declared {
             if let Dependency::Package { name: dn, .. } = d {
                 if dn != name && plan_names.contains(&dn) {
                     deps.insert(dn);
@@ -2204,10 +2229,12 @@ fn cmd_rebuild(affected: bool, assume_yes: bool) -> PkgResult<()> {
         let selection = options::selection_of(&selections, name);
         let abi_tag = compute_abi_tag(&conn, &recipe.manifest, selection)?;
         let opt_tag = recipe.manifest.opt_tag(selection).map_err(PkgError::from)?;
-        let deps_in_cascade = recipe
+        let mut declared = recipe
             .manifest
             .dep_set(selection)
-            .map_err(PkgError::from)?
+            .map_err(PkgError::from)?;
+        declared.extend(recipe.manifest.build_dep_set(selection).map_err(PkgError::from)?);
+        let deps_in_cascade = declared
             .into_iter()
             .filter_map(|d| match d {
                 Dependency::Package { name, .. } => Some(name),
@@ -2989,6 +3016,7 @@ fn cmd_build_env(name: &str, resolve: bool) -> PkgResult<()> {
             packages: Vec::new(),
         }),
         gate_deps: Vec::new(),
+        build_deps: Vec::new(),
     };
     for (k, v) in pkg_build::recipe::build_env(&ctx, &recipe)? {
         println!("{k}={v}");

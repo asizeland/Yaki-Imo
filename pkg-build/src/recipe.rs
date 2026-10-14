@@ -139,6 +139,13 @@ pub struct BuildContext {
     /// installed yet; the gate's undeclared-soname check just can't
     /// attribute those.
     pub gate_deps: Vec<pkg_scanner::DeclaredDep>,
+    /// The node's *build-kind* deps, resolved the same way. These are
+    /// bound at `/pkg/deps/<name>` like the runtime deps — a build-only
+    /// header or tool package (linux-headers for glibc) is useless if
+    /// the build cannot see it — but they are NOT gate providers: a
+    /// build-only dep may be absent at runtime, so linking against one
+    /// without a link/runtime declaration must still fail the gate.
+    pub build_deps: Vec<pkg_scanner::DeclaredDep>,
 }
 
 /// The result of one recipe run.
@@ -347,9 +354,12 @@ fn run_recipe_phases_impl(
     // `/pkg/deps/<name>`, so recipes reference e.g.
     // `-I /pkg/deps/libfoo/usr/include` without globbing the
     // identity-hashed store path (which changes on every rebuild).
+    // Build-kind deps join the binds (visibility) but not the gate
+    // provider set — see `BuildContext::build_deps`.
     let dep_binds: Vec<(PathBuf, PathBuf)> = ctx
         .gate_deps
         .iter()
+        .chain(ctx.build_deps.iter())
         .flat_map(|d| {
             [
                 (d.store_dir.clone(), d.store_dir.clone()),
@@ -503,6 +513,7 @@ default = false
                 packages: Vec::new(),
             }),
             gate_deps: Vec::new(),
+            build_deps: Vec::new(),
         }
     }
 
