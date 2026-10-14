@@ -383,6 +383,45 @@ pass "eudev: udevadm runs (compat 251), libudev in live tree"
 "$PKG" db check >/dev/null 2>&1 || fail "db check after batch 3a"
 pass "db check clean after batch 3a"
 
+# --- batch 3b: the gnutls chain + NetworkManager ----------------------
+if ! "$PKG" install -y gmp nettle libtasn1 p11-kit libunistring gnutls \
+        libnl jansson libndp wpa_supplicant networkmanager \
+        >"$E2E/install3b.log" 2>&1; then
+    tail -40 "$E2E/install3b.log" >&2
+    fail "pkg install batch 3b"
+fi
+pass "installed batch 3b (gnutls chain, libnl, jansson, libndp, wpa_supplicant, networkmanager)"
+
+for lib in libgmp.so.10 libnettle.so.8 libhogweed.so.6 libtasn1.so.6 \
+           libp11-kit.so.0 libunistring.so.5 libnl-3.so.200 \
+           libjansson.so.4 libndp.so.0 libgnutls.so.30; do
+    [ -e "$RLIBS/$lib" ] || fail "$lib activated"
+done
+pass "gnutls chain + libnl/jansson/libndp: shared libs in live tree"
+
+$LOADER "$R/gnutls-cli" --version | grep -q "^gnutls-cli 3\.8\.9$" \
+    || fail "gnutls-cli runs"
+# Real TLS end to end, second implementation: packaged gnutls +
+# packaged CA bundle against a live host (the curl/openssl path was
+# proven above).
+echo | timeout 20 $LOADER "$R/gnutls-cli" \
+    --x509cafile="$ROOT/etc/ssl/certs/ca-certificates.crt" \
+    example.com -p 443 2>&1 | grep -q "subject .CN=example.com" \
+    || fail "gnutls-cli TLS handshake through packaged CA bundle"
+pass "gnutls: TLS handshake verified against the packaged CA bundle"
+
+$LOADER "$ROOT/usr/sbin/wpa_supplicant" -v 2>&1 | grep -q "wpa_supplicant v2\.11" \
+    || fail "wpa_supplicant runs"
+pass "wpa_supplicant: runs (2.11)"
+
+[ "$($LOADER "$ROOT/usr/sbin/NetworkManager" --version)" = "1.50.0" ] \
+    || fail "NetworkManager runs"
+$LOADER "$R/nmcli" --version | grep -q "version 1\.50\.0" || fail "nmcli runs"
+pass "networkmanager: daemon + nmcli run (1.50.0)"
+
+"$PKG" db check >/dev/null 2>&1 || fail "db check after batch 3b"
+pass "db check clean after batch 3b"
+
 # ---------------------------------------------------------------
 # 7. Option-driven dependency: lua[opt:readline=1] pulls readline.
 # ---------------------------------------------------------------

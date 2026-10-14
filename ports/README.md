@@ -57,6 +57,26 @@ it against the packaged glibc is the stage-2 bootstrap.
 | sys-apps/procps-ng | process tools | autotools | ps/top/free; `CC='gcc -std=gnu99'` is forced by its configure, so stdbool.h is force-included |
 | sys-fs/e2fsprogs | ext4 tools | autotools (separate build dir) | mkfs.ext4/e2fsck; uses util-linux's libuuid/libblkid |
 | net-misc/openssh | SSH client+server | autotools | no PAM; sshd runtime setup is a live-system step |
+| dev-lang/python3 | interpreter | autotools | ssl/ctypes/zlib/expat modules link the packaged libs |
+| dev-libs/libffi | C library | autotools | python3 ctypes + glib |
+| dev-util/meson | build system | install-only | python3 payload + relocatable wrapper (works live and in the sandbox) |
+| dev-util/ninja | build tool | bootstrap script (C++) | `-static-libstdc++` — no packaged libstdc++ until stage 2 |
+| dev-libs/pcre2 | regex library | autotools | glib's regex backend |
+| dev-libs/glib | C utility library | meson | the first meson consumer in the tree |
+| sys-apps/dbus | message bus | meson | system bus; NM talks to wpa_supplicant over it |
+| sys-apps/kmod | kernel module tools | meson | modprobe/insmod in /usr/sbin; PKCS#7 via openssl |
+| sys-fs/eudev | device manager | autotools | libudev + udevadm |
+| dev-libs/gmp | bignum library | autotools | `CC="cc -std=gnu17"` — GCC 15's C23 default rejects its K&R configure probes |
+| dev-libs/nettle | crypto primitives | autotools | gnutls backend |
+| dev-libs/libtasn1 | ASN.1 library | autotools | ships asn1Parser (p11-kit's build needs it on PATH) |
+| dev-libs/p11-kit | PKCS#11 glue | meson | trust paths pinned at the packaged CA bundle |
+| dev-libs/libunistring | Unicode library | autotools | gnutls dep |
+| net-libs/gnutls | TLS library | autotools | `--disable-cxx` (libtool's C++ hardcode probing misfires in the sandbox); trust store pinned at /etc/ssl/certs |
+| dev-libs/libnl | netlink library | autotools | wpa_supplicant's nl80211 driver |
+| dev-libs/jansson | JSON library | autotools | NM config parsing |
+| net-libs/libndp | IPv6 ND library | hand-compiled | upstream ships git checkouts without configure; single-TU library built directly (soname from its version-info) |
+| net-wireless/wpa_supplicant | Wi-Fi auth daemon | .config + Makefile | defconfig + `CONFIG_TLS=openssl`; D-Bus activation file installed |
+| net-misc/networkmanager | network daemon | meson | sysvinit/eudev profile: no systemd/polkit, keyfile plugin, internal DHCP, gnutls crypto |
 
 The bottom eight (bash through xz) are the **chrootable set**: with
 them installed, the root can be chrooted into (`arch-chroot`-style,

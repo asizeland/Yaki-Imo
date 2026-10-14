@@ -32,7 +32,7 @@ with option pseudo-dependencies, signed repositories and pinned sources,
 sandboxed reproducible builds with provenance, atomic store-and-symlink
 activation, generations and undo, dependency-directed provider hints for
 packagers — and it has been proven on real upstream software (a
-22-recipe ports tree from glibc to bash, plus repackaged binary blobs
+53-recipe ports tree from glibc to NetworkManager, plus repackaged binary blobs
 like Discord). The first bootstrap stage is done: Yakimo builds real
 glibc 2.42 from source on top of kernel headers and libxcrypt it also
 built, and the result is a self-contained root — the chroot-equivalence
