@@ -6,3 +6,4 @@ category = "dev-util"
 # /usr/bin/meson wrapper. Runs on the packaged python3.
 [dependencies]
 runtime = ["glibc", "python3"]
+build = ["python3"]

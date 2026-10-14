@@ -12,3 +12,10 @@ if [ -x "$here/python3" ]; then PY="$here/python3"; else PY=python3; fi
 exec "$PY" "$here/../lib/meson/meson.py" "$@"
 EOF
 chmod +x "$PKGDIR/usr/bin/meson"
+
+# Byte-compile the module tree so the .pyc files are part of the
+# manifest. Without this, the first run of meson in the live tree
+# writes __pycache__ through the store symlinks and pollutes the
+# (immutable) store, which `db check` then reports as a content
+# mismatch.
+python3 -m compileall -q "$PKGDIR/usr/lib/meson/mesonbuild"

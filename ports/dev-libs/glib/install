@@ -1,2 +1,7 @@
 export PATH="/pkg/deps/ninja/usr/bin:/pkg/deps/python3/usr/bin:$PATH"
 DESTDIR="$PKGDIR" ninja -C glib-build install
+
+# Byte-compile the installed Python tooling (gdbus-codegen's codegen
+# module, gdb pretty-printers) so runtime __pycache__ writes can't
+# pollute the store through the activation symlinks.
+python3 -m compileall -q "$PKGDIR/usr/share/glib-2.0"
