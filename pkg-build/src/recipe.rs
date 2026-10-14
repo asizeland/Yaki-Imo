@@ -174,6 +174,22 @@ pub fn build_env(ctx: &BuildContext, recipe: &Recipe) -> PkgResult<Vec<(String, 
         ),
         ("LC_ALL".into(), "C".into()),
     ];
+    // Build tools consumed from dependency packages (pkgconf, python3,
+    // meson's python process, ...) link against their own libraries, and
+    // the sandbox's /usr/lib is empty — the packaged loader's compiled-in
+    // default path finds nothing. Put every bound dep's usr/lib on
+    // LD_LIBRARY_PATH so /pkg/deps/<name>/usr/bin/* actually runs. This
+    // changes no link decisions (the sandbox has no competing libs); it
+    // only makes dep-provided executables runnable.
+    let dep_lib_path: Vec<String> = ctx
+        .gate_deps
+        .iter()
+        .chain(ctx.build_deps.iter())
+        .map(|d| format!("/pkg/deps/{}/usr/lib", d.name))
+        .collect();
+    if !dep_lib_path.is_empty() {
+        env.push(("LD_LIBRARY_PATH".into(), dep_lib_path.join(":")));
+    }
     // Issue 1 §2.4: one PKG_OPT_<NAME>=0|1 per declared option,
     // including unmentioned options at their defaults. The selection is
     // transaction-wide, so filter it down to the options this package
