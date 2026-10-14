@@ -1,0 +1,1 @@
+make -C glibc-build DESTDIR="$PKGDIR" install

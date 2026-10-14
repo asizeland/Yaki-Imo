@@ -19,7 +19,8 @@ if [ -z "${E2E_INNER:-}" ]; then
         nixpkgs#coreutils nixpkgs#gnutar nixpkgs#gzip nixpkgs#gnumake \
         nixpkgs#sqlite nixpkgs#binutils nixpkgs#gnused nixpkgs#gnugrep \
         nixpkgs#gawk nixpkgs#diffutils nixpkgs#curl nixpkgs#xz \
-        nixpkgs#findutils nixpkgs#util-linux \
+        nixpkgs#findutils nixpkgs#util-linux nixpkgs#bison nixpkgs#m4 \
+        nixpkgs#gettext \
         -c env E2E_INNER=1 sh "$0" "$@"
 fi
 
@@ -56,47 +57,33 @@ sh ports/fetch-distfiles.sh "$DIST" >/dev/null
 pass "distfiles fetched and hash-verified"
 
 # ---------------------------------------------------------------
-# 2. Host-glibc overlay recipe (see e2e/run.sh for why).
+# 2. Seed loader (host-quirk adaptation): binaries linked in the
+#    sandbox carry the PACKAGED interpreter (/lib64/ld-linux, stamped
+#    by the cc wrappers below) — but build-time helper programs
+#    (configure conftests, ncurses' tic) must run in the sandbox
+#    before glibc is installed. On a normal FHS host the loader is
+#    simply there; here we bind the host's loader at /lib64. It
+#    resolves its own libc from /nix/store (compiled-in default path),
+#    which the shim binds RO for builds. The installed system never
+#    sees this: its /lib64/ld-linux is the packaged glibc's.
 # ---------------------------------------------------------------
-LIBC_PATH=$(ldd /bin/sh | awk '/libc\.so/{print $3; exit}')
+SEED=$E2E/seed
+mkdir -p "$SEED/lib64"
 LD_PATH=$(ldd /bin/sh | awk '/ld-linux/{print $1; exit}')
-GLIBC_VER=$(ldd --version | head -1 | awk '{print $NF}')
-echo "host glibc: $GLIBC_VER"
-
-mkdir -p "$E2E/overlay/sys-libs/glibc"
-cat > "$E2E/overlay/sys-libs/glibc/pkg-meta.toml" <<EOF
-name = "glibc"
-version = "$GLIBC_VER"
-category = "sys-libs"
-EOF
-cat > "$E2E/overlay/sys-libs/glibc/build" <<EOF
-cp $LIBC_PATH libc.so.6
-cp $LD_PATH ld-linux-x86-64.so.2
-# Programs linking -lm/-ldl/-lpthread/-lrt/-lutil need those sonames
-# provided by the glibc package (modern glibc ships them as stub DSOs).
-for lib in libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 libutil.so.1; do
-    p=\$(dirname $LIBC_PATH)/\$lib
-    [ -e "\$p" ] && cp "\$p" "\$lib"
-done
-EOF
-cat > "$E2E/overlay/sys-libs/glibc/install" <<'EOF'
-mkdir -p "$PKGDIR/usr/lib" "$PKGDIR/lib64"
-cp libc.so.6 "$PKGDIR/usr/lib/"
-cp ld-linux-x86-64.so.2 "$PKGDIR/lib64/"
-for lib in libm.so.6 libdl.so.2 libpthread.so.0 librt.so.1 libutil.so.1; do
-    [ -e "$lib" ] && cp "$lib" "$PKGDIR/usr/lib/"
-done
-EOF
+cp "$(readlink -f "$LD_PATH")" "$SEED/lib64/ld-linux-x86-64.so.2"
 
 # ---------------------------------------------------------------
-# 3. ports tree + overlay -> signed repo; install recipes.
+# 3. ports tree -> signed repo; install recipes.
 # ---------------------------------------------------------------
 "$PORTS2REPO" "$REPO" "$BASE" --distfiles "$DIST" \
-    "$WS/ports" "$E2E/overlay" >/dev/null
+    "$WS/ports" >/dev/null
 pass "ports2repo built signed repo from the tree"
 
 mkdir -p "$ROOT/etc/pkg"
 printf 'mirrors = [\n  "%s",\n]\n' "$BASE" > "$ROOT/etc/pkg/mirrors.toml"
+# glibc at the default max_pkg_jobs=4 takes a while; open the taps.
+printf '[build]\njobs = %s\nmax_pkg_jobs = %s\n' "$(nproc)" "$(nproc)" \
+    > "$ROOT/etc/pkg/config.toml"
 sh ports/install.sh "$REPO" >/dev/null
 pass "recipes installed into \$PKG_ROOT"
 
@@ -105,12 +92,40 @@ pass "recipes installed into \$PKG_ROOT"
 # ---------------------------------------------------------------
 # readlink -f: farm links must point at the real /nix/store path — a
 # symlink into /run/current-system would dangle inside the sandbox.
-for tool in env sh bash cc gcc g++ ar ranlib make tar gzip xz sed grep \
-            awk cut diff cmp find xargs uname install cp mv mkdir ls pwd \
+for tool in env sh bash ar ranlib make tar gzip xz sed grep \
+            awk gawk cut diff cmp find xargs uname install cp mv mkdir ls pwd \
             ln rm cat chmod touch basename dirname sort uniq wc tr head \
             tail ld as nm readelf objcopy strip sleep date expr printf \
-            test comm m4 od id; do
-    p=$(command -v "$tool" 2>/dev/null) && ln -sf "$(readlink -f "$p")" "$TOOLBIN/$tool"
+            test comm m4 od id bison python3 echo true false readlink \
+            msgfmt objdump perl; do
+    # command -v reports shell builtins (echo, test, printf) as bare
+    # names, which would produce dangling farm links — and make execs
+    # simple commands DIRECTLY (no shell), so a builtin is not good
+    # enough. type -P skips builtins and finds the PATH binary.
+    p=$(command -v "$tool" 2>/dev/null || true)
+    case "$p" in
+        /*) ;;
+        *) p=$(type -P "$tool" 2>/dev/null || true) ;;
+    esac
+    [ -n "$p" ] && ln -sf "$(readlink -f "$p")" "$TOOLBIN/$tool" || true
+done
+
+# cc/gcc/g++ are wrapper scripts, not links: this host's gcc burns a
+# /nix/store interpreter into every binary, which would make the
+# installed root depend on /nix/store forever. Stamp the PACKAGED
+# loader instead, on final links only (compile/assemble/shared-object
+# invocations embed no interpreter). On a normal FHS host the system
+# gcc already targets /lib64/ld-linux and none of this exists.
+for cc_tool in cc gcc g++; do
+    real=$(readlink -f "$(command -v "$cc_tool")")
+    cat > "$TOOLBIN/$cc_tool" <<EOF
+#!/bin/sh
+case " \$* " in
+    *" -c "*|*" -E "*|*" -S "*|*" -shared "*|*" -r "*|*" -print-"*) exec $real "\$@" ;;
+esac
+exec $real "\$@" -Wl,--dynamic-linker=/lib64/ld-linux-x86-64.so.2
+EOF
+    chmod +x "$TOOLBIN/$cc_tool"
 done
 
 cat > "$E2E/shim/bwrap" <<EOF
@@ -128,6 +143,7 @@ filtered() {
             --)
                 printf '%s\0' --ro-bind /nix/store /nix/store
                 printf '%s\0' --ro-bind "$TOOLBIN" /usr/bin
+                printf '%s\0%s\0%s\0' --ro-bind "$SEED/lib64" /lib64
                 printf '%s\0' "\$@"
                 break ;;
             *) printf '%s\0' "\$1"; shift ;;
@@ -157,19 +173,34 @@ pass "trust bootstrap + sync"
 # ---------------------------------------------------------------
 R=$ROOT/usr/bin
 RLIBS=$ROOT/usr/lib
+# Binaries carry the packaged interpreter (/lib64/ld-linux), which does
+# not exist on this host — run host-side smoke tests through the
+# packaged loader explicitly. This doubles as the first proof that the
+# pkg-built glibc actually works. (glibc's elf/Makefile installs the
+# loader itself to /lib64; slibdir=/usr/lib covers the libraries.)
+LOADER="$ROOT/lib64/ld-linux-x86-64.so.2 --library-path $RLIBS"
 if ! "$PKG" install -y zlib bzip2 ncurses sqlite lua less tty-solitaire \
         man-pages >"$E2E/install.log" 2>&1; then
     echo "---- install output ----" >&2
     tail -40 "$E2E/install.log" >&2
     fail "pkg install of the ports tree"
 fi
-pass "installed the whole tree (8 packages + glibc)"
+pass "installed the whole tree (8 packages + toolchain)"
 
 # --- smoke tests -------------------------------------------------
+[ -x "$ROOT/lib64/ld-linux-x86-64.so.2" ] && [ -e "$RLIBS/libc.so.6" ] \
+    || fail "glibc: loader + libc activated"
+[ "$($ROOT/lib64/ld-linux-x86-64.so.2 --version | head -1 | awk '{print $NF}')" = "2.42." ] \
+    || fail "glibc: packaged loader reports 2.42"
+pass "glibc: built from source, loader runs (2.42)"
+
+[ -e "$ROOT/usr/include/linux/unistd.h" ] || fail "linux-headers activated"
+pass "linux-headers: UAPI headers in live tree"
+
 [ -e "$RLIBS/libz.so.1.3.1" ] || fail "zlib lib activated"
 pass "zlib: libz.so.1.3.1 in live tree"
 
-[ "$(echo yakimo | "$R/bzip2" | "$R/bzip2" -d)" = "yakimo" ] \
+[ "$(echo yakimo | $LOADER "$R/bzip2" | $LOADER "$R/bzip2" -d)" = "yakimo" ] \
     || fail "bzip2 round-trip"
 pass "bzip2: compress/decompress round-trip"
 
@@ -177,20 +208,20 @@ pass "bzip2: compress/decompress round-trip"
     || fail "ncurses terminfo + libncursesw"
 pass "ncurses: terminfo database + wide shared lib"
 
-[ "$(LD_LIBRARY_PATH=$RLIBS "$R/sqlite3" :memory: 'select sqlite_version();')" = "3.45.3" ] \
+[ "$($LOADER "$R/sqlite3" :memory: 'select sqlite_version();')" = "3.45.3" ] \
     || fail "sqlite3 runs"
 pass "sqlite: sqlite3 runs, reports 3.45.3"
 
 # fts5 defaults ON (declared default = true).
-LD_LIBRARY_PATH=$RLIBS "$R/sqlite3" :memory: \
+$LOADER "$R/sqlite3" :memory: \
     'create virtual table t using fts5(x);' || fail "sqlite fts5 on by default"
 pass "sqlite: fts5 active at the default selection"
 
-[ "$(LD_LIBRARY_PATH=$RLIBS "$R/lua" -e 'print(2+2)')" = "4" ] \
+[ "$($LOADER "$R/lua" -e 'print(2+2)')" = "4" ] \
     || fail "lua runs"
 pass "lua: interpreter runs"
 
-LD_LIBRARY_PATH=$RLIBS "$R/less" --version >/dev/null 2>&1 \
+$LOADER "$R/less" --version >/dev/null 2>&1 \
     || fail "less --version"
 pass "less: runs (linked against pkg-built ncurses)"
 
@@ -198,7 +229,7 @@ pass "less: runs (linked against pkg-built ncurses)"
 # pty against OUR terminfo; surviving until the timeout (124) proves
 # the ncurses link works.
 if timeout 8 script -qec \
-    "env TERM=xterm TERMINFO=$ROOT/usr/share/terminfo HOME=$E2E/home LD_LIBRARY_PATH=$RLIBS $R/ttysolitaire" \
+    "env TERM=xterm TERMINFO=$ROOT/usr/share/terminfo HOME=$E2E/home $LOADER $R/ttysolitaire" \
     /dev/null >/dev/null 2>&1; then
     : # exited cleanly before the timeout — also fine
 else
@@ -233,7 +264,7 @@ pass "lua[readline]: rebuilt lua links libreadline (identity changed)"
 # ---------------------------------------------------------------
 "$PKG" install -y sqlite --opt fts5=0 >/dev/null 2>&1 \
     || fail "sqlite --opt fts5=0"
-if LD_LIBRARY_PATH=$RLIBS "$R/sqlite3" :memory: \
+if $LOADER "$R/sqlite3" :memory: \
         'create virtual table t using fts5(x);' 2>/dev/null; then
     fail "fts5 still present after --opt fts5=0"
 fi
@@ -252,13 +283,11 @@ pass "final db check clean"
 #    This is what makes the live-media flow work: PKG_ROOT-install,
 #    then chroot in and continue testing.
 #
-#    Host-quirk note: the /nix/store bind + LD_LIBRARY_PATH emulate what
-#    a normal FHS host provides natively. This NixOS host's gcc burns a
-#    /nix/store interpreter path into every binary, and the glibc
-#    package is the host-wrapper — inside the bound root the loader
-#    must come from /nix/store. On the Gentoo live media the
-#    interpreter is the packaged /lib64/ld-linux and /usr/lib is a
-#    default search path, so neither bind is needed there.
+#    Stage-1 bootstrap proof: NO /nix/store bind, no LD_LIBRARY_PATH.
+#    Every binary carries the packaged interpreter
+#    (/lib64/ld-linux -> /usr/lib/ld-linux, from the pkg-built glibc)
+#    and the loader's compiled-in default search path is /usr/lib.
+#    The root runs on its own glibc alone.
 # ---------------------------------------------------------------
 "$PKG" install -y bash coreutils grep sed gawk tar gzip xz \
     >"$E2E/chrootable.log" 2>&1 \
@@ -273,10 +302,8 @@ fi
 pass "activation links are relative (chroot-safe)"
 
 CHROOT_OUT=$("$REAL_BWRAP" --unshare-all --bind "$ROOT" / \
-    --ro-bind /nix/store /nix/store \
     --proc /proc --dev /dev \
     --setenv PATH /usr/bin:/bin --setenv HOME /root \
-    --setenv LD_LIBRARY_PATH /usr/lib \
     -- /usr/bin/bash -ec '
         ls /usr/bin | wc -l
         echo "hello yakimo" | grep -c yakimo
@@ -325,14 +352,14 @@ rm -f "$ROOT/boot-marker"
 # PID 1 inside a pid namespace: --as-pid-1 makes the payload PID 1
 # (bwrap otherwise installs its own reaper), --uid 0 because init
 # refuses non-root. --dev gives the minimal device set; init writes to
-# /dev/console when present and tolerates its absence. (Same host-quirk
-# binds as the chroot test: /nix/store + LD_LIBRARY_PATH stand in for
-# the NixOS interpreter path; unneeded on a normal FHS host.)
+# /dev/console when present and tolerates its absence. Same stage-1
+# proof as the chroot test: no /nix/store, no LD_LIBRARY_PATH — init,
+# the loader, and libc all come from the pkg-built packages.
 timeout 60 "$REAL_BWRAP" --unshare-all --as-pid-1 --uid 0 --gid 0 \
-    --bind "$ROOT" / --ro-bind /nix/store /nix/store \
+    --bind "$ROOT" / \
     --proc /proc --dev /dev --tmpfs /run --tmpfs /tmp \
     --setenv PATH /usr/bin:/bin:/sbin:/usr/sbin \
-    --setenv HOME /root --setenv LD_LIBRARY_PATH /usr/lib \
+    --setenv HOME /root \
     -- /sbin/init >"$E2E/boot.log" 2>&1 &
 BOOT_PID=$!
 for _ in $(seq 1 50); do
@@ -390,7 +417,7 @@ EOF
 : > "$E2E/overlay3/app-misc/badlink/source.toml"
 
 "$PORTS2REPO" "$REPO" "$BASE" --distfiles "$DIST" \
-    "$WS/ports" "$E2E/overlay" "$E2E/overlay3" >/dev/null
+    "$WS/ports" "$E2E/overlay3" >/dev/null
 sh ports/install.sh "$REPO" >/dev/null
 "$PKG" sync --force >/dev/null 2>&1
 

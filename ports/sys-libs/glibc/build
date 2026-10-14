@@ -1,0 +1,16 @@
+tar xJf glibc-2.42.tar.xz
+mkdir -p glibc-build
+cd glibc-build
+# slibdir=/usr/lib: runtime DSOs (libc.so.6, libm, ...) land in
+# /usr/lib like every other library in this layout, and the x86-64
+# dl-cache macro then makes /usr/lib the loader's compiled-in default
+# search dir (plus /usr/lib64, /usr/libx32) — no ld.so.conf needed for
+# the base system. The loader itself still installs to its compiled-in
+# name /lib64/ld-linux-x86-64.so.2 (elf/Makefile), which is exactly
+# what every dynamically linked x86-64 binary asks the kernel for.
+echo "slibdir=/usr/lib" > configparms
+../glibc-2.42/configure --prefix=/usr --libdir=/usr/lib \
+    --with-headers=/pkg/deps/linux-headers/usr/include \
+    --enable-kernel=6.1 --disable-werror --disable-profile \
+    --without-selinux
+make

@@ -432,7 +432,9 @@ $ pkg sync && pkg install hello
 ### 10.1 The seed ports tree
 
 The `ports/` directory in the Yakimo source tree is a small
-Gentoo-ports-style recipe collection meant for live testing: libraries
+Gentoo-ports-style recipe collection meant for live testing: the C
+library and its prerequisites (linux-headers, glibc, libxcrypt — all
+built from source), libraries
 (zlib, bzip2, ncurses, readline), tools (sqlite, lua, less, tar, gzip,
 xz, grep, sed, gawk), documentation (man-pages), a game
 (tty-solitaire), a vendor binary (discord), the chrootable core

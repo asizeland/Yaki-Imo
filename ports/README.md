@@ -2,10 +2,12 @@
 
 A small, deliberately diverse recipe tree (ports-style) used to test
 Yakimo on a live system before bootstrap. Selection criteria: cover
-different build systems and program kinds while keeping the dependency
-graph closed over `glibc` (the bootstrap boundary — the toolchain
-itself is not packaged yet; recipes build with the host's compiler and
-tools).
+different build systems and program kinds. Since the stage-1 bootstrap
+work, the tree includes the C library itself: `glibc` is built from
+source against the packaged `linux-headers`. What is still borrowed
+from the host is the *compiler* — recipes build with the host's gcc
+and binutils; packaging the toolchain (binutils, gcc) and rebuilding
+it against the packaged glibc is the stage-2 bootstrap.
 
 ## Layout
 
@@ -22,6 +24,9 @@ tools).
 
 | Package | Kind | Build style | Notes |
 |---|---|---|---|
+| sys-kernel/linux-headers | kernel UAPI headers | `make headers` + copy | prerequisite for glibc |
+| sys-libs/glibc | C library + loader | autotools (separate build dir) | **the real thing** — `slibdir=/usr/lib` makes /usr/lib the loader's compiled-in default search path; `/lib64/ld-linux` is a symlink |
+| sys-libs/libxcrypt | C library | autotools | libcrypt; re-enables sysvinit's `sulogin` |
 | sys-libs/zlib | C library | custom `configure` | foundational dep |
 | sys-libs/bzip2 | C library + tools | plain Makefile | separate shared-lib target |
 | sys-libs/ncurses | C library + data | full autotools | compiles terminfo via its own `tic` |
@@ -40,7 +45,7 @@ tools).
 | sys-apps/tar | archiver | autotools | |
 | sys-apps/gzip | compressor | autotools | |
 | sys-apps/xz | compressor + liblzma | autotools | watched via git tags |
-| sys-apps/sysvinit | init system | plain Makefile | no `sulogin` (needs libxcrypt, not packaged); boots as PID 1 |
+| sys-apps/sysvinit | init system | plain Makefile | links libxcrypt (`sulogin`); boots as PID 1 |
 
 The bottom eight (bash through xz) are the **chrootable set**: with
 them installed, the root can be chrooted into (`arch-chroot`-style,

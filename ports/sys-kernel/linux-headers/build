@@ -1,0 +1,5 @@
+tar xJf linux-6.19.14.tar.xz
+# "make headers" sanitizes the kernel UAPI headers into usr/include.
+# headers_install is not used: it needs rsync, which is not in the
+# sandbox. The manual copy in the install phase is what LFS does.
+make -C linux-6.19.14 headers

@@ -32,13 +32,17 @@ with option pseudo-dependencies, signed repositories and pinned sources,
 sandboxed reproducible builds with provenance, atomic store-and-symlink
 activation, generations and undo, dependency-directed provider hints for
 packagers — and it has been proven on real upstream software (a
-19-recipe ports tree from zlib to bash, plus repackaged binary blobs
-like Discord), up to booting a Yakimo-installed sysvinit as PID 1 in a
-user namespace. What has not happened is the bootstrap: glibc and the
-toolchain are still host wrappers, so no live system has been installed
-or rebuilt itself with Yakimo yet. That is the next milestone, and the
-ports tree, the chrootable set, and the user guide exist specifically
-to rehearse it.
+22-recipe ports tree from glibc to bash, plus repackaged binary blobs
+like Discord). The first bootstrap stage is done: Yakimo builds real
+glibc 2.42 from source on top of kernel headers and libxcrypt it also
+built, and the result is a self-contained root — the chroot-equivalence
+suite and a Yakimo-installed sysvinit running as PID 1 in a user
+namespace pass with no host libraries bound in. What remains is the
+rest of the bootstrap: the compiler and binutils are still host
+wrappers (stage 2 is packaging them), and no live machine has been
+installed or rebuilt itself with Yakimo yet. That live boot is the
+next milestone, and the ports tree, the chrootable set, and the user
+guide exist specifically to rehearse it.
 
 Past the bootstrap, the roadmap is a set of deliberately deferred
 designs rather than blank space. A **binary repository** is the big
@@ -97,11 +101,11 @@ building is on you.
 
 ## The honest downsides
 
-It is unproven where it matters most: nothing has bootstrapped or run a
+It is unproven where it matters most: nothing has booted or run a
 live system, and the only host it has ever been tested on is the
 developer's. The ports tree is a seed, not a distribution — dozens of
-packages where thousands are needed, with known gaps (no libxcrypt, no
-Python/meson/ninja chain, no real glibc build). Source-only means every
+packages where thousands are needed, with known gaps (the compiler and
+binutils are still host wrappers, no Python/meson/ninja chain). Source-only means every
 install is a compile; the cache and parallelism knobs soften but do not
 remove that. The safety machinery (signing, audit, undo) has been
 exercised against harnesses and adversarial tests, not against years of

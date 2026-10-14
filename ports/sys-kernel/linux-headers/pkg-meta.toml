@@ -1,0 +1,3 @@
+name = "linux-headers"
+version = "6.19.14"
+category = "sys-kernel"

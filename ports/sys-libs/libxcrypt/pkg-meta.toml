@@ -1,0 +1,6 @@
+name = "libxcrypt"
+version = "4.4.38"
+category = "sys-libs"
+
+[dependencies]
+runtime = ["glibc"]

@@ -1,0 +1,4 @@
+tar xJf libxcrypt-4.4.38.tar.xz
+cd libxcrypt-4.4.38
+./configure --prefix=/usr --disable-static
+make

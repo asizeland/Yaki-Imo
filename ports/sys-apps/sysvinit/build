@@ -1,10 +1,14 @@
 tar xJf sysvinit-3.14.tar.xz
 cd sysvinit-3.14
 # Only src/: the top-level Makefile builds man/ first, which needs
-# pod2man (perl) — deliberately not in the build sandbox. The tree's
-# man-pages package already carries the documentation.
+# pod2man (perl pod tools) — deliberately not in the build sandbox. The
+# tree's man-pages package already carries the documentation.
 #
-# sulogin needs <crypt.h> (libxcrypt), which is not packaged yet; drop
-# it until then. The command-line SBIN overrides the Makefile's default
-# list (which adds sulogin + bootlogd when DISTRO is unset).
-make -C src SBIN="init halt shutdown runlevel killall5 fstab-decode logsave bootlogd"
+# No SBIN override: with DISTRO unset the default list includes
+# sulogin + bootlogd. The Makefile's own libcrypt detection looks in
+# $(ROOT)/usr/lib*, which is empty here — point it at the libxcrypt
+# dep explicitly instead.
+make -C src \
+    CPPFLAGS="-I/pkg/deps/libxcrypt/usr/include" \
+    LDFLAGS="-L/pkg/deps/libxcrypt/usr/lib" \
+    SULOGINLIBS="-lcrypt"
