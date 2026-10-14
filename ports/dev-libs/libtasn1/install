@@ -1,0 +1,1 @@
+make -C libtasn1-4.20.0 DESTDIR="$PKGDIR" install

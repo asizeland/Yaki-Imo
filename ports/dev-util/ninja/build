@@ -1,0 +1,6 @@
+tar xzf ninja-1.12.1.tar.gz
+cd ninja-1.12.1
+# -static-libstdc++/-static-libgcc: ninja is C++, and no package
+# provides libstdc++ yet (that is the stage-2 toolchain's job) — the
+# binary must not depend on the host compiler's runtime libs.
+LDFLAGS="-static-libstdc++ -static-libgcc" python3 configure.py --bootstrap

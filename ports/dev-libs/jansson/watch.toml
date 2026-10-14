@@ -1,0 +1,4 @@
+type = "git-tags"
+url = "https://github.com/akheron/jansson.git"
+tag_prefix = "v"
+url_template = "https://github.com/akheron/jansson/releases/download/v{version}/jansson-{version}.tar.gz"

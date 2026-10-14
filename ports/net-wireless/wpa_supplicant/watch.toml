@@ -1,0 +1,4 @@
+type = "release-regex"
+url = "https://w1.fi/releases/"
+regex = 'wpa_supplicant-(2\.[0-9]+)\.tar\.gz'
+url_template = "https://w1.fi/releases/wpa_supplicant-{version}.tar.gz"

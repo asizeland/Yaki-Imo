@@ -1,0 +1,7 @@
+name = "libndp"
+version = "1.9"
+category = "net-libs"
+
+# Neighbor Discovery Protocol (IPv6 RA) library; NetworkManager needs it.
+[dependencies]
+runtime = ["glibc"]

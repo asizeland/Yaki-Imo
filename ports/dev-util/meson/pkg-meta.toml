@@ -1,0 +1,8 @@
+name = "meson"
+version = "1.8.2"
+category = "dev-util"
+
+# Pure Python: the package is the mesonbuild/ module tree plus a thin
+# /usr/bin/meson wrapper. Runs on the packaged python3.
+[dependencies]
+runtime = ["glibc", "python3"]

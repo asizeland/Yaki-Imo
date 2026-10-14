@@ -1,0 +1,7 @@
+name = "libunistring"
+version = "1.3"
+category = "dev-libs"
+
+# Unicode string handling; gnutls links it for IDN.
+[dependencies]
+runtime = ["glibc"]

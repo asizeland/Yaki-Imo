@@ -1,0 +1,13 @@
+# libndp's dist tarballs (libndp.org, and even Debian's orig.tar.gz)
+# are git checkouts without a generated configure — upstream expects
+# autoreconf, and autoconf/automake/libtool are not packaged yet. The
+# library is a single translation unit (libndp/libndp.c, version-info
+# 3:0:3 → soname libndp.so.0), so the recipe compiles it directly.
+tar xzf libndp-1.9.tar.gz
+cd libndp-1.9
+cc -O2 -fPIC -fvisibility=hidden -ffunction-sections -fdata-sections \
+    -Iinclude -D_GNU_SOURCE -c libndp/libndp.c -o libndp.o
+cc -shared -Wl,--gc-sections -Wl,--as-needed \
+    -Wl,-soname,libndp.so.0 -o libndp.so.0.3.0 libndp.o
+cc -O2 -Iinclude -D_GNU_SOURCE utils/ndptool.c -o ndptool \
+    -L. -l:libndp.so.0.3.0 -Wl,-rpath,/usr/lib

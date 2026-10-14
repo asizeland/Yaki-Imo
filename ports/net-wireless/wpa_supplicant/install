@@ -1,0 +1,6 @@
+make -C wpa_supplicant-2.11/wpa_supplicant \
+    DESTDIR="$PKGDIR" BINDIR=/usr/sbin install
+# D-Bus service activation file so NetworkManager can start it on demand.
+mkdir -p "$PKGDIR/usr/share/dbus-1/system-services"
+cp wpa_supplicant-2.11/wpa_supplicant/dbus/fi.w1.wpa_supplicant1.service \
+    "$PKGDIR/usr/share/dbus-1/system-services/" 2>/dev/null || true

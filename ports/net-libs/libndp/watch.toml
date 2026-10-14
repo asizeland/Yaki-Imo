@@ -1,0 +1,4 @@
+type = "release-regex"
+url = "https://deb.debian.org/debian/pool/main/libn/libndp/"
+regex = 'libndp_([0-9]+\.[0-9]+)\.orig\.tar\.gz'
+url_template = "https://deb.debian.org/debian/pool/main/libn/libndp/libndp_{version}.orig.tar.gz"

@@ -1,0 +1,15 @@
+tar xJf dbus-1.16.2.tar.xz
+export PATH="/pkg/deps/meson/usr/bin:/pkg/deps/ninja/usr/bin:/pkg/deps/python3/usr/bin:/pkg/deps/pkgconf/usr/bin:$PATH"
+# dbus 1.16+ is meson-only. traditional_activation stays on: without
+# systemd, service activation is dbus-daemon's own job.
+meson setup dbus-1.16.2 dbus-build \
+    --prefix=/usr --libdir=/usr/lib --sysconfdir=/etc --localstatedir=/var \
+    --buildtype=release \
+    -Druntime_dir=/run \
+    -Dsystemd=disabled -Duser_session=false \
+    -Dtraditional_activation=true \
+    -Dapparmor=disabled -Dselinux=disabled -Dlibaudit=disabled \
+    -Dlaunchd=disabled -Dx11_autolaunch=disabled \
+    -Ddoxygen_docs=disabled -Dducktype_docs=disabled -Dxml_docs=disabled \
+    -Dchecks=false -Dmodular_tests=disabled -Dinstalled_tests=false
+ninja -C dbus-build

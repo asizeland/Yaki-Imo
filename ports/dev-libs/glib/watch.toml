@@ -1,0 +1,4 @@
+type = "release-regex"
+url = "https://download.gnome.org/sources/glib/2.84/"
+regex = 'glib-(2\.84\.[0-9]+)\.tar\.xz'
+url_template = "https://download.gnome.org/sources/glib/2.84/glib-{version}.tar.xz"

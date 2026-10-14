@@ -1,0 +1,4 @@
+type = "release-regex"
+url = "https://www.python.org/ftp/python/"
+regex = '(3\.13\.[0-9]+)/'
+url_template = "https://www.python.org/ftp/python/{version}/Python-{version}.tar.xz"

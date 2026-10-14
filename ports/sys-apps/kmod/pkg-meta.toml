@@ -1,0 +1,11 @@
+name = "kmod"
+version = "34.1"
+category = "sys-apps"
+
+# Kernel module tools: modprobe/insmod/lsmod/depmod. kmod 33+ is
+# meson-only. Compressed modules via xz/zlib; PKCS#7 module signatures
+# via openssl; zstd off (not packaged).
+[dependencies]
+link = ["xz", "zlib", "openssl"]
+runtime = ["glibc", "xz", "zlib", "openssl"]
+build = ["meson", "ninja", "python3", "pkgconf"]

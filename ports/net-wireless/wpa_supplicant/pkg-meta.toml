@@ -1,0 +1,11 @@
+name = "wpa_supplicant"
+version = "2.11"
+category = "net-wireless"
+
+# Wi-Fi authentication daemon; NetworkManager drives it over D-Bus
+# (CONFIG_CTRL_IFACE_DBUS_NEW is on in the shipped defconfig). TLS is
+# openssl. Build is .config-driven, not autotools.
+[dependencies]
+link = ["openssl", "libnl", "dbus"]
+runtime = ["glibc", "openssl", "libnl", "dbus"]
+build = ["pkgconf"]

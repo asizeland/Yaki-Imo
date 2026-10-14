@@ -1,0 +1,8 @@
+tar xJf Python-3.13.5.tar.xz
+cd Python-3.13.5
+./configure --prefix=/usr --enable-shared \
+    --with-ensurepip=no \
+    --with-openssl=/pkg/deps/openssl/usr \
+    CPPFLAGS="-I/pkg/deps/libffi/usr/include -I/pkg/deps/expat/usr/include -I/pkg/deps/zlib/usr/include" \
+    LDFLAGS="-L/pkg/deps/libffi/usr/lib -L/pkg/deps/expat/usr/lib -L/pkg/deps/zlib/usr/lib -Wl,-rpath,/usr/lib"
+make

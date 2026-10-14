@@ -1,0 +1,8 @@
+tar xJf p11-kit-0.25.5.tar.xz
+export PATH="/pkg/deps/meson/usr/bin:/pkg/deps/ninja/usr/bin:/pkg/deps/python3/usr/bin:/pkg/deps/pkgconf/usr/bin:$PATH"
+meson setup p11-kit-0.25.5 p11-build \
+    --prefix=/usr --libdir=/usr/lib --buildtype=release \
+    -Dtrust_module=enabled \
+    -Dtrust_paths=/etc/ssl/certs/ca-certificates.crt \
+    -Dsystemd=disabled -Dgtk_doc=false -Dman=false -Dtest=false
+ninja -C p11-build

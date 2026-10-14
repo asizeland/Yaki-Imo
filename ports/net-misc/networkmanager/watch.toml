@@ -1,0 +1,4 @@
+type = "release-regex"
+url = "https://download.gnome.org/sources/NetworkManager/1.50/"
+regex = 'NetworkManager-(1\.50\.[0-9]+)\.tar\.xz'
+url_template = "https://download.gnome.org/sources/NetworkManager/1.50/NetworkManager-{version}.tar.xz"

@@ -1,0 +1,8 @@
+tar xJf kmod-34.1.tar.xz
+export PATH="/pkg/deps/meson/usr/bin:/pkg/deps/ninja/usr/bin:/pkg/deps/python3/usr/bin:/pkg/deps/pkgconf/usr/bin:$PATH"
+meson setup kmod-34.1 kmod-build \
+    --prefix=/usr --libdir=/usr/lib --buildtype=release \
+    -Dzstd=disabled -Dopenssl=enabled \
+    -Dmanpages=false -Ddocs=false -Dbuild-tests=false \
+    -Dbashcompletiondir=no -Dfishcompletiondir=no -Dzshcompletiondir=no
+ninja -C kmod-build

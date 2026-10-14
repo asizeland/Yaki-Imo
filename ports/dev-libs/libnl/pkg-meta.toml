@@ -1,0 +1,8 @@
+name = "libnl"
+version = "3.11.0"
+category = "dev-libs"
+
+# Netlink sockets library; NetworkManager and wpa_supplicant talk to
+# the kernel through it. bison/flex are farm build tools.
+[dependencies]
+runtime = ["glibc"]

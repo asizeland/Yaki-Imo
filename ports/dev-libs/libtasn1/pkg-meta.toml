@@ -1,0 +1,7 @@
+name = "libtasn1"
+version = "4.20.0"
+category = "dev-libs"
+
+# ASN.1 parser; p11-kit and gnutls need it.
+[dependencies]
+runtime = ["glibc"]

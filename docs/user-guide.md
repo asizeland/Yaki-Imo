@@ -438,8 +438,14 @@ built from source), libraries
 (zlib, bzip2, ncurses, readline), tools (sqlite, lua, less, tar, gzip,
 xz, grep, sed, gawk), documentation (man-pages), a game
 (tty-solitaire), a vendor binary (discord), the chrootable core
-(bash, coreutils), and an init system (sysvinit). `ports/README.md`
-has the details; `e2e/ports.sh` automates the whole flow.
+(bash, coreutils), an init system (sysvinit), the git chain
+(pkgconf, openssl, expat, ca-certificates, curl, git — proven with a
+real HTTPS fetch), a minimal-system set (util-linux, iproute2,
+procps-ng, e2fsprogs, openssh), and the NetworkManager stack
+(python3, meson, ninja, libffi, pcre2, glib, dbus, kmod, eudev,
+the gnutls chain, libnl, wpa_supplicant, networkmanager).
+`ports/README.md` has the details; `e2e/ports.sh` automates the whole
+flow.
 
 Activation links are relative, so a `PKG_ROOT`-installed tree is
 directly chrootable. On live installation media the flow is:

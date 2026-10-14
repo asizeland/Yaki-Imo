@@ -1,0 +1,4 @@
+type = "release-regex"
+url = "https://ftp.gnu.org/gnu/libtasn1/"
+regex = 'libtasn1-(4\.[0-9]+(\.[0-9]+)?)\.tar\.gz'
+url_template = "https://ftp.gnu.org/gnu/libtasn1/libtasn1-{version}.tar.gz"

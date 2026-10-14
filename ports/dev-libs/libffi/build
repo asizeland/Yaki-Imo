@@ -1,0 +1,8 @@
+tar xzf libffi-3.4.8.tar.gz
+cd libffi-3.4.8
+# libffi hides its headers under $libdir/libffi-<ver>/include; every
+# consumer expects them in the normal include dir (same fix LFS uses).
+sed -e '/^includesdir/ s/$(libdir).*$/$(includedir)/' -i include/Makefile.in
+./configure --prefix=/usr --libdir=/usr/lib --disable-static \
+    --disable-multi-os-directory
+make

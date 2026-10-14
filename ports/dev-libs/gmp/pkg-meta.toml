@@ -1,0 +1,8 @@
+name = "gmp"
+version = "6.3.0"
+category = "dev-libs"
+
+# Arbitrary-precision arithmetic; nettle/gnutls chain root. m4 is a
+# farm build tool.
+[dependencies]
+runtime = ["glibc"]

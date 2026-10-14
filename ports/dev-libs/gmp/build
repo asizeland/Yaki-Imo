@@ -1,0 +1,8 @@
+tar xJf gmp-6.3.0.tar.xz
+cd gmp-6.3.0
+# GCC 15 defaults to C23, under which gmp's K&R-style configure probes
+# ("void g(){}") are hard errors and configure concludes "no working
+# compiler". Pinning the standard keeps the probes (and the build) in
+# the dialect gmp 6.3 was written for.
+CC="cc -std=gnu17" ./configure --prefix=/usr --libdir=/usr/lib --disable-static
+make

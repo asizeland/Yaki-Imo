@@ -1,0 +1,7 @@
+name = "jansson"
+version = "2.14"
+category = "dev-libs"
+
+# JSON library; NetworkManager uses it for team/device state.
+[dependencies]
+runtime = ["glibc"]

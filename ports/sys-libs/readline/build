@@ -1,5 +1,5 @@
-tar xzf readline-8.2.tar.gz
-cd readline-8.2
+tar xzf readline-8.3.tar.gz
+cd readline-8.3
 ./configure --prefix=/usr --disable-static --with-curses \
     CPPFLAGS="-I/pkg/deps/ncurses/usr/include" \
     LDFLAGS="-L/pkg/deps/ncurses/usr/lib"

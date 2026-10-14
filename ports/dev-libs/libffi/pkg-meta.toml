@@ -1,0 +1,6 @@
+name = "libffi"
+version = "3.4.8"
+category = "dev-libs"
+
+[dependencies]
+runtime = ["glibc"]

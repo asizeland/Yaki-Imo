@@ -1,0 +1,7 @@
+name = "ninja"
+version = "1.12.1"
+category = "dev-util"
+
+# Bootstraps with python3 (a farm build tool here — no package dep).
+[dependencies]
+runtime = ["glibc"]

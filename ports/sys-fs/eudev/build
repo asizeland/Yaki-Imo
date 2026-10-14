@@ -1,0 +1,6 @@
+tar xzf eudev-3.2.14.tar.gz
+cd eudev-3.2.14
+export PATH="/pkg/deps/pkgconf/usr/bin:$PATH"
+./configure --prefix=/usr --sysconfdir=/etc --disable-static \
+    --disable-manpages --enable-blkid --enable-kmod
+make

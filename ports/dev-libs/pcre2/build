@@ -1,0 +1,5 @@
+tar xjf pcre2-10.45.tar.bz2
+cd pcre2-10.45
+./configure --prefix=/usr --disable-static \
+    --enable-pcre2-16 --enable-pcre2-32 --enable-jit
+make

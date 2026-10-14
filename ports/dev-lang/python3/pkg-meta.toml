@@ -1,0 +1,10 @@
+name = "python3"
+version = "3.13.5"
+category = "dev-lang"
+
+# Needed to BUILD other packages (meson, glib tooling), not for the
+# runtime system. ensurepip is off: pip is not packaged. ctypes gets
+# libffi, https gets openssl, xml gets expat, compression gets zlib.
+[dependencies]
+link = ["openssl", "libffi", "expat", "zlib"]
+runtime = ["glibc", "openssl", "libffi", "expat", "zlib"]

@@ -1,0 +1,9 @@
+tar xJf glib-2.84.3.tar.xz
+export PATH="/pkg/deps/meson/usr/bin:/pkg/deps/ninja/usr/bin:/pkg/deps/python3/usr/bin:/pkg/deps/pkgconf/usr/bin:$PATH"
+meson setup glib-2.84.3 glib-build \
+    --prefix=/usr --libdir=/usr/lib --buildtype=release \
+    -Ddefault_library=shared \
+    -Dman-pages=disabled -Dtests=false -Dintrospection=disabled \
+    -Dselinux=disabled -Ddtrace=false -Dsystemtap=false \
+    -Dsysprof=disabled -Ddocumentation=false -Dlibmount=disabled
+ninja -C glib-build

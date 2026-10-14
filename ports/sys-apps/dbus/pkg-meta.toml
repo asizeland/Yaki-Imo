@@ -1,0 +1,10 @@
+name = "dbus"
+version = "1.16.2"
+category = "sys-apps"
+
+# Message bus — NetworkManager's IPC backbone. systemd integration
+# off; the system bus is started by an init script on a live system.
+[dependencies]
+link = ["expat"]
+runtime = ["glibc", "expat"]
+build = ["pkgconf", "meson", "ninja", "python3"]

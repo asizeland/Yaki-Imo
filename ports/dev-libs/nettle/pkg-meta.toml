@@ -1,0 +1,8 @@
+name = "nettle"
+version = "3.10.1"
+category = "dev-libs"
+
+# Low-level crypto primitives (hogweed needs gmp); gnutls links it.
+[dependencies]
+link = ["gmp"]
+runtime = ["glibc", "gmp"]

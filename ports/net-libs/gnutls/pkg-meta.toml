@@ -1,0 +1,10 @@
+name = "gnutls"
+version = "3.8.9"
+category = "net-libs"
+
+# TLS library; NetworkManager's crypto backend (802.1X certificates,
+# VPN handshakes). Trust store = the ca-certificates bundle.
+[dependencies]
+link = ["nettle", "gmp", "libtasn1", "p11-kit", "libunistring"]
+runtime = ["glibc", "nettle", "gmp", "libtasn1", "p11-kit", "libunistring", "ca-certificates"]
+build = ["pkgconf"]

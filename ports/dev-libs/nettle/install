@@ -1,0 +1,1 @@
+make -C nettle-3.10.1 DESTDIR="$PKGDIR" install

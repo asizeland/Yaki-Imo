@@ -1,0 +1,13 @@
+name = "networkmanager"
+version = "1.50.0"
+category = "net-misc"
+
+# The network daemon + nmcli. Configured for a sysvinit/eudev system:
+# no systemd units, no polkit (root-only auth), internal DHCP client,
+# keyfile config plugin, resolv.conf written directly, gnutls crypto,
+# Wi-Fi via wpa_supplicant. ppp/modem/ovs/team/iwd are off (nothing
+# packaged to back them yet).
+[dependencies]
+link = ["glib", "dbus", "libnl", "jansson", "libndp", "util-linux", "gnutls", "curl", "readline", "eudev"]
+runtime = ["glibc", "glib", "dbus", "libnl", "jansson", "libndp", "util-linux", "gnutls", "curl", "readline", "eudev", "wpa_supplicant", "ca-certificates"]
+build = ["meson", "ninja", "python3", "pkgconf"]

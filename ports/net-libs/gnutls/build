@@ -1,0 +1,14 @@
+tar xJf gnutls-3.8.9.tar.xz
+cd gnutls-3.8.9
+export PATH="/pkg/deps/pkgconf/usr/bin:$PATH"
+DEPS_I="-I/pkg/deps/nettle/usr/include -I/pkg/deps/gmp/usr/include -I/pkg/deps/libtasn1/usr/include -I/pkg/deps/p11-kit/usr/include -I/pkg/deps/libunistring/usr/include"
+DEPS_L="-L/pkg/deps/nettle/usr/lib -L/pkg/deps/gmp/usr/lib -L/pkg/deps/libtasn1/usr/lib -L/pkg/deps/p11-kit/usr/lib -L/pkg/deps/libunistring/usr/lib"
+# --disable-cxx: nothing in the tree uses the C++ bindings, and
+# libtool's C++ hardcode probing misfires in the sandbox.
+./configure --prefix=/usr --disable-static --disable-cxx \
+    --with-default-trust-store-file=/etc/ssl/certs/ca-certificates.crt \
+    --disable-doc --disable-tests --disable-guile --disable-rpath \
+    --without-tpm --without-tpm2 \
+    CPPFLAGS="$DEPS_I" \
+    LDFLAGS="$DEPS_L -Wl,-rpath,/usr/lib"
+make

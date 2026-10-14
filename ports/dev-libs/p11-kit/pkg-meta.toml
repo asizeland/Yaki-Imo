@@ -1,0 +1,10 @@
+name = "p11-kit"
+version = "0.25.5"
+category = "dev-libs"
+
+# PKCS#11 plumbing; gnutls uses its trust module against the
+# ca-certificates bundle. Meson-built.
+[dependencies]
+link = ["libffi", "libtasn1"]
+runtime = ["glibc", "libffi", "libtasn1"]
+build = ["meson", "ninja", "python3", "pkgconf"]

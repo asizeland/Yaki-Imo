@@ -4,7 +4,6 @@ cd util-linux-2.41.1
 # does not exist in the build sandbox — repoint them at the farm bash.
 sed -i '1s|^#!/bin/bash|#!/usr/bin/bash|' tools/all_errnos tools/all_syscalls
 export PATH="/pkg/deps/pkgconf/usr/bin:$PATH"
-export PKG_CONFIG_PATH="/pkg/deps/ncurses/usr/lib/pkgconfig"
 # --disable-liblastlog2: lastlog2 wants sqlite3; not worth the dep.
 # --libdir=/usr/lib: util-linux defaults shared libs to /lib, but the
 # loader's compiled-in search path is /usr/lib — anything linking

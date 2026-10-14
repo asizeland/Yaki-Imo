@@ -1,0 +1,1 @@
+make -C gmp-6.3.0 DESTDIR="$PKGDIR" install

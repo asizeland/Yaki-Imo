@@ -1,0 +1,14 @@
+mkdir -p "$PKGDIR/usr/lib/meson" "$PKGDIR/usr/bin"
+cp -r meson-1.8.2/mesonbuild "$PKGDIR/usr/lib/meson/"
+cp meson-1.8.2/meson.py "$PKGDIR/usr/lib/meson/"
+cat > "$PKGDIR/usr/bin/meson" <<'EOF'
+#!/bin/sh
+# Relocatable wrapper: meson.py is found relative to this script, so it
+# works both in the live tree (/usr/bin/meson) and inside the build
+# sandbox (/pkg/deps/meson/usr/bin/meson). Prefer a python3 installed
+# next to us; otherwise take python3 from PATH (build sandbox case).
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -x "$here/python3" ]; then PY="$here/python3"; else PY=python3; fi
+exec "$PY" "$here/../lib/meson/meson.py" "$@"
+EOF
+chmod +x "$PKGDIR/usr/bin/meson"

@@ -1,0 +1,12 @@
+name = "glib"
+version = "2.84.3"
+category = "dev-libs"
+
+# The GLib/GIO core library — dbus and NetworkManager build on it.
+# Meson-built: the build deps (meson, ninja, python3, pkgconf) are
+# bound at /pkg/deps and put on PATH by the build script; they are NOT
+# runtime deps.
+[dependencies]
+link = ["libffi", "pcre2", "zlib"]
+runtime = ["glibc", "libffi", "pcre2", "zlib"]
+build = ["meson", "ninja", "python3", "pkgconf"]

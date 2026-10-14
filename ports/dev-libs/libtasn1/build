@@ -1,0 +1,4 @@
+tar xzf libtasn1-4.20.0.tar.gz
+cd libtasn1-4.20.0
+./configure --prefix=/usr --disable-static
+make

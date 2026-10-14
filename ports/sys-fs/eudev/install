@@ -1,0 +1,1 @@
+make -C eudev-3.2.14 DESTDIR="$PKGDIR" install

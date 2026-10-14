@@ -20,7 +20,7 @@ if [ -z "${E2E_INNER:-}" ]; then
         nixpkgs#sqlite nixpkgs#binutils nixpkgs#gnused nixpkgs#gnugrep \
         nixpkgs#gawk nixpkgs#diffutils nixpkgs#curl nixpkgs#xz \
         nixpkgs#findutils nixpkgs#util-linux nixpkgs#bison nixpkgs#m4 \
-        nixpkgs#gettext nixpkgs#flex nixpkgs#gperf \
+        nixpkgs#gettext nixpkgs#flex nixpkgs#gperf nixpkgs#bzip2 nixpkgs#dash \
         -c env E2E_INNER=1 sh "$0" "$@"
 fi
 
@@ -97,7 +97,7 @@ for tool in env sh bash ar ranlib make tar gzip xz sed grep \
             ln rm cat chmod touch basename dirname sort uniq wc tr head \
             tail ld as nm readelf objcopy strip sleep date expr printf \
             test comm m4 od id bison python3 echo true false readlink \
-            msgfmt objdump perl rmdir mktemp flex gperf; do
+            msgfmt objdump perl rmdir mktemp flex gperf bzip2; do
     # command -v reports shell builtins (echo, test, printf) as bare
     # names, which would produce dangling farm links — and make execs
     # simple commands DIRECTLY (no shell), so a builtin is not good
@@ -110,13 +110,20 @@ for tool in env sh bash ar ranlib make tar gzip xz sed grep \
     [ -n "$p" ] && ln -sf "$(readlink -f "$p")" "$TOOLBIN/$tool" || true
 done
 
+# /bin/sh inside the build sandbox must link libc only. Dep lib dirs go
+# on LD_LIBRARY_PATH, and a readline-linked host bash picks up the
+# PACKAGED readline through it (undefined-symbol crash the moment a
+# recipe's dep closure contains readline — e.g. networkmanager). dash
+# has no such links, so it is immune.
+ln -sf "$(readlink -f "$(command -v dash)")" "$TOOLBIN/sh"
+
 # cc/gcc/g++ are wrapper scripts, not links: this host's gcc burns a
 # /nix/store interpreter into every binary, which would make the
 # installed root depend on /nix/store forever. Stamp the PACKAGED
 # loader instead, on final links only (compile/assemble/shared-object
 # invocations embed no interpreter). On a normal FHS host the system
 # gcc already targets /lib64/ld-linux and none of this exists.
-for cc_tool in cc gcc g++; do
+for cc_tool in cc gcc g++ c++; do
     real=$(readlink -f "$(command -v "$cc_tool")")
     cat > "$TOOLBIN/$cc_tool" <<EOF
 #!/bin/sh
@@ -143,6 +150,11 @@ filtered() {
             --)
                 printf '%s\0' --ro-bind /nix/store /nix/store
                 printf '%s\0' --ro-bind "$TOOLBIN" /usr/bin
+                # /bin too: the sandbox RO-binds host /bin, and on this
+                # host /bin/sh is the readline-linked nix bash — fatal
+                # once LD_LIBRARY_PATH carries dep lib dirs (see the sh
+                # override above). Later binds shadow earlier ones.
+                printf '%s\0' --ro-bind "$TOOLBIN" /bin
                 printf '%s\0%s\0%s\0' --ro-bind "$SEED/lib64" /lib64
                 printf '%s\0' "\$@"
                 break ;;
@@ -274,6 +286,102 @@ pass "git: init/commit round-trip (https transport compiled in)"
 
 "$PKG" db check >/dev/null 2>&1 || fail "db check after tree install"
 pass "db check clean"
+
+# --- batch 2: the minimal-system set --------------------------------
+if ! "$PKG" install -y util-linux iproute2 procps-ng e2fsprogs openssh \
+        >"$E2E/install2.log" 2>&1; then
+    tail -40 "$E2E/install2.log" >&2
+    fail "pkg install batch 2"
+fi
+pass "installed batch 2 (util-linux, iproute2, procps-ng, e2fsprogs, openssh)"
+
+# util-linux keeps its tools in /bin and /sbin (split-/usr tree).
+$LOADER "$ROOT/bin/mount" --version | grep -q "util-linux 2\.41\.1" \
+    || fail "util-linux mount runs"
+pass "util-linux: mount runs (2.41.1)"
+
+$LOADER "$ROOT/usr/sbin/ip" -V | grep -q "iproute2-6\.15\.0" \
+    || fail "iproute2 ip runs"
+pass "iproute2: ip runs (6.15.0)"
+
+[ "$($LOADER "$R/ps" --version)" = "ps from procps-ng 4.0.5" ] \
+    || fail "procps-ng ps runs"
+pass "procps-ng: ps runs (4.0.5, linked against pkg-built ncursesw)"
+
+# A real filesystem round-trip: build an ext4 image and read it back.
+dd if=/dev/zero of="$E2E/fs.img" bs=1M count=8 2>/dev/null
+$LOADER "$ROOT/usr/sbin/mke2fs" -q -t ext4 -F "$E2E/fs.img" \
+    || fail "mke2fs formats an image"
+$LOADER "$ROOT/usr/sbin/dumpe2fs" -h "$E2E/fs.img" 2>/dev/null \
+    | grep -q "has_journal.*extent" || fail "dumpe2fs reads the image back"
+rm -f "$E2E/fs.img"
+pass "e2fsprogs: mke2fs formats, dumpe2fs reads back (ext4)"
+
+$LOADER "$R/ssh" -V 2>&1 | grep -q "^OpenSSH_10\.0" || fail "openssh ssh runs"
+KEY="$E2E/ssh-smoke-key"
+rm -f "$KEY" "$KEY.pub"
+HOME=$E2E/home $LOADER "$R/ssh-keygen" -q -t ed25519 -N '' -f "$KEY" \
+    || fail "ssh-keygen generates a key"
+[ "$(HOME=$E2E/home $LOADER "$R/ssh-keygen" -y -f "$KEY" | cut -d' ' -f1-2)" \
+    = "$(cut -d' ' -f1-2 "$KEY.pub")" ] || fail "ssh-keygen -y matches .pub"
+rm -f "$KEY" "$KEY.pub"
+pass "openssh: ssh runs, ssh-keygen keygen/derive round-trip"
+
+"$PKG" db check >/dev/null 2>&1 || fail "db check after batch 2"
+pass "db check clean after batch 2"
+
+# --- batch 3a: the meson stack + NM's system deps --------------------
+if ! "$PKG" install -y python3 libffi meson ninja pcre2 glib dbus kmod eudev \
+        >"$E2E/install3a.log" 2>&1; then
+    tail -40 "$E2E/install3a.log" >&2
+    fail "pkg install batch 3a"
+fi
+pass "installed batch 3a (python3, meson+ninja, libffi, pcre2, glib, dbus, kmod, eudev)"
+
+[ "$($LOADER "$R/python3" --version)" = "Python 3.13.5" ] || fail "python3 runs"
+# ssl/ctypes/compression modules prove the openssl/libffi/zlib links.
+$LOADER "$R/python3" -c \
+    'import ssl, ctypes, zlib, xml.dom.expatbuilder; print(ssl.OPENSSL_VERSION)' \
+    | grep -q "^OpenSSL 3\.5\.2 " || fail "python3 stdlib native modules load"
+pass "python3: runs (3.13.5); ssl/ctypes/zlib/expat modules load"
+
+[ -e "$RLIBS/libffi.so.8" ] || fail "libffi activated"
+pass "libffi: libffi.so.8 in live tree"
+
+# The meson wrapper is a /bin/sh script — run its payload through the
+# loader instead (the live tree's /usr/bin/python3 is what the wrapper
+# execs once booted).
+[ "$($LOADER "$R/python3" "$ROOT/usr/lib/meson/meson.py" --version)" = "1.8.2" ] \
+    || fail "meson runs"
+pass "meson: runs (1.8.2, python3 payload)"
+
+[ "$($LOADER "$R/ninja" --version)" = "1.12.1" ] || fail "ninja runs"
+pass "ninja: runs (1.12.1, statically linked C++ runtime)"
+
+$LOADER "$R/pcre2grep" --version | grep -q "^pcre2grep version 10\.45 " \
+    || fail "pcre2grep runs"
+pass "pcre2: pcre2grep runs (10.45)"
+
+PKG_CONFIG_PATH="$RLIBS/pkgconfig" $LOADER "$R/pkgconf" --modversion glib-2.0 \
+    | grep -q "^2\.84\.3$" || fail "glib pkg-config metadata"
+$LOADER "$R/glib-compile-schemas" --version >/dev/null 2>&1 \
+    || fail "glib-compile-schemas runs"
+pass "glib: pkg-config metadata + tooling run (2.84.3)"
+
+$LOADER "$R/dbus-daemon" --version | grep -q "D-Bus Message Bus Daemon 1\.16\.2" \
+    || fail "dbus-daemon runs"
+pass "dbus: dbus-daemon runs (1.16.2)"
+
+$LOADER "$R/kmod" --version | grep -q "^kmod version 34\.1$" || fail "kmod runs"
+[ -e "$ROOT/usr/sbin/modprobe" ] || fail "modprobe symlink activated"
+pass "kmod: runs (34.1), modprobe/insmod/depmod links in /usr/sbin"
+
+[ "$($LOADER "$R/udevadm" --version)" = "251" ] || fail "udevadm runs"
+[ -e "$RLIBS/libudev.so" ] || fail "libudev activated"
+pass "eudev: udevadm runs (compat 251), libudev in live tree"
+
+"$PKG" db check >/dev/null 2>&1 || fail "db check after batch 3a"
+pass "db check clean after batch 3a"
 
 # ---------------------------------------------------------------
 # 7. Option-driven dependency: lua[opt:readline=1] pulls readline.

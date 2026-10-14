@@ -1,0 +1,25 @@
+tar xJf NetworkManager-1.50.0.tar.xz
+cd NetworkManager-1.50.0
+# meson.build looks up xsltproc unconditionally, but only the docs=true
+# path (off here) ever invokes it. libxslt isn't packaged; demote the
+# lookup instead of stubbing a tool.
+sed -i "s/find_program('xsltproc')/find_program('xsltproc', required: false)/" meson.build
+meson setup . ../nm-build \
+    --prefix=/usr --libdir=/usr/lib --sysconfdir=/etc --localstatedir=/var \
+    --buildtype=release \
+    -Dsystemdsystemunitdir=no -Dsession_tracking=no -Dsystemd_journal=false \
+    -Dsuspend_resume=auto \
+    -Dpolkit=false -Dconfig_auth_polkit_default=root-only \
+    -Dselinux=false -Dlibaudit=no \
+    -Dwifi=true -Dwext=true -Diwd=false \
+    -Dppp=false -Dmodem_manager=false -Dofono=false -Dteamdctl=false \
+    -Dovs=false -Dbluez5_dun=false -Debpf=false \
+    -Dnmcli=true -Dnmtui=false -Dnm_cloud_setup=false \
+    -Dconcheck=true \
+    -Dintrospection=false -Dvapi=false -Ddocs=false -Dtests=no -Dqt=false \
+    -Difcfg_rh=false -Difupdown=false -Dconfig_plugins_default=keyfile \
+    -Dresolvconf=no -Dnetconfig=no -Dconfig_dns_rc_manager_default=file \
+    -Ddhclient=no -Ddhcpcd=no -Ddhcpcanon=no -Dconfig_dhcp_default=internal \
+    -Dlibpsl=false -Dcrypto=gnutls -Dreadline=libreadline \
+    -Dfirewalld_zone=false
+ninja -C ../nm-build

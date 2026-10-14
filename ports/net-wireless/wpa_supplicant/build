@@ -1,0 +1,9 @@
+tar xzf wpa_supplicant-2.11.tar.gz
+cd wpa_supplicant-2.11/wpa_supplicant
+cp defconfig .config
+# The one knob defconfig leaves off that we want: TLS via openssl.
+sed -i 's/^#CONFIG_TLS=openssl/CONFIG_TLS=openssl/' .config
+export PATH="/pkg/deps/pkgconf/usr/bin:$PATH"
+make BINDIR=/usr/sbin \
+    EXTRA_CFLAGS="-I/pkg/deps/openssl/usr/include" \
+    LDFLAGS="-L/pkg/deps/openssl/usr/lib -Wl,-rpath,/usr/lib"

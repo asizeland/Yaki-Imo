@@ -1,0 +1,1 @@
+make -C libffi-3.4.8 DESTDIR="$PKGDIR" install

@@ -1,0 +1,4 @@
+type = "git-tags"
+url = "https://github.com/PCRE2Project/pcre2.git"
+tag_prefix = "pcre2-"
+url_template = "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-{version}/pcre2-{version}.tar.bz2"

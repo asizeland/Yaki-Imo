@@ -1,0 +1,20 @@
+mkdir -p "$PKGDIR/usr/lib" "$PKGDIR/usr/lib/pkgconfig" "$PKGDIR/usr/include" "$PKGDIR/usr/bin"
+cp libndp-1.9/libndp.so.0.3.0 "$PKGDIR/usr/lib/"
+ln -s libndp.so.0.3.0 "$PKGDIR/usr/lib/libndp.so.0"
+ln -s libndp.so.0 "$PKGDIR/usr/lib/libndp.so"
+cp libndp-1.9/include/ndp.h "$PKGDIR/usr/include/"
+cp libndp-1.9/ndptool "$PKGDIR/usr/bin/"
+# The .pc's hardcoded prefix=/usr is rewritten to ${pcfiledir}-relative
+# form by the post-install fixup.
+cat > "$PKGDIR/usr/lib/pkgconfig/libndp.pc" <<'EOF'
+prefix=/usr
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: libndp
+Description: Neighbor Discovery Protocol library
+Version: 1.9
+Libs: -L${libdir} -lndp
+Cflags: -I${includedir}
+EOF
