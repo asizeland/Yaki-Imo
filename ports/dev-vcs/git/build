@@ -1,0 +1,14 @@
+tar xJf git-2.50.1.tar.xz
+cd git-2.50.1
+# No ./configure needed: git's Makefile takes everything as variables.
+# All dep -I/-L are explicit: config scripts (curl-config) report their
+# final /usr prefix, useless inside the sandbox where deps live at
+# /pkg/deps/<name>. KEEP THESE FLAGS IDENTICAL IN BOTH PHASES: git's
+# Makefile tracks flags (GIT-CFLAGS) and rebuilds the world on any
+# change — an install phase with different flags recompiles everything.
+make prefix=/usr \
+    NO_PERL=1 NO_TCLTK=1 NO_GETTEXT=1 NO_PYTHON=1 \
+    CURL_CONFIG=/pkg/deps/curl/usr/bin/curl-config \
+    OPENSSL_LIBDIR=/pkg/deps/openssl/usr/lib \
+    CFLAGS="-O2 -I/pkg/deps/curl/usr/include -I/pkg/deps/zlib/usr/include -I/pkg/deps/expat/usr/include -I/pkg/deps/openssl/usr/include" \
+    LDFLAGS="-L/pkg/deps/curl/usr/lib -L/pkg/deps/zlib/usr/lib -L/pkg/deps/expat/usr/lib -L/pkg/deps/openssl/usr/lib -Wl,-rpath,/usr/lib"

@@ -1,0 +1,8 @@
+name = "ca-certificates"
+version = "2025.07.15"
+category = "app-misc"
+
+# Data-only: the Mozilla CA bundle as a single PEM, installed where
+# curl/openssl are configured to look. Version is the bundle date.
+[dependencies]
+runtime = ["glibc"]

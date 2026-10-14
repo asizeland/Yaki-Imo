@@ -1,0 +1,11 @@
+tar xJf curl-8.14.1.tar.xz
+cd curl-8.14.1
+./configure --prefix=/usr --disable-static \
+    --with-openssl=/pkg/deps/openssl/usr \
+    --with-zlib=/pkg/deps/zlib/usr \
+    --with-ca-bundle=/etc/ssl/certs/ca-certificates.crt \
+    --with-ca-path=/etc/ssl/certs \
+    --without-libpsl --without-brotli --without-zstd \
+    --without-nghttp2 --without-libidn2 --without-librtmp \
+    --disable-ldap --disable-ldaps
+make

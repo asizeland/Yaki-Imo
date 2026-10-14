@@ -1,0 +1,15 @@
+tar xJf procps-ng-4.0.5.tar.xz
+cd procps-ng-4.0.5
+export PATH="/pkg/deps/pkgconf/usr/bin:$PATH"
+# The tree's ncurses is wide-only (libncursesw, and its pkg-config
+# files are ncursesw.pc); procps's configure probes plain 'ncurses',
+# so preset the autoconf overrides instead.
+export NCURSES_CFLAGS="-I/pkg/deps/ncurses/usr/include"
+export NCURSES_LIBS="-L/pkg/deps/ncurses/usr/lib -lncursesw"
+# -include stdbool.h: configure forces CC='gcc -std=gnu99', and watch.c
+# uses `false` without including <stdbool.h> — force-include it.
+./configure --prefix=/usr --disable-static \
+    --without-systemd --with-ncurses \
+    CPPFLAGS="-include stdbool.h" \
+    LDFLAGS="-Wl,-rpath,/usr/lib"
+make

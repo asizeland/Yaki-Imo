@@ -1,0 +1,9 @@
+name = "procps-ng"
+version = "4.0.5"
+category = "sys-apps"
+
+# ps/top/free/vmstat — reads /proc, renders via ncurses.
+[dependencies]
+link = ["ncurses"]
+runtime = ["glibc", "ncurses"]
+build = ["pkgconf"]

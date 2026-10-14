@@ -1,0 +1,1 @@
+make -C openssl-3.5.2 DESTDIR="$PKGDIR" install_sw

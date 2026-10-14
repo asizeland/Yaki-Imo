@@ -1,0 +1,5 @@
+type = "git-tags"
+url = "https://github.com/openssl/openssl.git"
+tag_prefix = "openssl-"
+stable_regex = '^3\.5\.[0-9]+$'
+url_template = "https://github.com/openssl/openssl/releases/download/openssl-{version}/openssl-{version}.tar.gz"

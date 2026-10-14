@@ -1,0 +1,11 @@
+name = "e2fsprogs"
+version = "1.47.2"
+category = "sys-fs"
+
+# mkfs.ext4/e2fsck/tune2fs/resize2fs — needed to make and check the
+# filesystems a live install boots from. libuuid/libblkid come from
+# util-linux (bundled copies disabled to avoid a file collision).
+[dependencies]
+link = ["util-linux"]
+runtime = ["glibc", "util-linux"]
+build = ["pkgconf"]

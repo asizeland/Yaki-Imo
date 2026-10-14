@@ -1,0 +1,4 @@
+type = "release-regex"
+url = "https://distfiles.ariadne.space/pkgconf/"
+regex = 'pkgconf-(2\.[0-9]+\.[0-9]+)\.tar\.xz'
+url_template = "https://distfiles.ariadne.space/pkgconf/pkgconf-{version}.tar.xz"

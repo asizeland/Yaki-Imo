@@ -1,0 +1,12 @@
+tar xJf e2fsprogs-1.47.2.tar.xz
+mkdir -p e2fs-build
+cd e2fs-build
+export PATH="/pkg/deps/pkgconf/usr/bin:$PATH"
+export PKG_CONFIG_PATH="/pkg/deps/util-linux/usr/lib/pkgconfig"
+# --disable-libuuid/--disable-libblkid: use util-linux's libraries
+# (bundled copies would collide with util-linux's files in the store).
+../e2fsprogs-1.47.2/configure --prefix=/usr --enable-elf-shlibs \
+    --disable-libuuid --disable-uuidd --disable-libblkid \
+    CPPFLAGS="-I/pkg/deps/util-linux/usr/include" \
+    LDFLAGS="-L/pkg/deps/util-linux/usr/lib -Wl,-rpath,/usr/lib"
+make

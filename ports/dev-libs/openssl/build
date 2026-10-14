@@ -1,0 +1,9 @@
+tar xzf openssl-3.5.2.tar.gz
+cd openssl-3.5.2
+# Configure is perl (the sandbox farm provides it as a build tool).
+# --openssldir=/etc/ssl matches where ca-certificates installs.
+# --libdir=lib: the linux-x86_64 target defaults to lib64, but the
+# whole tree standardizes on /usr/lib.
+./Configure linux-x86_64 --prefix=/usr --openssldir=/etc/ssl \
+    --libdir=lib shared no-docs
+make

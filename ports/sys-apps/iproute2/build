@@ -1,0 +1,4 @@
+tar xJf iproute2-6.15.0.tar.xz
+cd iproute2-6.15.0
+./configure
+make PREFIX=/usr SBINDIR=/usr/sbin

@@ -1,0 +1,8 @@
+name = "iproute2"
+version = "6.15.0"
+category = "sys-apps"
+
+# ip/ss/tc — the network configuration toolkit. tc needs bison+flex
+# (sandbox farm build tools).
+[dependencies]
+runtime = ["glibc"]

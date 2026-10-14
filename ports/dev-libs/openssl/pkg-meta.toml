@@ -1,0 +1,6 @@
+name = "openssl"
+version = "3.5.2"
+category = "dev-libs"
+
+[dependencies]
+runtime = ["glibc"]

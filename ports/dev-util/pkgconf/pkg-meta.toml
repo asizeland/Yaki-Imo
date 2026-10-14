@@ -1,0 +1,6 @@
+name = "pkgconf"
+version = "2.3.0"
+category = "dev-util"
+
+[dependencies]
+runtime = ["glibc"]

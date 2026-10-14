@@ -1,0 +1,4 @@
+type = "release-regex"
+url = "https://mirrors.edge.kernel.org/pub/linux/utils/util-linux/v2.41/"
+regex = 'util-linux-(2\.41\.[0-9]+)\.tar\.xz'
+url_template = "https://mirrors.edge.kernel.org/pub/linux/utils/util-linux/v2.41/util-linux-{version}.tar.xz"

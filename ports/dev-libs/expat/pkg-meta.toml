@@ -1,0 +1,6 @@
+name = "expat"
+version = "2.7.1"
+category = "dev-libs"
+
+[dependencies]
+runtime = ["glibc"]

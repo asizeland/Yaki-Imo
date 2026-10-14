@@ -1,0 +1,12 @@
+name = "util-linux"
+version = "2.41.1"
+category = "sys-apps"
+
+# The system tool kit: mount/blkid/fdisk/dmesg and the libuuid,
+# libblkid, libmount libraries (libuuid is also a NetworkManager dep).
+# login/su/sulogin are left to shadow/sysvinit territory; systemd
+# integration is off (sysvinit system).
+[dependencies]
+link = ["ncurses"]
+runtime = ["glibc", "ncurses"]
+build = ["pkgconf"]

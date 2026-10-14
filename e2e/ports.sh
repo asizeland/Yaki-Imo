@@ -20,7 +20,7 @@ if [ -z "${E2E_INNER:-}" ]; then
         nixpkgs#sqlite nixpkgs#binutils nixpkgs#gnused nixpkgs#gnugrep \
         nixpkgs#gawk nixpkgs#diffutils nixpkgs#curl nixpkgs#xz \
         nixpkgs#findutils nixpkgs#util-linux nixpkgs#bison nixpkgs#m4 \
-        nixpkgs#gettext \
+        nixpkgs#gettext nixpkgs#flex nixpkgs#gperf \
         -c env E2E_INNER=1 sh "$0" "$@"
 fi
 
@@ -97,7 +97,7 @@ for tool in env sh bash ar ranlib make tar gzip xz sed grep \
             ln rm cat chmod touch basename dirname sort uniq wc tr head \
             tail ld as nm readelf objcopy strip sleep date expr printf \
             test comm m4 od id bison python3 echo true false readlink \
-            msgfmt objdump perl; do
+            msgfmt objdump perl rmdir mktemp flex gperf; do
     # command -v reports shell builtins (echo, test, printf) as bare
     # names, which would produce dangling farm links — and make execs
     # simple commands DIRECTLY (no shell), so a builtin is not good
@@ -180,12 +180,13 @@ RLIBS=$ROOT/usr/lib
 # loader itself to /lib64; slibdir=/usr/lib covers the libraries.)
 LOADER="$ROOT/lib64/ld-linux-x86-64.so.2 --library-path $RLIBS"
 if ! "$PKG" install -y zlib bzip2 ncurses sqlite lua less tty-solitaire \
-        man-pages >"$E2E/install.log" 2>&1; then
+        man-pages pkgconf openssl expat ca-certificates curl git \
+        >"$E2E/install.log" 2>&1; then
     echo "---- install output ----" >&2
     tail -40 "$E2E/install.log" >&2
     fail "pkg install of the ports tree"
 fi
-pass "installed the whole tree (8 packages + toolchain)"
+pass "installed the tree ($(ls "$ROOT/var/lib/pkg/recipes" | wc -l) recipes; tree subset + git chain)"
 
 # --- smoke tests -------------------------------------------------
 [ -x "$ROOT/lib64/ld-linux-x86-64.so.2" ] && [ -e "$RLIBS/libc.so.6" ] \
@@ -241,6 +242,35 @@ pass "tty-solitaire: initializes curses on a pty"
 n=$(find -L "$ROOT/usr/share/man" -type f | wc -l)
 [ "$n" -gt 1000 ] || fail "man-pages installed ($n files)"
 pass "man-pages: $n manual pages installed (data-only package)"
+
+# --- batch 1: the git chain ------------------------------------------
+[ "$($LOADER "$R/pkgconf" --version)" = "2.3.0" ] || fail "pkgconf runs"
+pass "pkgconf: runs (2.3.0)"
+
+$LOADER "$R/openssl" version | grep -q "^OpenSSL 3\.5\.2 " || fail "openssl runs"
+pass "openssl: runs (3.5.2)"
+
+$LOADER "$R/curl" --version | head -1 | grep -q "OpenSSL/3.5.2 zlib/1.3.1" \
+    || fail "curl links packaged openssl+zlib"
+pass "curl: linked against pkg-built openssl + zlib"
+
+# Real TLS end to end: packaged curl + packaged openssl + the packaged
+# CA bundle verifying a live host.
+[ "$($LOADER "$R/curl" -sS --cacert "$ROOT/etc/ssl/certs/ca-certificates.crt" \
+        -o /dev/null -w '%{http_code}' https://example.com)" = "200" ] \
+    || fail "curl https fetch through packaged CA bundle"
+pass "curl: https fetch verified against the packaged CA bundle"
+
+GITHOME=$E2E/home
+[ "$(HOME=$GITHOME $LOADER "$R/git" --version)" = "git version 2.50.1" ] \
+    || fail "git runs"
+rm -rf "$E2E/git-smoke" && mkdir -p "$E2E/git-smoke"
+( cd "$E2E/git-smoke" && HOME=$GITHOME $LOADER "$R/git" init -q . \
+    && HOME=$GITHOME $LOADER "$R/git" -c user.email=t@t -c user.name=t \
+        commit -q --allow-empty -m init \
+    && HOME=$GITHOME $LOADER "$R/git" log --oneline | grep -q init ) \
+    || fail "git init+commit round-trip"
+pass "git: init/commit round-trip (https transport compiled in)"
 
 "$PKG" db check >/dev/null 2>&1 || fail "db check after tree install"
 pass "db check clean"

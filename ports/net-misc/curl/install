@@ -1,0 +1,1 @@
+make -C curl-8.14.1 DESTDIR="$PKGDIR" install

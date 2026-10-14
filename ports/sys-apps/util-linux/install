@@ -1,0 +1,1 @@
+make -C util-linux-2.41.1 DESTDIR="$PKGDIR" install

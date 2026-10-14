@@ -1,0 +1,4 @@
+tar xJf pkgconf-2.3.0.tar.xz
+cd pkgconf-2.3.0
+./configure --prefix=/usr --disable-static
+make

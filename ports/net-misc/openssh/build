@@ -1,0 +1,9 @@
+tar xzf openssh-10.0p1.tar.gz
+cd openssh-10.0p1
+./configure --prefix=/usr --sysconfdir=/etc/ssh \
+    --with-ssl-dir=/pkg/deps/openssl/usr \
+    --without-pam --without-selinux \
+    --with-privsep-path=/var/empty \
+    CPPFLAGS="-I/pkg/deps/zlib/usr/include" \
+    LDFLAGS="-L/pkg/deps/zlib/usr/lib -Wl,-rpath,/usr/lib"
+make

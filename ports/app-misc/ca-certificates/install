@@ -1,0 +1,2 @@
+mkdir -p "$PKGDIR/etc/ssl/certs"
+cp ca-certificates.crt "$PKGDIR/etc/ssl/certs/ca-certificates.crt"

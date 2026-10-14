@@ -1,0 +1,10 @@
+name = "openssh"
+version = "10.0.1"
+category = "net-misc"
+
+# ssh client + sshd. No PAM (not packaged); privilege separation uses
+# /var/empty. Runtime setup (host keys, sshd user) is a live-system
+# step, not a package one.
+[dependencies]
+link = ["openssl", "zlib"]
+runtime = ["glibc", "openssl", "zlib"]

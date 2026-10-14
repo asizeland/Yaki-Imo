@@ -1,0 +1,10 @@
+name = "git"
+version = "2.50.1"
+category = "dev-vcs"
+
+# NO_PERL keeps the perl helper scripts (send-email, add--interactive)
+# out until perl is packaged; core git — clone/fetch/push over https,
+# commit, log — is C and unaffected.
+[dependencies]
+link = ["curl", "zlib", "openssl", "expat"]
+runtime = ["glibc", "curl", "zlib", "openssl", "expat", "ca-certificates"]

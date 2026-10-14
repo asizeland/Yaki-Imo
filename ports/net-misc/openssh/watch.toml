@@ -1,0 +1,4 @@
+type = "release-regex"
+url = "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/"
+regex = 'openssh-(10\.[0-9]+p[0-9]+)\.tar\.gz'
+url_template = "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-{version}.tar.gz"

@@ -1,0 +1,7 @@
+name = "curl"
+version = "8.14.1"
+category = "net-misc"
+
+[dependencies]
+link = ["openssl", "zlib"]
+runtime = ["glibc", "openssl", "zlib", "ca-certificates"]

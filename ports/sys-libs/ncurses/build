@@ -12,5 +12,6 @@ cd ncurses-6.5
     --without-cxx \
     --without-cxx-binding \
     --enable-widec \
+    --enable-pc-files \
     --with-pkg-config-libdir=/usr/lib/pkgconfig
 make

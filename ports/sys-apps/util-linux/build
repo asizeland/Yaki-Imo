@@ -1,0 +1,22 @@
+tar xJf util-linux-2.41.1.tar.xz
+cd util-linux-2.41.1
+# tools/all_errnos + all_syscalls ship with #!/bin/bash, and /bin/bash
+# does not exist in the build sandbox — repoint them at the farm bash.
+sed -i '1s|^#!/bin/bash|#!/usr/bin/bash|' tools/all_errnos tools/all_syscalls
+export PATH="/pkg/deps/pkgconf/usr/bin:$PATH"
+export PKG_CONFIG_PATH="/pkg/deps/ncurses/usr/lib/pkgconfig"
+# --disable-liblastlog2: lastlog2 wants sqlite3; not worth the dep.
+# --libdir=/usr/lib: util-linux defaults shared libs to /lib, but the
+# loader's compiled-in search path is /usr/lib — anything linking
+# libblkid/libmount/libuuid would fail at runtime.
+./configure --prefix=/usr --libdir=/usr/lib --disable-static \
+    --enable-libuuid --enable-libblkid --enable-libmount \
+    --disable-liblastlog2 \
+    --disable-login --disable-nologin --disable-sulogin \
+    --disable-su --disable-runuser --disable-chfn-chsh \
+    --without-systemd --without-udev --without-python \
+    --disable-pylibmount \
+    --disable-makeinstall-chown --disable-makeinstall-setuid \
+    CPPFLAGS="-I/pkg/deps/ncurses/usr/include" \
+    LDFLAGS="-L/pkg/deps/ncurses/usr/lib -Wl,-rpath,/usr/lib"
+make

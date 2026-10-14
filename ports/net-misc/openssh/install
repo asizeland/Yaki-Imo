@@ -1,0 +1,2 @@
+make -C openssh-10.0p1 DESTDIR="$PKGDIR" install
+mkdir -p "$PKGDIR/var/empty"

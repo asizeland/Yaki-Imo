@@ -1,0 +1,1 @@
+make -C expat-2.7.1 DESTDIR="$PKGDIR" install

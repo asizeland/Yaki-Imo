@@ -1,0 +1,4 @@
+type = "release-regex"
+url = "https://mirrors.edge.kernel.org/pub/linux/utils/net/iproute2/"
+regex = 'iproute2-(6\.[0-9]+\.[0-9]+)\.tar\.xz'
+url_template = "https://mirrors.edge.kernel.org/pub/linux/utils/net/iproute2/iproute2-{version}.tar.xz"

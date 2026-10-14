@@ -46,6 +46,17 @@ it against the packaged glibc is the stage-2 bootstrap.
 | sys-apps/gzip | compressor | autotools | |
 | sys-apps/xz | compressor + liblzma | autotools | watched via git tags |
 | sys-apps/sysvinit | init system | plain Makefile | links libxcrypt (`sulogin`); boots as PID 1 |
+| dev-util/pkgconf | pkg-config implementation | autotools | `pkg-config` symlink; meson/autotools dep discovery |
+| dev-libs/openssl | TLS/crypto library | custom `Configure` (perl) | `--libdir=lib` — the linux-x86_64 default is lib64 |
+| dev-libs/expat | XML parser | autotools | |
+| app-misc/ca-certificates | data only | none (install-only) | Mozilla CA bundle at /etc/ssl/certs |
+| net-misc/curl | HTTP client + libcurl | autotools | openssl + zlib; CA bundle path pinned at configure |
+| dev-vcs/git | VCS | plain Makefile | `NO_PERL=1` (perl unpackaged); https remote via packaged curl — proven by a real TLS fetch; phase flags must match (GIT-CFLAGS rebuild trap) |
+| sys-apps/util-linux | system tool kit | autotools | mount/blkid/fdisk + libuuid/libblkid/libmount; `--libdir=/usr/lib` (its default /lib is off the loader path); two tools scripts need a shebang repoint |
+| sys-apps/iproute2 | network tools | custom configure + Makefile | ip/ss/tc; tc needs bison+flex |
+| sys-apps/procps-ng | process tools | autotools | ps/top/free; `CC='gcc -std=gnu99'` is forced by its configure, so stdbool.h is force-included |
+| sys-fs/e2fsprogs | ext4 tools | autotools (separate build dir) | mkfs.ext4/e2fsck; uses util-linux's libuuid/libblkid |
+| net-misc/openssh | SSH client+server | autotools | no PAM; sshd runtime setup is a live-system step |
 
 The bottom eight (bash through xz) are the **chrootable set**: with
 them installed, the root can be chrooted into (`arch-chroot`-style,

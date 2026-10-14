@@ -1,0 +1,9 @@
+# Flags must match the build phase exactly (see build: GIT-CFLAGS
+# tracking rebuilds on any flag change).
+make -C git-2.50.1 prefix=/usr DESTDIR="$PKGDIR" \
+    NO_PERL=1 NO_TCLTK=1 NO_GETTEXT=1 NO_PYTHON=1 \
+    CURL_CONFIG=/pkg/deps/curl/usr/bin/curl-config \
+    OPENSSL_LIBDIR=/pkg/deps/openssl/usr/lib \
+    CFLAGS="-O2 -I/pkg/deps/curl/usr/include -I/pkg/deps/zlib/usr/include -I/pkg/deps/expat/usr/include -I/pkg/deps/openssl/usr/include" \
+    LDFLAGS="-L/pkg/deps/curl/usr/lib -L/pkg/deps/zlib/usr/lib -L/pkg/deps/expat/usr/lib -L/pkg/deps/openssl/usr/lib -Wl,-rpath,/usr/lib" \
+    install
