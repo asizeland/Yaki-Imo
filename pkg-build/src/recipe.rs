@@ -168,12 +168,29 @@ pub fn build_env(ctx: &BuildContext, recipe: &Recipe) -> PkgResult<Vec<(String, 
         ("PKGDIR".into(), ctx.pkgdir.display().to_string()),
         ("MAKEFLAGS".into(), format!("-j{}", ctx.inner_jobs.max(1))),
         ("SOURCE_DATE_EPOCH".into(), pinned_source_date_epoch()),
-        (
-            "PATH".into(),
-            "/usr/lib/pkg/toolchain/bin:/usr/bin:/bin".into(),
-        ),
         ("LC_ALL".into(), "C".into()),
     ];
+    // PATH: toolchain wrappers first, then every bound dep's bin dirs
+    // (a build tool shipped BY a dependency package — libtasn1's
+    // asn1Parser, glib's gdbus-codegen — must be findable by
+    // configure/meson's find_program), then the farm. Dep dirs precede
+    // /usr/bin so a dep-provided tool wins over the farm's host build
+    // of the same name: the packaged one is the one the recipes were
+    // written and tested against.
+    let mut path = vec!["/usr/lib/pkg/toolchain/bin".to_string()];
+    path.extend(
+        ctx.gate_deps
+            .iter()
+            .chain(ctx.build_deps.iter())
+            .flat_map(|d| {
+                [
+                    format!("/pkg/deps/{}/usr/bin", d.name),
+                    format!("/pkg/deps/{}/usr/sbin", d.name),
+                ]
+            }),
+    );
+    path.extend(["/usr/bin".to_string(), "/bin".to_string()]);
+    env.push(("PATH".into(), path.join(":")));
     // Build tools consumed from dependency packages (pkgconf, python3,
     // meson's python process, ...) link against their own libraries, and
     // the sandbox's /usr/lib is empty — the packaged loader's compiled-in
