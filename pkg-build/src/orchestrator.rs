@@ -925,7 +925,75 @@ fn gate_deps_for(
         // (duplicate bwrap binds of one destination would collide).
         .filter(|d| !runtime_names.contains(d.name.as_str()))
         .collect();
+    let build_only = with_build_dep_closure(conn, node, cfg, build_only, &runtime_names);
     (runtime, build_only)
+}
+
+/// A build-only dependency RUNS during the build (meson, python3,
+/// pkgconf), so everything it itself needs at runtime must be in the
+/// sandbox too — python3's `import binascii` needs zlib's `libz.so.1`,
+/// which the package being built never declares. Walk the `Link` +
+/// `Runtime` edges of every build dep and bind those store dirs as
+/// additional build-only deps (binds and `LD_LIBRARY_PATH` entries
+/// only — the gate's provider set is unaffected, so linking against
+/// one of them without declaring it still fails the gate).
+///
+/// Only installed rows are walked: an in-cascade build dep has no edges
+/// recorded yet, but its own deps are then in the cascade too and each
+/// gets its own bind through the normal path.
+fn with_build_dep_closure(
+    conn: &Connection,
+    node: &PlanNode,
+    cfg: &SchedConfig,
+    build_only: Vec<DeclaredDep>,
+    runtime_names: &std::collections::BTreeSet<&str>,
+) -> Vec<DeclaredDep> {
+    use std::collections::{BTreeSet, VecDeque};
+    let mut seen: BTreeSet<String> = runtime_names.iter().map(|s| s.to_string()).collect();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    let mut out = Vec::with_capacity(build_only.len());
+    for d in build_only {
+        if seen.insert(d.name.clone()) {
+            queue.push_back(d.name.clone());
+            out.push(d);
+        }
+    }
+    let Ok(root) = staging::store_root_for(node.arch, &cfg.store_roots) else {
+        return out;
+    };
+    while let Some(name) = queue.pop_front() {
+        let Ok(Some(pid)) = queries::package_id_by_name_arch(conn, &name, node.arch) else {
+            continue;
+        };
+        let rows = match queries::forward_dependencies(conn, pid, queries::REMOVAL_BLOCKING_KINDS) {
+            Ok(rows) => rows,
+            Err(e) => {
+                eprintln!("pkg: warning: cannot walk {name}'s deps for the build sandbox: {e}");
+                continue;
+            }
+        };
+        for row in rows {
+            if !seen.insert(row.name.clone()) {
+                continue;
+            }
+            let Ok(opt_tag) = row.opt_tag.parse::<OptTag>() else {
+                continue;
+            };
+            let identity = pkg_core::Identity {
+                name: row.name.clone(),
+                version: row.version,
+                abi_tag: row.abi_tag,
+                opt_tag,
+                arch: row.arch,
+            };
+            out.push(DeclaredDep {
+                name: row.name.clone(),
+                store_dir: root.join(identity.store_dir_name()),
+            });
+            queue.push_back(row.name);
+        }
+    }
+    out
 }
 
 /// The shared resolution half of [`gate_deps_for`]: map each concrete

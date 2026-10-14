@@ -564,6 +564,41 @@ pub fn removal_blockers(conn: &Connection, package_id: i64) -> PkgResult<Vec<Pac
     reverse_dependents(conn, package_id, REMOVAL_BLOCKING_KINDS)
 }
 
+/// The forward direction of [`reverse_dependents`]: the installed
+/// packages that `package_id` itself depends on through edges of the
+/// given kinds. The build sandbox walks this to bind the runtime
+/// closure of a build-only dependency — a build tool (meson, python3)
+/// runs during the build, so the libraries IT needs must be present
+/// even though the package being built never links them. An empty
+/// `kinds` slice matches nothing.
+pub fn forward_dependencies(
+    conn: &Connection,
+    package_id: i64,
+    kinds: &[DependencyKind],
+) -> PkgResult<Vec<PackageRow>> {
+    if kinds.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = vec!["?"; kinds.len()].join(", ");
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT p.id, p.name, p.version, p.abi_tag, p.opt_tag, p.arch, p.track, p.installed_at, p.installed_explicitly
+             FROM packages p
+             JOIN dependencies d ON d.depends_on_id = p.id
+             WHERE d.package_id = ? AND d.kind IN ({placeholders})
+             ORDER BY p.name"
+        ))
+        .map_err(|e| PkgError::Db(e.to_string()))?;
+    let mut bind = Vec::with_capacity(kinds.len() + 1);
+    bind.push(Value::Integer(package_id));
+    bind.extend(kinds.iter().map(|k| Value::Text(k.to_string())));
+    let rows = stmt
+        .query_map(params_from_iter(bind), map_package_row)
+        .map_err(|e| PkgError::Db(e.to_string()))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| PkgError::Db(e.to_string()))
+}
+
 /// Candidates for `pkg autoremove` (§16.6): packages with
 /// `installed_explicitly = 0` that nothing currently depends on.
 ///
@@ -1649,6 +1684,33 @@ mod tests {
         let link_deps = reverse_dependents(&conn, openssl_id, &[DependencyKind::Link]).unwrap();
         let link_only: Vec<&str> = link_deps.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(link_only, vec!["curl"]);
+    }
+
+    #[test]
+    fn forward_dependencies_walks_outgoing_edges_by_kind() {
+        // python3 is a build dep of app; python3 itself links zlib and
+        // needs openssl at runtime. The sandbox closure must find zlib
+        // and openssl from python3, not from app.
+        let conn = fresh_db();
+        let app_id = insert_package(&conn, &test_id("app"), Track::Source, 0, true).unwrap();
+        let py_id = insert_package(&conn, &test_id("python3"), Track::Source, 0, true).unwrap();
+        let zlib_id = insert_package(&conn, &test_id("zlib"), Track::Source, 0, false).unwrap();
+        let ssl_id = insert_package(&conn, &test_id("openssl"), Track::Source, 0, false).unwrap();
+        insert_dependency(&conn, app_id, py_id, DependencyKind::Build).unwrap();
+        insert_dependency(&conn, py_id, zlib_id, DependencyKind::Link).unwrap();
+        insert_dependency(&conn, py_id, ssl_id, DependencyKind::Runtime).unwrap();
+
+        let closure =
+            forward_dependencies(&conn, py_id, REMOVAL_BLOCKING_KINDS).unwrap();
+        let names: Vec<&str> = closure.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["openssl", "zlib"]);
+
+        // The reverse direction sees app, not python3's deps.
+        let rev = reverse_dependents(&conn, py_id, &[DependencyKind::Build]).unwrap();
+        assert_eq!(rev.len(), 1);
+        assert_eq!(rev[0].name, "app");
+
+        assert!(forward_dependencies(&conn, py_id, &[]).unwrap().is_empty());
     }
 
     #[test]

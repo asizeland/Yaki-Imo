@@ -429,6 +429,15 @@ fn run_recipe_phases_impl(
         }
     }
 
+    // -- pkg-config prefix fixup ----------------------------------------
+    // Shipped .pc files commonly hardcode `prefix=/usr`, which is wrong
+    // for a consumer building against this package inside the sandbox,
+    // where the package is mounted at /pkg/deps/<name> — pkg-config
+    // would emit -I/usr/include pointing at the sandbox's empty /usr.
+    // Rewriting to ${pcfiledir}-relative form keeps the file correct in
+    // BOTH locations (see fixup_pkgconfig_prefixes).
+    fixup_pkgconfig_prefixes(&ctx.pkgdir)?;
+
     // -- gate (v12 §9 verification framing) ---------------------------
     // Post-build verification of the produced tree against the running
     // glibc, when the caller supplied it. The declared-dep set (runtime
@@ -465,6 +474,75 @@ fn unix_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// Makes shipped pkg-config files relocatable by rewriting a hardcoded
+/// `prefix=/usr` line to `${pcfiledir}`-relative form.
+///
+/// pkg-config expands `${pcfiledir}` to the directory containing the
+/// .pc file at *read* time, so `prefix=${pcfiledir}/../..` resolves to
+/// the right place in both worlds: in the live tree
+/// (/usr/lib/pkgconfig → /usr) and in the build sandbox
+/// (/pkg/deps/<name>/usr/lib/pkgconfig → /pkg/deps/<name>/usr). The
+/// number of `..` segments is computed from the .pc file's own depth
+/// below `usr/`, so deeper layouts (usr/lib/<triplet>/pkgconfig) stay
+/// correct. Lines not exactly `prefix=/usr` are left alone — an
+/// unusual prefix is the recipe's business.
+fn fixup_pkgconfig_prefixes(pkgdir: &Path) -> PkgResult<()> {
+    let usr = pkgdir.join("usr");
+    if !usr.is_dir() {
+        return Ok(());
+    }
+    let mut pc_files = Vec::new();
+    collect_pc_files(&usr, &mut pc_files)?;
+    for pc in pc_files {
+        // Depth below usr/: usr/lib/pkgconfig/x.pc → ["lib",
+        // "pkgconfig"] → prefix is two levels up from ${pcfiledir}.
+        let Ok(rel) = pc.strip_prefix(&usr) else {
+            continue; // walked under usr — unreachable
+        };
+        let depth = rel.components().count().saturating_sub(1);
+        if depth == 0 {
+            continue; // directly under usr/ — not a pkgconfig layout
+        }
+        let ups = vec![".."; depth].join("/");
+        let content = fs::read_to_string(&pc).map_err(PkgError::Io)?;
+        let mut out = String::with_capacity(content.len());
+        let mut changed = false;
+        for line in content.split_inclusive('\n') {
+            let body = line.strip_suffix('\n').unwrap_or(line);
+            if body == "prefix=/usr" {
+                out.push_str(&format!("prefix=${{pcfiledir}}/{ups}"));
+                out.push('\n');
+                changed = true;
+            } else {
+                out.push_str(line);
+            }
+        }
+        if changed {
+            fs::write(&pc, out).map_err(PkgError::Io)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_pc_files(dir: &Path, out: &mut Vec<PathBuf>) -> PkgResult<()> {
+    for entry in fs::read_dir(dir).map_err(PkgError::Io)? {
+        let entry = entry.map_err(PkgError::Io)?;
+        let path = entry.path();
+        if entry.file_type().map_err(PkgError::Io)?.is_dir() {
+            collect_pc_files(&path, out)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("pc")
+            && path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+                == Some("pkgconfig")
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
 /// Peak RSS of all child processes reaped so far, in KiB
 /// (`getrusage(RUSAGE_CHILDREN)`'s `ru_maxrss`, which is in KiB on
 /// Linux). `None` when the syscall fails.
@@ -495,6 +573,53 @@ pub fn children_peak_rss_kib() -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pkgconfig_fixup_rewrites_usr_prefix_pcfiledir_relative() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pcdir = tmp.path().join("usr/lib/pkgconfig");
+        fs::create_dir_all(&pcdir).unwrap();
+        let pc = pcdir.join("libfoo.pc");
+        fs::write(
+            &pc,
+            "prefix=/usr\nexec_prefix=${prefix}\nlibdir=${exec_prefix}/lib\nName: foo\n",
+        )
+        .unwrap();
+        // A .pc outside a pkgconfig dir, and one with a non-/usr
+        // prefix, must be left alone.
+        let stray = tmp.path().join("usr/share/foo.pc");
+        fs::create_dir_all(stray.parent().unwrap()).unwrap();
+        fs::write(&stray, "prefix=/usr\n").unwrap();
+        let custom = pcdir.join("opt.pc");
+        fs::write(&custom, "prefix=/opt/vendor\n").unwrap();
+
+        fixup_pkgconfig_prefixes(tmp.path()).unwrap();
+
+        let fixed = fs::read_to_string(&pc).unwrap();
+        assert!(
+            fixed.starts_with("prefix=${pcfiledir}/../..\n"),
+            "got: {fixed}"
+        );
+        assert!(fixed.contains("exec_prefix=${prefix}"));
+        assert_eq!(fs::read_to_string(&stray).unwrap(), "prefix=/usr\n");
+        assert_eq!(fs::read_to_string(&custom).unwrap(), "prefix=/opt/vendor\n");
+    }
+
+    #[test]
+    fn pkgconfig_fixup_handles_deeper_triplet_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pcdir = tmp.path().join("usr/lib/x86_64-pc-linux-gnu/pkgconfig");
+        fs::create_dir_all(&pcdir).unwrap();
+        let pc = pcdir.join("libbar.pc");
+        fs::write(&pc, "prefix=/usr\n").unwrap();
+
+        fixup_pkgconfig_prefixes(tmp.path()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&pc).unwrap(),
+            "prefix=${pcfiledir}/../../..\n"
+        );
+    }
 
     fn manifest_with_options() -> PackageManifest {
         PackageManifest::from_toml_str(
