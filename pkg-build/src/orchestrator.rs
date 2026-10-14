@@ -932,11 +932,16 @@ fn gate_deps_for(
 /// A build-only dependency RUNS during the build (meson, python3,
 /// pkgconf), so everything it itself needs at runtime must be in the
 /// sandbox too — python3's `import binascii` needs zlib's `libz.so.1`,
-/// which the package being built never declares. Walk the `Link` +
-/// `Runtime` edges of every build dep and bind those store dirs as
-/// additional build-only deps (binds and `LD_LIBRARY_PATH` entries
-/// only — the gate's provider set is unaffected, so linking against
-/// one of them without declaring it still fails the gate).
+/// which the package being built never declares. And the same is true
+/// transitively at *build* time for link deps: eudev's
+/// `pkg-config --cflags libkmod` resolves libkmod.pc's
+/// `Requires.private: liblzma zlib libcrypto`, so xz/zlib/openssl's
+/// .pc files must be reachable even though eudev only declares kmod.
+/// Walk the `Link` + `Runtime` edges from EVERY dep of the package
+/// (gate and build alike) and bind the not-yet-bound packages as
+/// additional build-only deps: binds and env search paths only — the
+/// gate's provider set is unaffected, so linking against one of them
+/// without declaring it still fails the gate.
 ///
 /// Only installed rows are walked: an in-cascade build dep has no edges
 /// recorded yet, but its own deps are then in the cascade too and each
@@ -950,7 +955,10 @@ fn with_build_dep_closure(
 ) -> Vec<DeclaredDep> {
     use std::collections::{BTreeSet, VecDeque};
     let mut seen: BTreeSet<String> = runtime_names.iter().map(|s| s.to_string()).collect();
-    let mut queue: VecDeque<String> = VecDeque::new();
+    // Closure roots: every dep, not just the build-kind ones (see the
+    // doc comment — Requires.private chains make transitive .pc files
+    // build-time inputs).
+    let mut queue: VecDeque<String> = runtime_names.iter().map(|s| s.to_string()).collect();
     let mut out = Vec::with_capacity(build_only.len());
     for d in build_only {
         if seen.insert(d.name.clone()) {

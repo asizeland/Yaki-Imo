@@ -190,6 +190,42 @@ pub fn build_env(ctx: &BuildContext, recipe: &Recipe) -> PkgResult<Vec<(String, 
     if !dep_lib_path.is_empty() {
         env.push(("LD_LIBRARY_PATH".into(), dep_lib_path.join(":")));
     }
+    // The compile-time halves of the same idea: with deps mounted at
+    // /pkg/deps/<name> rather than merged into /usr, a compiler looking
+    // for a declared dep's headers/libraries finds nothing on its own.
+    // GCC honors C_INCLUDE_PATH / CPLUS_INCLUDE_PATH / LIBRARY_PATH as
+    // extra search roots, and pkg-config honors PKG_CONFIG_PATH (the
+    // shipped .pc files are ${pcfiledir}-relocatable, see
+    // fixup_pkgconfig_prefixes). Exporting these for the bound deps is
+    // what lets a plain `cc.find_library` or `#include` work without
+    // every recipe hand-assembling -I/-L flags. Declared deps only, and
+    // the post-build gate still verifies the linkage was declared.
+    let dep_inc_path: Vec<String> = ctx
+        .gate_deps
+        .iter()
+        .chain(ctx.build_deps.iter())
+        .map(|d| format!("/pkg/deps/{}/usr/include", d.name))
+        .collect();
+    if !dep_inc_path.is_empty() {
+        let joined = dep_inc_path.join(":");
+        env.push(("C_INCLUDE_PATH".into(), joined.clone()));
+        env.push(("CPLUS_INCLUDE_PATH".into(), joined));
+        env.push(("LIBRARY_PATH".into(), dep_lib_path.join(":")));
+    }
+    let dep_pc_path: Vec<String> = ctx
+        .gate_deps
+        .iter()
+        .chain(ctx.build_deps.iter())
+        .flat_map(|d| {
+            [
+                format!("/pkg/deps/{}/usr/lib/pkgconfig", d.name),
+                format!("/pkg/deps/{}/usr/share/pkgconfig", d.name),
+            ]
+        })
+        .collect();
+    if !dep_pc_path.is_empty() {
+        env.push(("PKG_CONFIG_PATH".into(), dep_pc_path.join(":")));
+    }
     // Issue 1 §2.4: one PKG_OPT_<NAME>=0|1 per declared option,
     // including unmentioned options at their defaults. The selection is
     // transaction-wide, so filter it down to the options this package
@@ -484,8 +520,17 @@ fn unix_now() -> i64 {
 /// (/pkg/deps/<name>/usr/lib/pkgconfig → /pkg/deps/<name>/usr). The
 /// number of `..` segments is computed from the .pc file's own depth
 /// below `usr/`, so deeper layouts (usr/lib/<triplet>/pkgconfig) stay
-/// correct. Lines not exactly `prefix=/usr` are left alone — an
-/// unusual prefix is the recipe's business.
+/// correct.
+///
+/// Many upstream .pc files (xz, util-linux, libffi) additionally
+/// hardcode path variables instead of deriving them from ${prefix}:
+/// `libdir=/usr/lib`, `includedir=/usr/include`, ... — the rewritten
+/// prefix alone doesn't fix those. So when the prefix was relocatable,
+/// any other `name=/usr[...]` assignment gets its leading /usr
+/// replaced by ${prefix}. Non-path lines are unaffected (values like
+/// URLs don't start with /usr; `sysconfdir=/etc` doesn't either).
+/// Files with an unusual (non-/usr) prefix are left entirely alone —
+/// that is the recipe's business.
 fn fixup_pkgconfig_prefixes(pkgdir: &Path) -> PkgResult<()> {
     let usr = pkgdir.join("usr");
     if !usr.is_dir() {
@@ -505,14 +550,35 @@ fn fixup_pkgconfig_prefixes(pkgdir: &Path) -> PkgResult<()> {
         }
         let ups = vec![".."; depth].join("/");
         let content = fs::read_to_string(&pc).map_err(PkgError::Io)?;
+        let relocatable = content
+            .lines()
+            .any(|l| l == "prefix=/usr" || l.starts_with("prefix=${pcfiledir}/"));
+        if !relocatable {
+            continue;
+        }
         let mut out = String::with_capacity(content.len());
         let mut changed = false;
         for line in content.split_inclusive('\n') {
             let body = line.strip_suffix('\n').unwrap_or(line);
+            let nl = if line.ends_with('\n') { "\n" } else { "" };
             if body == "prefix=/usr" {
-                out.push_str(&format!("prefix=${{pcfiledir}}/{ups}"));
-                out.push('\n');
+                out.push_str(&format!("prefix=${{pcfiledir}}/{ups}{nl}"));
                 changed = true;
+            } else if let Some((var, value)) = body.split_once('=') {
+                let is_var = !var.is_empty()
+                    && var
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+                    && var.chars().next().is_some_and(|c| c.is_ascii_alphabetic());
+                if is_var
+                    && var != "prefix"
+                    && (value == "/usr" || value.starts_with("/usr/"))
+                {
+                    out.push_str(&format!("{var}=${{prefix}}{}{nl}", &value[4..]));
+                    changed = true;
+                } else {
+                    out.push_str(line);
+                }
             } else {
                 out.push_str(line);
             }
@@ -603,6 +669,32 @@ mod tests {
         assert!(fixed.contains("exec_prefix=${prefix}"));
         assert_eq!(fs::read_to_string(&stray).unwrap(), "prefix=/usr\n");
         assert_eq!(fs::read_to_string(&custom).unwrap(), "prefix=/opt/vendor\n");
+    }
+
+    #[test]
+    fn pkgconfig_fixup_rewrites_hardcoded_usr_variables() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pcdir = tmp.path().join("usr/lib/pkgconfig");
+        fs::create_dir_all(&pcdir).unwrap();
+        // xz's liblzma.pc shape: hardcoded exec_prefix/libdir/includedir.
+        let pc = pcdir.join("liblzma.pc");
+        fs::write(
+            &pc,
+            "prefix=/usr\nexec_prefix=/usr\nlibdir=/usr/lib\nincludedir=/usr/include\nURL=https://tukaani.org/xz/\n",
+        )
+        .unwrap();
+
+        fixup_pkgconfig_prefixes(tmp.path()).unwrap();
+
+        let fixed = fs::read_to_string(&pc).unwrap();
+        assert!(fixed.contains("prefix=${pcfiledir}/../..\n"), "got: {fixed}");
+        assert!(fixed.contains("exec_prefix=${prefix}\n"), "got: {fixed}");
+        assert!(fixed.contains("libdir=${prefix}/lib\n"), "got: {fixed}");
+        assert!(fixed.contains("includedir=${prefix}/include\n"), "got: {fixed}");
+        assert!(
+            fixed.contains("URL=https://tukaani.org/xz/\n"),
+            "non-path values untouched: {fixed}"
+        );
     }
 
     #[test]
