@@ -1,6 +1,7 @@
 tar xzf nettle-3.10.1.tar.gz
 cd nettle-3.10.1
 ./configure --prefix=/usr --libdir=/usr/lib --disable-static \
+    --disable-documentation \
     CPPFLAGS="-I/pkg/deps/gmp/usr/include" \
     LDFLAGS="-L/pkg/deps/gmp/usr/lib -Wl,-rpath,/usr/lib"
 make
