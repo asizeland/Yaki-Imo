@@ -1,0 +1,7 @@
+name = "bison"
+version = "3.8.2"
+category = "sys-devel"
+
+# Parser generator. Runs m4 at runtime on its skeletons.
+[dependencies]
+runtime = ["glibc", "m4"]

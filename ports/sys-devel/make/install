@@ -1,0 +1,1 @@
+make -C make-4.4.1 DESTDIR="$PKGDIR" install

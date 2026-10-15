@@ -1,0 +1,4 @@
+tar xJf mpfr-4.2.2.tar.xz
+cd mpfr-4.2.2
+./configure --prefix=/usr --disable-nls
+make

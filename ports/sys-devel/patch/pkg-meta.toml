@@ -1,0 +1,9 @@
+name = "patch"
+version = "2.8"
+category = "sys-devel"
+
+# Applies unified diffs — the recipe-authoring and package-patching
+# workflow needs it. 2.8 (2025) is the first release in seven years;
+# 2.7.6's bundled gnulib predates GCC 15's C23 default.
+[dependencies]
+runtime = ["glibc"]

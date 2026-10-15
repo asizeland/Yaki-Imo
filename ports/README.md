@@ -77,14 +77,29 @@ it against the packaged glibc is the stage-2 bootstrap.
 | net-libs/libndp | IPv6 ND library | hand-compiled | upstream ships git checkouts without configure; single-TU library built directly (soname from its version-info) |
 | net-wireless/wpa_supplicant | Wi-Fi auth daemon | .config + Makefile | defconfig + `CONFIG_TLS=openssl`; D-Bus activation file installed |
 | net-misc/networkmanager | network daemon | meson | sysvinit/eudev profile: no systemd/polkit, keyfile plugin, internal DHCP, gnutls crypto |
+| sys-devel/make | build tool | autotools | |
+| sys-apps/diffutils | diff tools | autotools | |
+| sys-apps/findutils | find/xargs | autotools | |
+| sys-devel/patch | patch tool | autotools | 2.8 — 2.7.6's gnulib predates GCC 15 |
+| sys-devel/m4 | macro processor | autotools | 1.4.20 — first C23-clean release |
+| sys-devel/bison | parser generator | autotools | runs m4 at runtime |
+| sys-devel/flex | scanner generator | autotools | runs m4 at runtime |
+| sys-devel/gperf | perfect-hash generator | autotools (C++) | `-static-libstdc++` like ninja |
+| sys-devel/gettext | message catalogs | autotools | iconv runtime probe skipped (seed glibc lacks EUC-JP gconv); libtool CXX-tag fallback forced (2.5.4 silently builds static-only otherwise); `--disable-openmp` (no libgomp in the tree) |
+| sys-devel/mpfr | FP library | autotools | gcc dep |
+| sys-devel/mpc | complex FP library | autotools | gcc dep |
+| sys-devel/binutils | assembler + linker | autotools (out-of-tree) | `--disable-gprofng` (libtool C++ link probe misfires in the sandbox) |
+| sys-devel/gcc | compiler | autotools (out-of-tree) | C/C++, `--disable-bootstrap`; ships libgcc/libstdc++ — retires ninja/gperf's static-C++ workarounds |
 
-The bottom eight (bash through xz) are the **chrootable set**: with
+The **chrootable set** (bash through xz above): with
 them installed, the root can be chrooted into (`arch-chroot`-style,
 after mounting /proc /sys /dev) and testing continues inside —
 `e2e/ports.sh` proves this with a bwrap chroot-equivalence run, and
 goes one step further: with `sysvinit` installed it boots the tree's
 `/sbin/init` as PID 1 inside a user namespace and verifies the inittab
-sysinit action runs.
+sysinit action runs. The **sys-devel set** closes the loop: `ports.sh`
+finishes by compiling and running C and C++ programs with the packaged
+gcc+binutils inside that same chroot — the root can rebuild itself.
 
 ## Turning the tree into a repository
 

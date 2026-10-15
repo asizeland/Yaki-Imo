@@ -1,0 +1,8 @@
+name = "findutils"
+version = "4.10.0"
+category = "sys-apps"
+
+# find/xargs — the build sandbox's shim dispatcher is xargs, and
+# configure scripts everywhere call find.
+[dependencies]
+runtime = ["glibc"]

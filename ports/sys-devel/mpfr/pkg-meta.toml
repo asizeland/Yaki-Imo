@@ -1,0 +1,8 @@
+name = "mpfr"
+version = "4.2.2"
+category = "sys-devel"
+
+# Multiple-precision floating-point library — GCC requires it.
+[dependencies]
+link = ["gmp"]
+runtime = ["glibc", "gmp"]

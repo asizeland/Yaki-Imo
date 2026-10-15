@@ -1,0 +1,7 @@
+name = "flex"
+version = "2.6.4"
+category = "sys-devel"
+
+# Scanner generator. Runs m4 at runtime on its skeletons.
+[dependencies]
+runtime = ["glibc", "m4"]

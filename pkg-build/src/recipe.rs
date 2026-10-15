@@ -491,6 +491,15 @@ fn run_recipe_phases_impl(
     // BOTH locations (see fixup_pkgconfig_prefixes).
     fixup_pkgconfig_prefixes(&ctx.pkgdir)?;
 
+    // -- libtool archive removal ----------------------------------------
+    // Shipped .la files record absolute paths of OTHER packages' .la
+    // files (mpc's build failed: libmpfr.la pointed at a /usr/lib/
+    // libgmp.la that doesn't exist in a consumer's sandbox, where deps
+    // live at /pkg/deps/<name>). Without .la files libtool falls back
+    // to plain -l linking, which is what the dep search-path env already
+    // arranges. Distros strip them tree-wide for the same reason.
+    drop_libtool_archives(&ctx.pkgdir)?;
+
     // -- gate (v12 §9 verification framing) ---------------------------
     // Post-build verification of the produced tree against the running
     // glibc, when the caller supplied it. The declared-dep set (runtime
@@ -607,6 +616,33 @@ fn fixup_pkgconfig_prefixes(pkgdir: &Path) -> PkgResult<()> {
     Ok(())
 }
 
+/// Removes every libtool archive (`*.la`) under the pkgdir. See the
+/// call site for why they must not ship.
+fn drop_libtool_archives(pkgdir: &Path) -> PkgResult<()> {
+    let mut la_files = Vec::new();
+    collect_la_files(pkgdir, &mut la_files)?;
+    for la in &la_files {
+        fs::remove_file(la).map_err(PkgError::Io)?;
+    }
+    if !la_files.is_empty() {
+        eprintln!("pkg: dropped {} libtool archive(s) (.la)", la_files.len());
+    }
+    Ok(())
+}
+
+fn collect_la_files(dir: &Path, out: &mut Vec<PathBuf>) -> PkgResult<()> {
+    for entry in fs::read_dir(dir).map_err(PkgError::Io)? {
+        let entry = entry.map_err(PkgError::Io)?;
+        let path = entry.path();
+        if entry.file_type().map_err(PkgError::Io)?.is_dir() {
+            collect_la_files(&path, out)?;
+        } else if path.extension().and_then(|e| e.to_str()) == Some("la") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
 fn collect_pc_files(dir: &Path, out: &mut Vec<PathBuf>) -> PkgResult<()> {
     for entry in fs::read_dir(dir).map_err(PkgError::Io)? {
         let entry = entry.map_err(PkgError::Io)?;
@@ -656,6 +692,20 @@ pub fn children_peak_rss_kib() -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn libtool_archives_are_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lib = tmp.path().join("usr/lib");
+        fs::create_dir_all(&lib).unwrap();
+        fs::write(lib.join("libfoo.la"), "dlname='libfoo.so'\n").unwrap();
+        fs::write(lib.join("libfoo.so"), b"").unwrap();
+
+        drop_libtool_archives(tmp.path()).unwrap();
+
+        assert!(!lib.join("libfoo.la").exists());
+        assert!(lib.join("libfoo.so").exists());
+    }
 
     #[test]
     fn pkgconfig_fixup_rewrites_usr_prefix_pcfiledir_relative() {

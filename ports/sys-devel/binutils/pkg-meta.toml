@@ -1,0 +1,9 @@
+name = "binutils"
+version = "2.45"
+category = "sys-devel"
+
+# Assembler, linker and friends — the back half of the toolchain; gcc
+# drives as/ld at runtime. Out-of-tree build as upstream recommends.
+[dependencies]
+link = ["zlib"]
+runtime = ["glibc", "zlib"]

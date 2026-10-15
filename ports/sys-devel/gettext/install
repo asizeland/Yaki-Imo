@@ -1,0 +1,1 @@
+make -C gettext-0.26 DESTDIR="$PKGDIR" install

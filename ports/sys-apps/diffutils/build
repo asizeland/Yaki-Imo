@@ -1,0 +1,4 @@
+tar xJf diffutils-3.12.tar.xz
+cd diffutils-3.12
+./configure --prefix=/usr --disable-nls
+make

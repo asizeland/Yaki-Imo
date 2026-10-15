@@ -1,0 +1,16 @@
+name = "gcc"
+version = "15.2.0"
+category = "sys-devel"
+
+# The compiler. C and C++ only; no bootstrap (the seed toolchain is
+# already a gcc of the same major generation, and a full 3-stage
+# bootstrap roughly triples the build time). Ships libgcc and
+# libstdc++, which also retire the static-C++ workarounds in the ninja
+# and gnutls recipes once the tree is rebuilt on this toolchain.
+# Drives binutils' as/ld at runtime. libcc1 is off: it's GDB's
+# compile-plugin glue, and its libtool link hits the same
+# unknown-CXX-tag static-only trap gettext's libasprintf did.
+[dependencies]
+link = ["gmp", "mpfr", "mpc", "zlib"]
+runtime = ["glibc", "binutils", "gmp", "mpfr", "mpc", "zlib"]
+build = ["linux-headers"]

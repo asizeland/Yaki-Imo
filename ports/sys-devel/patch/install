@@ -1,0 +1,1 @@
+make -C patch-2.8 DESTDIR="$PKGDIR" install

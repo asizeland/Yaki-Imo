@@ -1,0 +1,6 @@
+tar xzf gperf-3.3.tar.gz
+cd gperf-3.3
+# -static-libstdc++/-static-libgcc: gperf is C++, and no package
+# provides libstdc++ yet (same stage-2 situation as ninja).
+LDFLAGS="-static-libstdc++ -static-libgcc" ./configure --prefix=/usr
+make

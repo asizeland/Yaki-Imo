@@ -1,0 +1,1 @@
+make -C bison-3.8.2 DESTDIR="$PKGDIR" install

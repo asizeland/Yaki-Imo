@@ -1,0 +1,4 @@
+tar xJf patch-2.8.tar.xz
+cd patch-2.8
+./configure --prefix=/usr --disable-nls
+make

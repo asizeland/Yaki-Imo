@@ -554,7 +554,81 @@ rm -f "$ROOT/boot-marker" "$ROOT/etc/inittab"
 pass "db check clean after sysvinit"
 
 # ---------------------------------------------------------------
-# 11. Packaging aid: a new recipe that underdeclares its deps must get a
+# 11. Batch 4: the self-hosting toolchain. A live system must be able
+#     to build its own packages — that needs make, the patch/diff
+#     tools, the autotools generators, and above all gcc + binutils.
+# ---------------------------------------------------------------
+"$PKG" install -y make diffutils findutils patch m4 bison flex gperf \
+    gettext mpfr mpc binutils gcc >"$E2E/install4.log" 2>&1 \
+    || { tail -40 "$E2E/install4.log" >&2; fail "pkg install batch 4"; }
+pass "installed batch 4 (make, diffutils, findutils, patch, m4, bison, flex, gperf, gettext, mpfr, mpc, binutils, gcc)"
+
+$LOADER "$R/make" --version | head -1 | grep -q "GNU Make 4\.4\.1" \
+    || fail "make runs"
+$LOADER "$R/diff" --version | head -1 | grep -q "diffutils) 3\.12" \
+    || fail "diff runs"
+$LOADER "$R/find" --version | head -1 | grep -q "findutils) 4\.10" \
+    || fail "find runs"
+$LOADER "$R/patch" --version | head -1 | grep -q "GNU patch 2\.8" \
+    || fail "patch runs"
+$LOADER "$R/m4" --version | head -1 | grep -q "GNU M4) 1\.4\.20" \
+    || fail "m4 runs"
+$LOADER "$R/bison" --version | head -1 | grep -q "GNU Bison) 3\.8\.2" \
+    || fail "bison runs"
+$LOADER "$R/flex" --version | head -1 | grep -q "flex 2\.6\.4" \
+    || fail "flex runs"
+$LOADER "$R/gperf" --version | head -1 | grep -q "GNU gperf 3\.3" \
+    || fail "gperf runs"
+$LOADER "$R/msgfmt" --version | head -1 | grep -q "gettext-tools) 0\.26" \
+    || fail "msgfmt runs"
+$LOADER "$R/as" --version | head -1 | grep -q "Binutils) 2\.45" \
+    || fail "as runs"
+pass "batch 4 tools: make/diff/find/patch/m4/bison/flex/gperf/msgfmt/as all run"
+
+# The headline proof of self-hosting: from inside the chroot-equivalent
+# (packaged loader, packaged libc, no host anything), the PACKAGED gcc
+# + binutils compile and run C and C++ programs. gcc finds as/ld in
+# /usr/bin, cc1/cc1plus under its own libexec, and the glibc headers
+# and crt files in /usr — all from packages. (A script file instead of
+# an inline one-liner: `bash -e` aborts on the C program's deliberate
+# exit-42, and deeply nested printf quoting mangles the C++ source.)
+cat > "$E2E/gcc-smoke.sh" <<'EOF'
+#!/usr/bin/bash
+set -e
+printf 'int main(void){return 42;}\n' > /tmp/t.c
+gcc /tmp/t.c -o /tmp/t
+set +e
+/tmp/t
+echo "C exit: $?"
+set -e
+cat > /tmp/t.cc <<'CPP'
+#include <iostream>
+#include <vector>
+int main() {
+    std::vector<int> v{1, 2, 3};
+    int s = 0;
+    for (int x : v) s += x;
+    std::cout << "cxx-ok " << s << "\n";
+}
+CPP
+g++ /tmp/t.cc -o /tmp/tcxx
+/tmp/tcxx
+gcc --version | head -1
+EOF
+GCC_OUT=$("$REAL_BWRAP" --unshare-all --bind "$ROOT" / \
+    --proc /proc --dev /dev --tmpfs /tmp \
+    --ro-bind "$E2E/gcc-smoke.sh" /gcc-smoke.sh \
+    --setenv PATH /usr/bin:/bin --setenv HOME /tmp \
+    -- /usr/bin/bash /gcc-smoke.sh 2>&1) || { echo "$GCC_OUT" >&2; fail "packaged gcc compile test"; }
+echo "$GCC_OUT" | grep -q "C exit: 42" || fail "C program compiled+ran (exit 42)"
+echo "$GCC_OUT" | grep -q "cxx-ok 6" || fail "C++ program compiled+ran"
+pass "gcc: compiled and ran C and C++ programs inside the packaged root"
+
+"$PKG" db check >/dev/null 2>&1 || fail "db check after batch 4"
+pass "db check clean after batch 4"
+
+# ---------------------------------------------------------------
+# 12. Packaging aid: a new recipe that underdeclares its deps must get a
 #    gate failure that names the PROVIDING package, not just the soname.
 #    badlink links the host's zlib with explicit -I/-L (the sandbox
 #    binds the host toolchain tree RO — what a packager hits on a

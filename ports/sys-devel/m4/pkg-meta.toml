@@ -1,0 +1,9 @@
+name = "m4"
+version = "1.4.20"
+category = "sys-devel"
+
+# GNU m4 macro processor — bison and flex drive it at runtime, and
+# autoconf input is m4. 1.4.20 is the first release whose bundled
+# gnulib builds cleanly under GCC 15's C23 default.
+[dependencies]
+runtime = ["glibc"]

@@ -1,0 +1,7 @@
+name = "gperf"
+version = "3.3"
+category = "sys-devel"
+
+# Perfect-hash generator — eudev's build consumes it.
+[dependencies]
+runtime = ["glibc"]

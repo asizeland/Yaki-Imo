@@ -1,0 +1,8 @@
+name = "make"
+version = "4.4.1"
+category = "sys-devel"
+
+# GNU make — core build-farm tool, needed so a live system can build
+# its own packages without the seed toolchain.
+[dependencies]
+runtime = ["glibc"]

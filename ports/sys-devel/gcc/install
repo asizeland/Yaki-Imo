@@ -1,0 +1,11 @@
+make -C gcc-build DESTDIR="$PKGDIR" install
+# x86_64 gcc installs its target runtime libs (libgcc_s, libstdc++,
+# libgomp, ...) to usr/lib64 even with --disable-multilib, but the
+# packaged loader's compiled-in default search path is /usr/lib. Merge
+# lib64 into lib and leave a compat symlink behind — gcc's own driver
+# still probes lib64 at link time.
+if [ -d "$PKGDIR/usr/lib64" ]; then
+    cp -rl "$PKGDIR/usr/lib64/." "$PKGDIR/usr/lib/"
+    rm -rf "$PKGDIR/usr/lib64"
+    ln -s lib "$PKGDIR/usr/lib64"
+fi

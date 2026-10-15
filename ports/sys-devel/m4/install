@@ -1,0 +1,1 @@
+make -C m4-1.4.20 DESTDIR="$PKGDIR" install

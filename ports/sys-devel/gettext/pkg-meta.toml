@@ -1,0 +1,10 @@
+name = "gettext"
+version = "0.26"
+category = "sys-devel"
+
+# Message-catalog tooling (msgfmt, xgettext, autopoint) — needed to
+# build autotools packages that ship translations, and by several
+# configure scripts in the tree.
+[dependencies]
+link = ["ncurses", "libxcrypt"]
+runtime = ["glibc", "ncurses", "libxcrypt"]

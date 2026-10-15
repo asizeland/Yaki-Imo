@@ -1,0 +1,34 @@
+tar xJf gcc-15.2.0.tar.xz
+# Native build in the sandbox has no /usr/include: fixincludes and the
+# target runtime libraries (libgcc, libstdc++) need the target system
+# headers. Assemble a build sysroot from the packaged glibc + kernel
+# headers. --with-build-sysroot affects only the build; the installed
+# compiler keeps the native /usr defaults.
+mkdir -p sysroot
+cp -rL /pkg/deps/glibc/. sysroot/
+cp -rL /pkg/deps/linux-headers/usr/include sysroot/usr/
+# LIBRARY_PATH carries every declared dep's lib dir — including
+# glibc's. xgcc's target-lib links pass --sysroot=<the build sysroot>
+# and rely on ld's script-inside-sysroot path rewriting; but a libc.so
+# found via LIBRARY_PATH (/pkg/deps/glibc, read-only) is OUTSIDE the
+# sysroot, so no rewriting happens and the script's absolute
+# GROUP(/usr/lib/libc.so.6 ...) points into the void. Drop the glibc
+# entry: host links (cc1 etc.) use the farm compiler's own libc
+# defaults, and xgcc must resolve -lc through the sysroot.
+LP_FILTERED=$(printf '%s' "$LIBRARY_PATH" | tr ':' '\n' \
+    | grep -v '/pkg/deps/glibc/' | tr '\n' ':')
+LIBRARY_PATH=${LP_FILTERED%:}
+export LIBRARY_PATH
+mkdir gcc-build
+cd gcc-build
+../gcc-15.2.0/configure \
+    --prefix=/usr \
+    --libdir=/usr/lib \
+    --enable-languages=c,c++ \
+    --disable-multilib \
+    --disable-nls \
+    --disable-bootstrap \
+    --with-system-zlib \
+    --with-build-sysroot="$PWD/../sysroot" \
+    --disable-libcc1
+make

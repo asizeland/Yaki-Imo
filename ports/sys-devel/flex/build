@@ -1,0 +1,4 @@
+tar xzf flex-2.6.4.tar.gz
+cd flex-2.6.4
+./configure --prefix=/usr --disable-nls
+make

@@ -1,0 +1,12 @@
+tar xJf binutils-2.45.tar.xz
+mkdir binutils-build
+cd binutils-build
+../binutils-2.45/configure \
+    --prefix=/usr \
+    --disable-nls \
+    --disable-werror \
+    --disable-gprofng \
+    --enable-plugins \
+    --enable-ld=default \
+    --enable-shared
+make
