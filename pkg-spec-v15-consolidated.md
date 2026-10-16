@@ -1136,6 +1136,14 @@ stack + NetworkManager and its full dependency closure (python3, glib, dbus, eud
 mpfr, mpc, binutils, gcc). One repackaged binary blob (discord) exercises the `[build] binary` path. The
 tree's own README tabulates every recipe with its build style and quirks.
 
+**Deferred: recipe boilerplate reduction.** Most autotools recipes repeat the same three-line
+build/install text (`./configure … && make`, `make DESTDIR=… install`), and a recipe directory currently
+requires up to four files whose contents are largely mechanical. A future revision may add declared
+build-system templates — e.g. `build_system = "autotools"` in pkg-meta.toml supplying default phase
+scripts, with shipping the script files remaining the override — and may fold source.toml into
+pkg-meta.toml. Deferred, not implemented: the explicit scripts are the audit surface while the tree is
+young, and repetition is the price of every recipe being greppable and self-contained.
+
 ---
 
 ## 11. Configuration File Management
