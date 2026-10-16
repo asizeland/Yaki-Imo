@@ -293,9 +293,12 @@ compiler = "ccache"
 #   jobs         — total compile jobs across the machine (the
 #                  scheduler's token pool). Default: your core count.
 #   max_pkg_jobs — per-package `make -j` cap. Default: 4.
+#   opt_level    — the optimization level every package is built with:
+#                  "o0" | "o1" | "o2" (default) | "o3" | "os".
 [build]
 jobs = 12
 max_pkg_jobs = 6
+opt_level = "o2"
 
 # Relocate state paths from their FHS defaults. Keys are the default
 # absolute paths; values must be absolute. Rarely needed.
@@ -326,6 +329,30 @@ Three knobs, from widest to narrowest:
 The scheduler hands out tokens: a configure phase holds one token, a
 compile phase up to `max_pkg_jobs`. A build can always make progress
 on one token, so `jobs` builds never deadlock; they just queue.
+
+## 6.1 Optimization level
+
+`[build] opt_level` sets the optimization flag every package is
+compiled with: `o2` (the default), `o3` for more aggressive
+optimization, `os` for smaller binaries, `o0`/`o1` for debugging.
+
+This is deliberately the *only* compiler-flag knob. Yakimo does not
+accept arbitrary `CFLAGS`: the flags a distribution is compiled with
+are part of its ABI contract, so the level is declared, bounded, and
+hashed into every package's identity. Two consequences follow:
+
+- **Flipping the level rebuilds the world.** An `o2` artifact and an
+  `o3` artifact are different packages to Yakimo, so the artifact
+  cache can never hand you one when you asked for the other.
+- **A recipe can still pin its own flags.** If a package is known to
+  miscompile under aggressive optimization, its build script exports
+  its own `CFLAGS` and wins over the profile. The reference tree does
+  this for glibc, which stays at `-O2` whatever you choose.
+
+`-march=native`-style ISA flags are not offered at all: they bake your
+CPU into the binaries, which breaks cache correctness and any future
+binary redistribution. The planned `glibc-hwcaps` support is the safe
+path to ISA-specific builds.
 
 ---
 

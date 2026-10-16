@@ -406,6 +406,15 @@ fn apply_parallelism(cfg: &mut SchedConfig, cli_jobs: Option<u32>) -> PkgResult<
     Ok(())
 }
 
+/// Applies the declared `[build] opt_level` optimization profile
+/// (§4.3's bounded flag knob) strictly: an invalid value is a hard
+/// error here, matching what `compute_abi_tag` mixes into identity, so
+/// config and scheduling can never disagree about the profile.
+fn apply_opt_level(cfg: &mut SchedConfig) -> PkgResult<()> {
+    cfg.opt_level = orchestrator::opt_level_from_config(&at(orchestrator::CONFIG_PATH))?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------
 // abi_tag derivation (v14 §5.1 formula)
 // ---------------------------------------------------------------------
@@ -462,6 +471,16 @@ pub fn compute_abi_tag(
                 .as_str()
                 .as_bytes(),
         );
+        // The declared optimization profile is part of the toolchain
+        // ABI contract (§4.3), so it feeds the tag: flipping
+        // `[build] opt_level` yields new identities and a world
+        // rebuild, never silent reuse of -O2 artifacts as -O3 ones.
+        // glibc's base case above is exempt — its recipe pins its own
+        // flags, so the profile cannot change its bits and must not
+        // change its tag either.
+        let opt_level =
+            orchestrator::opt_level_from_config(&at(orchestrator::CONFIG_PATH))?;
+        hasher.update(opt_level.as_identity_str().as_bytes());
     }
     let digest = hasher.finalize();
     Ok(AbiTag(u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]])))
@@ -845,6 +864,7 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
     // -- execute ------------------------------------------------------
     let mut cfg = SchedConfig::with_defaults();
     apply_parallelism(&mut cfg, flags.jobs)?;
+    apply_opt_level(&mut cfg)?;
     cfg.command_line = format!("pkg {kind} {}", specs.join(" "));
     cfg.cascade_id = Some(new_cascade_id());
     cfg.store_roots = store_roots();
@@ -2261,6 +2281,7 @@ fn cmd_rebuild(affected: bool, assume_yes: bool) -> PkgResult<()> {
 
     let mut cfg = SchedConfig::with_defaults();
     apply_parallelism(&mut cfg, None)?;
+    apply_opt_level(&mut cfg)?;
     cfg.command_line = "pkg rebuild --affected".to_string();
     cfg.cascade_id = Some(new_cascade_id());
     cfg.store_roots = store_roots();
@@ -3009,6 +3030,7 @@ fn cmd_build_env(name: &str, resolve: bool) -> PkgResult<()> {
         inner_jobs: 1,
         source_cache: at(SOURCE_CACHE),
         compiler_wrapper: None,
+        opt_level: orchestrator::opt_level_from_config(&at(orchestrator::CONFIG_PATH))?,
         host_glibc: None,
         // build_env only reads selection/wrapper/paths; the fetch/gate
         // inputs are unused here, so empty placeholders are honest.
@@ -3294,6 +3316,7 @@ fn cmd_build(name: &str, opts: Vec<String>, jobs: Option<u32>, no_cache: bool) -
     );
     let mut cfg = SchedConfig::with_defaults();
     apply_parallelism(&mut cfg, jobs)?;
+    apply_opt_level(&mut cfg)?;
     cfg.command_line = format!("pkg build {name}");
     cfg.cascade_id = None; // standalone build (Issue 4.2.5)
     cfg.store_roots = store_roots();

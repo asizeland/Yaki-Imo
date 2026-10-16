@@ -242,6 +242,11 @@ pub struct SchedConfig {
     /// compiler` in `/etc/pkg/config.toml` (§7.9.6) — `off`/absent →
     /// `None`. See [`compiler_wrapper_from_config`].
     pub compiler_wrapper: Option<String>,
+    /// The declared optimization profile (`[build] opt_level`, default
+    /// `O2`) — exported as the baseline `CFLAGS`/`CXXFLAGS` of every
+    /// build and mixed into every non-glibc `abi_tag` by pkg-cli, so a
+    /// profile flip is a world rebuild, never silent cache poisoning.
+    pub opt_level: OptLevel,
     /// Run the §10.5.6 double-build for critical-set packages (default
     /// true; `--no-repro-check` clears it). Opt-out, not opt-in: the
     /// default must be the safe direction.
@@ -278,6 +283,16 @@ impl SchedConfig {
                 Err(e) => {
                     eprintln!("pkg: warning: ignoring {CONFIG_PATH}: {e}");
                     None
+                }
+            },
+            // Same degrade-with-warning posture as the wrapper: callers
+            // that can propagate errors (pkg-cli) apply
+            // `opt_level_from_config` strictly on top of this default.
+            opt_level: match opt_level_from_config(&pkg_core::paths::at(CONFIG_PATH)) {
+                Ok(level) => level,
+                Err(e) => {
+                    eprintln!("pkg: warning: ignoring {CONFIG_PATH}: {e}");
+                    OptLevel::default()
                 }
             },
             repro_check: true,
@@ -388,6 +403,89 @@ pub fn build_parallelism_from_config(path: &std::path::Path) -> PkgResult<BuildP
     match std::fs::read_to_string(path) {
         Ok(text) => parse_build_parallelism(&text),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BuildParallelism::default()),
+        Err(e) => Err(PkgError::Io(e)),
+    }
+}
+
+// ---------------------------------------------------------------------
+// [build] opt_level config: the declared optimization profile
+// ---------------------------------------------------------------------
+
+/// The distribution's declared optimization level — `[build] opt_level`
+/// in config.toml. This is the *only* compiler-flag knob, by design:
+/// toolchain flags are the distribution's ABI contract (§4.3), so
+/// arbitrary CFLAGS injection remains forbidden and the bounded,
+/// declared profile takes its place. The level is mixed into every
+/// non-glibc `abi_tag` (pkg-cli's `compute_abi_tag`), so switching
+/// levels simply produces different package identities — artifact-cache
+/// entries, installed rows and undo generations can never be confused
+/// across profiles, and a profile flip rebuilds the world instead of
+/// silently poisoning it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum OptLevel {
+    O0,
+    O1,
+    #[default]
+    O2,
+    O3,
+    Os,
+}
+
+impl OptLevel {
+    /// The compiler flag this level expands to — exported as the build
+    /// environment's baseline `CFLAGS`/`CXXFLAGS`. A recipe script that
+    /// exports its own flags still wins; that is the per-package escape
+    /// hatch for `-O3`-fragile code (glibc pins `-O2` this way).
+    pub fn cflags(self) -> &'static str {
+        match self {
+            OptLevel::O0 => "-O0",
+            OptLevel::O1 => "-O1",
+            OptLevel::O2 => "-O2",
+            OptLevel::O3 => "-O3",
+            OptLevel::Os => "-Os",
+        }
+    }
+
+    /// The string mixed into the `abi_tag` hash input.
+    pub fn as_identity_str(self) -> &'static str {
+        self.cflags()
+    }
+}
+
+/// Parses `[build] opt_level` from config TOML text: absent → the `O2`
+/// default; `"o0"`/`"o1"`/`"o2"`/`"o3"`/`"os"` → that level. Unknown
+/// values — including a non-string value — are hard errors, per §4.3's
+/// "unknown config is loud, never silently ignored" philosophy.
+pub fn parse_build_opt_level(config_text: &str) -> PkgResult<OptLevel> {
+    let value: toml::Value =
+        toml::from_str(config_text).map_err(|e| PkgError::Parse(format!("config TOML: {e}")))?;
+    let Some(v) = value.get("build").and_then(|b| b.get("opt_level")) else {
+        return Ok(OptLevel::default());
+    };
+    let Some(s) = v.as_str() else {
+        return Err(PkgError::Parse(
+            "[build] opt_level must be a string (o0 | o1 | o2 | o3 | os)".into(),
+        ));
+    };
+    match s {
+        "o0" => Ok(OptLevel::O0),
+        "o1" => Ok(OptLevel::O1),
+        "o2" => Ok(OptLevel::O2),
+        "o3" => Ok(OptLevel::O3),
+        "os" => Ok(OptLevel::Os),
+        other => Err(PkgError::Parse(format!(
+            "unknown [build] opt_level value `{other}` (expected o0, o1, o2, o3 or os)"
+        ))),
+    }
+}
+
+/// Reads `[build] opt_level` from the config file at `path`. A missing
+/// file means the `O2` default; an unreadable or invalid file is a hard
+/// error.
+pub fn opt_level_from_config(path: &std::path::Path) -> PkgResult<OptLevel> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => parse_build_opt_level(&text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(OptLevel::default()),
         Err(e) => Err(PkgError::Io(e)),
     }
 }
@@ -1129,6 +1227,7 @@ fn build_node(
             inner_jobs: jobs,
             source_cache: cfg.source_cache.clone(),
             compiler_wrapper: cfg.compiler_wrapper.clone(),
+            opt_level: cfg.opt_level,
             host_glibc: cfg.host_glibc.clone(),
             recipe_manifest: recipe_manifest.clone(),
             gate_deps: gate_deps.clone(),
@@ -1171,6 +1270,7 @@ fn build_node(
             inner_jobs: tokens,
             source_cache: cfg.source_cache.clone(),
             compiler_wrapper: cfg.compiler_wrapper.clone(),
+            opt_level: cfg.opt_level,
             host_glibc: cfg.host_glibc.clone(),
             recipe_manifest: recipe_manifest.clone(),
             gate_deps: gate_deps.clone(),
@@ -1700,6 +1800,40 @@ mod tests {
         assert!(parse_build_parallelism("[build]\njobs = -2\n").is_err());
         assert!(parse_build_parallelism("[build]\njobs = \"all\"\n").is_err());
         assert!(parse_build_parallelism("[build]\nmax_pkg_jobs = 0\n").is_err());
+    }
+
+    #[test]
+    fn opt_level_defaults_to_o2_when_absent() {
+        assert_eq!(parse_build_opt_level("").unwrap(), OptLevel::O2);
+        assert_eq!(
+            parse_build_opt_level("[build]\njobs = 8\n").unwrap(),
+            OptLevel::O2
+        );
+    }
+
+    #[test]
+    fn opt_level_parses_each_declared_value() {
+        for (text, want, flag) in [
+            ("o0", OptLevel::O0, "-O0"),
+            ("o1", OptLevel::O1, "-O1"),
+            ("o2", OptLevel::O2, "-O2"),
+            ("o3", OptLevel::O3, "-O3"),
+            ("os", OptLevel::Os, "-Os"),
+        ] {
+            let parsed = parse_build_opt_level(&format!("[build]\nopt_level = \"{text}\"\n")).unwrap();
+            assert_eq!(parsed, want);
+            assert_eq!(parsed.cflags(), flag);
+            assert_eq!(parsed.as_identity_str(), flag);
+        }
+    }
+
+    #[test]
+    fn opt_level_rejects_unknown_values_loudly() {
+        // Arbitrary flags are exactly what this knob replaces (§4.3) —
+        // `-march=native` must be a hard error, not a pass-through.
+        assert!(parse_build_opt_level("[build]\nopt_level = \"o4\"\n").is_err());
+        assert!(parse_build_opt_level("[build]\nopt_level = \"-march=native\"\n").is_err());
+        assert!(parse_build_opt_level("[build]\nopt_level = 3\n").is_err());
     }
 
     #[test]

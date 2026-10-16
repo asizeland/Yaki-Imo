@@ -1,3 +1,10 @@
+# glibc is -O3-fragile and is the ABI anchor of the whole system: pin
+# its flags here, overriding whatever [build] opt_level profile the
+# config declares. This is the sanctioned per-recipe escape hatch —
+# and exactly why compute_abi_tag exempts glibc's base case from the
+# profile mix-in: the profile cannot change these bits.
+export CFLAGS="-O2"
+export CXXFLAGS="-O2"
 tar xJf glibc-2.42.tar.xz
 mkdir -p glibc-build
 cd glibc-build

@@ -83,6 +83,7 @@ NetworkManager plus the self-hosting sys-devel toolchain) and its end-to-end pro
 | 6 | glibc is built from source in the reference bootstrap; the prebuilt-tarball exception is retained but no longer load-bearing | §18.2 |
 | 7 | Reference-tree init is sysvinit (proven as PID 1); init-system agnosticism unchanged | header, §13 |
 | 8 | Appendix-A rulings: A.4 (glibc `abi_tag` base case governs) and A.5 (exit 3 defined) | §7.7, §8, App. A |
+| 9 | Declared optimization profile `[build] opt_level` (default `o2`) — the bounded exception to the no-arbitrary-`CFLAGS` rule, hashed into every non-glibc `abi_tag` | §4.3, §7.1, §7.9.1 |
 
 ---
 
@@ -234,7 +235,13 @@ two extreme corners (all-default, all-on); middle points are uncovered, accepted
 
 **Still forbidden (§20, amended wording):** arbitrary `CFLAGS`/`RUSTFLAGS` injection (toolchain flags are the
 distribution's ABI contract; ISA variance has its sanctioned path in `glibc-hwcaps`) and arbitrary configure
-args (anything reachable only by raw args is an undeclared option; declare it or fork visibly).
+args (anything reachable only by raw args is an undeclared option; declare it or fork visibly). **The one
+bounded exception is the declared optimization profile** `[build] opt_level = "o0"|"o1"|"o2"|"o3"|"os"`
+(default `o2`): it is *part of* the ABI contract rather than an escape from it — exported as the baseline
+`CFLAGS`/`CXXFLAGS` of every build (§7.1), mixed into every non-glibc `abi_tag` so a profile flip yields new
+identities and a world rebuild rather than silent reuse of `-O2` artifacts as `-O3` ones, and overridable
+per recipe by a script exporting its own flags (the escape hatch for `-O3`-fragile code; the reference
+glibc recipe pins `-O2` this way, and glibc's `abi_tag` base case therefore exempts the profile).
 
 ---
 
@@ -376,7 +383,9 @@ The bubblewrap build profile becomes explicit and versioned (`/usr/lib/pkg/sandb
   deps without hand-assembled flags. The §8 gate verifies afterwards that whatever got linked was declared.
 - **Deterministic anchors.** `HOME` is the scratch dir, `PKGDIR` the packaging destination, `MAKEFLAGS=-jN`
   from the token pool (§7.9.1), `SOURCE_DATE_EPOCH` pinned to a fixed constant, `LC_ALL=C`, and one
-  `PKG_OPT_<NAME>=0|1` per declared option (§4.3).
+  `PKG_OPT_<NAME>=0|1` per declared option (§4.3). `CFLAGS`/`CXXFLAGS` carry the declared optimization
+  profile's baseline flag (§4.3's `[build] opt_level`); a recipe that exports its own flags overrides the
+  baseline, visibly, in its build script.
 - **Pristine scratch, always.** Every build starts from a fresh scratch dir — no incremental build-tree
   reuse (autotools caches bake in the previous build's answers). The sanctioned reuse mechanisms are the
   artifact cache (§7.9.5) and the compiler cache (§7.9.6), both content-keyed.
@@ -624,7 +633,9 @@ level barriers. Parallelism is a **total-token pool**: each build holds `inner_j
 phase and load (configure is serial, holds 1 token). *(v15 Δ §4)* The two knobs are concrete user
 configuration in `/etc/pkg/config.toml`, under `[build]`: **`jobs`** — the token pool's size, i.e. the total
 compile jobs Yakimo may run at once (default `ncpu`); **`max_pkg_jobs`** — the per-package cap on
-`inner_jobs` (default 4). `--jobs` on `pkg build`/`pkg install` overrides the pool for that invocation. Builds
+`inner_jobs` (default 4); **`opt_level`** — the declared optimization profile (§4.3, default `o2`), the
+bounded exception to the no-arbitrary-flags rule, mixed into every non-glibc `abi_tag`. `--jobs` on `pkg
+build`/`pkg install` overrides the pool for that invocation. Builds
 run in a dedicated cgroup v2 subtree: `cpu.weight=50` (under contention the cascade gets ~1/3 of CPU; idle,
 everything — **weights, not quotas**), `cpu.max=75%` only while a user session is active, `io.weight=50`,
 `memory.high = RAM − 2 GiB`, `nice 10`, `ionice` best-effort 7.

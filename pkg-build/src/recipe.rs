@@ -124,6 +124,11 @@ pub struct BuildContext {
     /// Compiler-cache wrapper (`ccache`/`sccache`) when enabled by
     /// config AND permitted by the recipe's `[build] compiler_cache`.
     pub compiler_wrapper: Option<String>,
+    /// The declared optimization profile — exported by [`build_env`] as
+    /// the baseline `CFLAGS`/`CXXFLAGS`. A recipe that exports its own
+    /// flags overrides the baseline (the per-package escape hatch for
+    /// `-O3`-fragile code).
+    pub opt_level: crate::orchestrator::OptLevel,
     /// Running glibc version, when known — enables the post-build
     /// scanner gate (v12 §9 verification framing).
     pub host_glibc: Option<Version>,
@@ -252,6 +257,15 @@ pub fn build_env(ctx: &BuildContext, recipe: &Recipe) -> PkgResult<Vec<(String, 
             .manifest
             .options_export_env(&recipe.manifest.filter_selection(&ctx.selection))?,
     );
+    // The declared optimization profile (`[build] opt_level`) is the
+    // build's BASELINE flag set: configure/meson honor it, and a recipe
+    // script that exports its own CFLAGS (glibc pinning -O2, sqlite
+    // adding -DSQLITE_ENABLE_*) overrides it — the per-package escape
+    // hatch for -O3-fragile code. Baseline-only is also what keeps the
+    // profile hashable into the abi_tag: every package sees the same
+    // contract unless its recipe visibly says otherwise.
+    env.push(("CFLAGS".into(), ctx.opt_level.cflags().to_string()));
+    env.push(("CXXFLAGS".into(), ctx.opt_level.cflags().to_string()));
     match (&ctx.compiler_wrapper, recipe.manifest.compiler_cache) {
         (Some(wrapper), true) => {
             env.push(("CC".into(), format!("{wrapper} cc")));
@@ -808,6 +822,7 @@ default = false
             inner_jobs: 3,
             source_cache: PathBuf::from("/var/cache/pkg/sources"),
             compiler_wrapper: Some("ccache".into()),
+            opt_level: crate::orchestrator::OptLevel::default(),
             host_glibc: None,
             recipe_manifest: std::sync::Arc::new(pkg_repo::RecipeManifest {
                 packages: Vec::new(),
@@ -848,6 +863,29 @@ default = false
         assert_eq!(get("MAKEFLAGS").as_deref(), Some("-j3"));
         assert_eq!(get("CC").as_deref(), Some("ccache cc"));
         assert!(get("SOURCE_DATE_EPOCH").is_some());
+    }
+
+    #[test]
+    fn env_exports_baseline_cflags_from_opt_level() {
+        // Default profile: the -O2 baseline is exported...
+        let manifest = manifest_with_options();
+        let recipe = Recipe {
+            manifest: manifest.clone(),
+            dir: PathBuf::from("/recipe"),
+            recipe_commit: "abc".into(),
+        };
+        let env = build_env(&ctx(BTreeMap::new()), &recipe).unwrap();
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        assert_eq!(get("CFLAGS").as_deref(), Some("-O2"));
+        assert_eq!(get("CXXFLAGS").as_deref(), Some("-O2"));
+        // ...and the profile follows the context, so an o3 config
+        // reaches every build's compiler invocation.
+        let mut o3_ctx = ctx(BTreeMap::new());
+        o3_ctx.opt_level = crate::orchestrator::OptLevel::O3;
+        let env = build_env(&o3_ctx, &recipe).unwrap();
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        assert_eq!(get("CFLAGS").as_deref(), Some("-O3"));
+        assert_eq!(get("CXXFLAGS").as_deref(), Some("-O3"));
     }
 
     #[test]
