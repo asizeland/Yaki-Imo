@@ -1,4 +1,4 @@
-# Yakimo Package Manager & Distribution Specification — v15 (Consolidated)
+# Yaki Imo Package Manager & Distribution Specification — v15 (Consolidated)
 
 **Status:** Consolidated specification; all decisions settled
 **Target:** Linux, amd64 (+ i686 multilib), glibc-based, init-system agnostic (sysvinit in the reference tree)
@@ -632,7 +632,7 @@ A cascade runs as a topological sweep; a package starts the moment its in-cascad
 level barriers. Parallelism is a **total-token pool**: each build holds `inner_jobs` tokens, throttled by
 phase and load (configure is serial, holds 1 token). *(v15 Δ §4)* The two knobs are concrete user
 configuration in `/etc/pkg/config.toml`, under `[build]`: **`jobs`** — the token pool's size, i.e. the total
-compile jobs Yakimo may run at once (default `ncpu`); **`max_pkg_jobs`** — the per-package cap on
+compile jobs Yaki Imo may run at once (default `ncpu`); **`max_pkg_jobs`** — the per-package cap on
 `inner_jobs` (default 4); **`opt_level`** — the declared optimization profile (§4.3, default `o2`), the
 bounded exception to the no-arbitrary-flags rule, mixed into every non-glibc `abi_tag`. `--jobs` on `pkg
 build`/`pkg install` overrides the pool for that invocation. Builds

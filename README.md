@@ -1,6 +1,21 @@
-# Yakimo (pkg)
+# Yaki Imo (pkg)
 
-Yakimo is a source-build-only Linux package manager (see SPEC.md for the
+In summary: never quite found a linux distribution which felt natural, ironically 
+FreeBSD achieved that for me, tooling feels coherent, intuitive and natural, but it also
+amplifies the aspect of linux: Lack of support and incompatibilty. Regardless a beloved
+OS and project of mine. Gentoo linux has a special place in my heart because to me, within
+linux it replicates similar feelings and more than ever you can fine-tune your system
+in some manner. NixOS is probably the single most pragmatic distribution one could
+design, centralized control of a system from a file and all sorts, but the
+language itself in things such has flakes, it feels a bitoverwhelming. Furthermore I get an 
+error and half the time I am left squinting at my screen and wondering what the fuck
+something means when I am trying to rebuild a system.
+
+Anyways, so I am no programmer, but I had an idea and decided to do anything to attempt
+my own PM. Largely AI slop at the moment, as my life allows me I will replace this with
+100% human, organic, unadulterated slop. 
+
+Yaki Imo is a source-build-only Linux package manager (see SPEC.md for the
 binding interface contracts; the user-facing distribution spec is
 pkg-spec-v14-consolidated.md). The workspace crates and CLI keep their
 `pkg-*` / `pkg` names. Crates: pkg-core (types), pkg-resolver (pubgrub),
@@ -23,59 +38,55 @@ all state under a throwaway `/tmp/pkg-e2e` root):
 
 ## Where the project stands
 
-The intended goal is a complete, self-hosting source-based distribution:
-a signed ports tree that builds everything from a real glibc upward,
-installed and maintained by Yakimo itself. The current state is the
+The intended goal is a complete distribution. The current state is the
 package manager, not yet the distribution. The machinery the spec
 promises is implemented and exercised end to end — PubGrub resolution
-with option pseudo-dependencies, signed repositories and pinned sources,
+with optional pseudo-dependencies, signed repositories and pinned sources,
 sandboxed reproducible builds with provenance, atomic store-and-symlink
 activation, generations and undo, dependency-directed provider hints for
-packagers — and it has been proven on real upstream software (a
-66-recipe ports tree from glibc to NetworkManager, plus a self-hosting gcc toolchain and repackaged binary blobs
-like Discord). The first bootstrap stage is done: Yakimo builds real
-glibc 2.42 from source on top of kernel headers and libxcrypt it also
-built, and the result is a self-contained root — the chroot-equivalence
-suite and a Yakimo-installed sysvinit running as PID 1 in a user
-namespace pass with no host libraries bound in. What remains is the
-rest of the bootstrap: the compiler and binutils are still host
-wrappers (stage 2 is packaging them), and no live machine has been
-installed or rebuilt itself with Yakimo yet. That live boot is the
-next milestone, and the ports tree, the chrootable set, and the user
-guide exist specifically to rehearse it.
+packagers — and it has been proven on real upstream software from glibc to 
+bash, plus repackaged binary blobs like Discord, Steam ... The first bootstrap 
+stage is done: Yaki Imo builds real glibc 2.42 from source on 
+top of kernel headers and more, installed correctly and working. 
+I am currently progressing in this area, packaging more software 
+to create a live system. 
 
 Past the bootstrap, the roadmap is a set of deliberately deferred
-designs rather than blank space. A **binary repository** is the big
-one: deferred indefinitely on paper, but the groundwork is already
-load-bearing — builds are content-addressed and reproducible with
-recorded provenance, so "the artifact your build would have produced,
-fetched instead of compiled" is an evolution of the store, not a new
-subsystem; what is missing is the index, the signatures, and the trust
-policy around them. **Reproducibility verification tiers**
-(multi-builder cross-checking) are deferred in favor of a local
-double-build of the critical set. **DKMS integration** for out-of-tree
-kernel modules is specified (a canonical `[dkms]` recipe table) but
-unimplemented. And the ports tree itself is the largest piece of
-future work: from nineteen recipes toward a coverage set, with
-`watch.toml` automation already in place to keep versions current once
-the tree grows. None of these are promises with dates; they are the
-shape of where the project goes once a machine boots itself with it.
+designs. A **binary repository** is the big one: deferred indefinitely 
+on paper, but the groundwork exists builds are content-addressed and 
+reproducible with recorded provenance, so "the artifact your build would 
+have produced, fetched instead of compiled" is an evolution 
+of the store, not a new subsystem; what is missing is 
+the index, the signatures, and the trust policy around them. 
+**Reproducibility verification tiers** (multi-builder cross-checking) 
+are deferred in favor of a local double-build of the critical set. 
+**DKMS integration** for out-of-tree kernel modules is specified 
+(a canonical `[dkms]` recipe table) but unimplemented. 
+
+The number of packages should be fairly easy to increase and in the 
+future maintain due to how Yaki Imo assists with with finding undeclared
+dependencies in a recepie and how it helps maintain a recepie by
+updating them to newer versions of a program. This should also mean 
+offering and retaining multiple version binaries in repos is possible,
+need to study this (however say foobarlib is installed but also foobarlib21
+is installed), I need to see how this can be managed effectively. 
+Similarly it should mean that with the additive only useflags policy,
+enabling a useflag will not require compilation and instead simply
+result in another package being added as a dependency for the program. 
 
 ## Why it might be worth your attention
 
 The short version: Gentoo's flexibility with a modern resolver and a
 real transaction model. USE-flag-style build options exist, but they
 are declared booleans the resolver reasons about (conflicts fail at
-solve time with an explanation, not mid-compile), they are visible
-(`pkg options` shows every knob, its default, and where your setting
-came from), and flipping one is a normal, undoable transaction rather
+solve time with an explanation), they are visible (`pkg options` shows 
+every knob, its default, and where your setting came from), 
+and flipping one is a normal, undoable transaction rather
 than a flag-day rebuild you hope works. Every install is an atomic,
 content-addressed store swap with a recorded generation, so `pkg undo`
 is a first-class citizen. And the build pipeline is actively on the
 packager's side: when your recipe links a library you did not declare,
 the build fails and tells you which installed package provides it.
-Source-only does not have to mean opaque, fragile, or unverifiable —
-that combination is the bet this project makes.
 
 What that should feel like in daily use: `pkg install` answers with a
 plan, not a leap of faith — what will be built, in what order, why each
@@ -101,29 +112,26 @@ building is on you.
 
 ## The honest downsides
 
-It is unproven where it matters most: nothing has booted or run a
-live system, and the only host it has ever been tested on is the
-developer's. The ports tree is a seed, not a distribution — dozens of
-packages where thousands are needed, with known gaps (the compiler and
-binutils are still host wrappers, no Python/meson/ninja chain). Source-only means every
-install is a compile; the cache and parallelism knobs soften but do not
-remove that. The safety machinery (signing, audit, undo) has been
-exercised against harnesses and adversarial tests, not against years of
-real-world misuse. And the bus factor is currently one developer plus
-an AI assistant — the docs are fresh, the community is nonexistent, and
-anyone adopting it today is signing up to help find the bugs the e2e
-suite does not know about yet.
+This is a prototype as it stands, ongoing work on creating more recepies
+for packages. Furthermore, at the moment these are currently distrubuted 
+as a ports tree of sorts. Not within an actual repository, this is something
+I will be working on and will come alongisde binary redistributables. 
+
+Obvsiouly it will lack the extensive testing any of the package managers which 
+have existed for a long time will have, with this unexpected quirks or behaviour
+when installing different software. Currently all package recepies which are 
+created are tested on creation. I will keep doing this in the forseeable future,
+so at the very least any software which is packaged should work. However
+certain software might uncover bugs in the package manager.
+
+Once again, I am also not a programer, I have used AI. I am actively learning
+rust for this other project and perhaps a couple more things in the future.
+I would be happy to welcome anyone with interest in the project into it
+or to welcome any good ideas.
 
 ## The package manager, from a few angles
 
-**What is it, in one breath?** A source-based package manager for a
-conventional FHS Linux system. A signed recipe tree (ports-style)
-describes software; Yakimo resolves a plan, fetches pinned sources,
-builds each package in a network-less sandbox, and activates the result
-by swapping symlinks into a content-addressed store. The command is
-`pkg`.
-
-**Why source-only?** Because what you run should be what the recipe and
+**Why source-based?** Because what you run should be what the recipe and
 the upstream source produced — no trusting a build farm you can't see.
 It also makes build options meaningful: a binary repo ships someone
 else's choices; here, `foo[readline]` is built for *your* system. The
@@ -131,27 +139,25 @@ price is compile time, paid down with a compiler cache, parallelism
 knobs, and learned build-time estimates so you at least know the price
 before you pay it.
 
-**How is it different from apt, dnf, or pacman?** Those distribute
-binaries; installation is download-and-unpack, and "what options was
-this built with" is the distributor's business. Yakimo builds on your
-machine, so options are *your* business — and because every transaction
+**How is it different from apt, dnf, or pacman?** What options was
+this built with is the distributor's business. Yaki Imo builds on your
+machine (and in the future, binaries will adapt to your configuration), 
+so options can be customized for your purpose and every transaction
 is an atomic store swap with a recorded generation, there is no
 half-installed state to recover from: there is only the old generation
-and the new one.
+and the new one. Furthermore, it allows you to not have issues with old
+libraries or packages, or libraries upgrading causing certain packages to fail.
 
 **How is it different from Gentoo's Portage?** Same philosophy,
-stricter mechanics. USE flags exist, but as declared boolean options the
-resolver reasons about: a requirement like `foo[x11=1]` is a
-pseudo-dependency, so two packages wanting incompatible variants fail at
-solve time with both requesters named — not at hour three of a compile.
-Options are visible (`pkg options`, `pkg info`), splittable across
-config files, and flipping one is an ordinary undoable transaction.
-Raw `CFLAGS` injection is deliberately forbidden: toolchain flags are
-the distribution's ABI contract, not a user knob.
+stricter mechanics. To provide the flexibility of useflags with
+more and consistency predictability. In my experience, while I loved 
+Gentoo it would often behave in ways that I could not explain. A lot of the
+design decisions made with the idea in mind of creating consistent and 
+predictable results when possible.
 
-**Is it Nix?** No. It borrows Nix's *build correctness* — sandboxed
+**How is it similar to Nix?** It borrows Nix's *build correctness* — sandboxed
 builds with a closed input set, pinned sources, recorded provenance,
-an immutable store — but not its worldview. The system is a normal FHS
+an immutable store, but, the system is a normal FHS
 tree of symlinks into the store, not a store-path universe; identity is
 `name-version+abi+opt_tag`, not an input hash; and immutability here is
 a means to atomic transactions and undo, not an end in itself.
@@ -170,20 +176,17 @@ checkable (`pkg check`), the database is inspectable (`pkg db check`),
 and when a build fails the error is designed to be a sentence you can
 act on, not a log to excavate.
 
-**Can I package my own software?** Yes — that is a design goal, not an
+**What about packaging your own software?** This is not an
 afterthought. A recipe is a small directory: a `pkg-meta.toml`
-manifest, a `source.toml` pin, and plain `sh` phase scripts. The build
-pipeline helps you get it right: dependencies appear at stable paths,
+manifest, a `source.toml` pin, and plain `sh` phase scripts (at the moment
+I feel like these add unecessary complexity to creating packages, I will
+aim to simplify this system such that only the somepkg.toml is required,
+shell scrips will not have to be created by user this is a simplification 
+being used at the moment). 
+The build pipeline helps you get it right: dependencies appear at stable paths,
 options arrive as `PKG_OPT_*` variables, and if your binary links
 something you didn't declare, the build fails and names the package
-that provides it. The user guide's packaging chapter walks the loop.
-
-**Who is this for?** Someone building or running a hobbyist,
-gaming-friendly source distribution who wants Gentoo-level control
-without resolver opacity — and who is willing to trade install speed
-for verifiability and to help shake down a young system. If you want
-five-thousand packages and five-second installs today, this is not
-that yet.
+that provides it. The user guide's packaging chapter explains in detail.
 
 ## Configuration
 
@@ -205,7 +208,7 @@ max_pkg_jobs = 4
 # defaults. Keys are the default absolute paths; values must be
 # absolute.
 [paths]
-"/var/lib/pkg/cache" = "/bigdisk/pkg-cache"
+"/var/lib/pkg/cache" = "/somedisk/pkg-cache"
 ```
 
 For testing, `PKG_ROOT=/some/dir` prefixes every state path (including
@@ -214,4 +217,4 @@ throwaway root.
 
 ## License
 
-BSD 3-Clause (see [LICENSE](LICENSE)).
+BSD 3-Clause.
