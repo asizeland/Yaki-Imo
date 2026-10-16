@@ -18,8 +18,8 @@
 # options.sh, real-*.sh, ports*.sh). They detect the host libc as
 # *glibc* and wrap it as a package (the build gate requires a declared
 # libc.so.6 provider); Alpine has musl, so that detection and the gate
-# do not apply. For those, use a glibc-based image (e.g. debian:trixie)
-# with the same tool list. The scripts are still copied in, and
+# do not apply. For those, use the glibc-based sibling image
+# (Dockerfile.debian). The scripts are still copied in, and
 # E2E_INNER=1 is preset so they skip their `nix shell` re-exec on any
 # host that can satisfy their toolchain needs directly.
 #

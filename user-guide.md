@@ -491,7 +491,23 @@ continues inside the chroot. The e2e suite proves this works by
 booting the installed sysvinit as PID 1 in a container and running an
 inittab action through the tree's own `/bin/sh`.
 
-### 10.2 Keeping versions current
+### 10.2 Bootable test appliance
+
+`live/` builds an x86_64 NixOS live ISO for testing `pkg` in a VM. It is
+a disposable host with a local signed test repository and build toolchain,
+not a bootable Yaki Imo distribution. Build and boot it with:
+
+```
+$ sh live/build.sh
+$ sh live/run.sh
+```
+
+At the live prompt, `yakimo-live smoke` performs real source builds and
+checks them; `yakimo-live shell` opens an isolated `PKG_ROOT` shell for
+interactive testing. See `live/README.md` for resource settings, persistent
+VM disks, test-key warnings, and headless verification.
+
+### 10.3 Keeping versions current
 
 Recipes always pin an exact version and a source hash — that pin is
 what makes builds reproducible and signable. So there is no "install

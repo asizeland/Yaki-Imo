@@ -1,0 +1,10 @@
+sys-kernel/linux-headers
+sys-libs/glibc
+sys-libs/zlib
+sys-libs/bzip2
+sys-libs/ncurses
+sys-libs/readline
+dev-db/sqlite
+dev-lang/lua
+sys-apps/less
+games-misc/tty-solitaire

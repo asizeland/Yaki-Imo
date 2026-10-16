@@ -148,7 +148,9 @@ filtered() {
                 fi
                 shift 3 ;;
             --)
-                printf '%s\0' --ro-bind /nix/store /nix/store
+                # NixOS hosts only: the store must resolve inside the
+                # sandbox for host-symlinked tools. Absent on FHS hosts.
+                [ -d /nix/store ] && printf '%s\0' --ro-bind /nix/store /nix/store
                 printf '%s\0' --ro-bind "$TOOLBIN" /usr/bin
                 # /bin too: the sandbox RO-binds host /bin, and on this
                 # host /bin/sh is the readline-linked nix bash — fatal
