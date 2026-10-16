@@ -1,0 +1,84 @@
+# syntax=docker/dockerfile:1
+#
+# Dockerfile.alpine — Alpine/musl test container for the Yakimo package
+# manager workspace.
+#
+# What this image is for:
+#   * building the workspace on musl (the host targets so far were all
+#     glibc — Alpine is the canonical musl environment);
+#   * the full `cargo test` suite (runs during the image build, so a
+#     green image means a green suite);
+#   * the musl-static release binaries `pkg-cli` / `pkg-init` (SPEC §17)
+#     — built with +crt-static and verified to have no INTERP segment;
+#   * an interactive shell with the workspace, the cargo registry cache
+#     and the release binaries on hand for poking at the package manager
+#     on a non-NixOS, FHS-normal system.
+#
+# What it cannot run: the e2e suites (e2e/run.sh, lifecycle.sh,
+# options.sh, real-*.sh, ports*.sh). They detect the host libc as
+# *glibc* and wrap it as a package (the build gate requires a declared
+# libc.so.6 provider); Alpine has musl, so that detection and the gate
+# do not apply. For those, use a glibc-based image (e.g. debian:trixie)
+# with the same tool list. The scripts are still copied in, and
+# E2E_INNER=1 is preset so they skip their `nix shell` re-exec on any
+# host that can satisfy their toolchain needs directly.
+#
+# Build:  docker build -f Dockerfile.alpine -t yakimo-test .
+# Shell:  docker run --rm -it yakimo-test
+#         (if namespace-using work — pkg-sandbox/bwrap — is refused by
+#         the daemon's seccomp profile, add:
+#          --security-opt seccomp=unconfined)
+
+# ---------- stage 1: build & unit-test on musl ----------
+FROM alpine:3.21 AS build
+
+# cargo+rust: the toolchain. build-base: cc for the bundled SQLite /
+# zstd / ring C parts. perl: build scripts of the crypto crates.
+RUN apk add --no-cache cargo rust build-base perl
+
+WORKDIR /src
+COPY . .
+
+# The whole unit suite. Sandbox tests are pure bwrap-argv construction
+# tests, so no namespaces or bwrap binary are needed here.
+RUN cargo test --locked --workspace
+
+# musl-static release binaries (SPEC §17: panic=abort, lto, strip — the
+# workspace [profile.release]). Alpine's rust targets musl already;
+# +crt-static pins full static linking regardless of toolchain default,
+# and the readelf check fails the build if a dynamic binary slipped
+# through.
+RUN RUSTFLAGS="-C target-feature=+crt-static" \
+    cargo build --locked --release -p pkg-cli -p pkg-init
+RUN ! readelf -l target/release/pkg-cli 2>/dev/null | grep -q INTERP \
+    && ! readelf -l target/release/pkg-init 2>/dev/null | grep -q INTERP
+
+# ---------- stage 2: interactive test environment ----------
+FROM alpine:3.21
+
+# Same toolchain (for iterating on the workspace inside the container),
+# plus everything the e2e scripts' tool list maps to on apk:
+#   gcc/perl/bubblewrap/python3/coreutils/tar/gzip/make/sqlite/binutils/
+#   sed/grep/gawk/diffutils — bash and curl for general poking.
+RUN apk add --no-cache \
+    cargo rust build-base perl \
+    bash bubblewrap python3 sqlite \
+    coreutils tar xz gzip make binutils \
+    sed grep gawk diffutils \
+    curl file
+
+# The built workspace (including target/) and the cargo registry cache,
+# so `cargo build --offline` inside the container just works.
+COPY --from=build /src /src
+COPY --from=build /root/.cargo /root/.cargo
+
+# Binaries on PATH under their spec names.
+RUN ln -sf /src/target/release/pkg-cli /usr/local/bin/pkg \
+    && ln -sf /src/target/release/pkg-init /usr/local/bin/pkg-init
+
+# e2e scripts re-exec into `nix shell` unless this is set; there is no
+# nix in this image by design.
+ENV E2E_INNER=1
+
+WORKDIR /src
+CMD ["/bin/bash"]

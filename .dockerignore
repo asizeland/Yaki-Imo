@@ -1,0 +1,5 @@
+# Keep the build context small and the musl build clean: the host's
+# target/ holds NixOS-built glibc binaries that must never leak into
+# the container build.
+target/
+.git/
