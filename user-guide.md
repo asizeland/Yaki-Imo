@@ -1,6 +1,6 @@
-# Yakimo User Guide
+# Yaki Imo User Guide
 
-Yakimo is a source-based package manager. It builds every package from
+Yaki Imo is a source-based package manager. It builds every package from
 a recipe on your machine, keeps every build in a content-addressed
 store, and can undo any transaction.
 
@@ -46,7 +46,7 @@ from the defaults). Two builds of the same version with different
 options are different identities. They can both exist in the store at
 the same time. This is why undo and option flips are safe.
 
-**Recipes.** Yakimo builds from recipes, not binary packages. A recipe
+**Recipes.** Yaki Imo builds from recipes, not binary packages. A recipe
 is a small directory: a manifest (`pkg-meta.toml`), a pinned source
 list (`source.toml`), and shell scripts for the build phases. Chapter
 11 covers the format.
@@ -70,7 +70,7 @@ breaks these rules is rejected, not installed. This is what keeps
 
 ### 2.1 Mirrors
 
-`/etc/pkg/mirrors.toml` lists the repositories Yakimo syncs from:
+`/etc/pkg/mirrors.toml` lists the repositories Yaki Imo syncs from:
 
 ```toml
 mirrors = [
@@ -86,7 +86,7 @@ rejected) is pinned to the first mirror.
 ### 2.2 Trust bootstrap
 
 Every repository index is signed. Before the first sync you must tell
-Yakimo which root key set to trust:
+Yaki Imo which root key set to trust:
 
 ```
 # pkg key trust-root /path/to/root.json
@@ -185,7 +185,7 @@ resolve time and can be deferred to a quiet hour:
 
 ## 4. Build options (the "USE flags")
 
-Options are Yakimo's answer to Gentoo's USE flags. The design rule is
+Options are Yaki Imo's counterpart to Gentoo's USE flags. The design rule is
 that options are **declared and additive**: a recipe declares exactly
 which knobs exist, and an option can only *add* things (a dependency,
 a configure flag). An option can never silently remove or rewrite
@@ -310,7 +310,7 @@ The `[paths]` overrides exist because some machines keep state on
 unusual mounts. The defaults follow the filesystem hierarchy standard;
 override only if you need to.
 
-Unknown keys and wrong value types are hard errors everywhere. Yakimo
+Unknown keys and wrong value types are hard errors everywhere. Yaki Imo
 never guesses what a config line meant.
 
 ---
@@ -336,13 +336,13 @@ on one token, so `jobs` builds never deadlock; they just queue.
 compiled with: `o2` (the default), `o3` for more aggressive
 optimization, `os` for smaller binaries, `o0`/`o1` for debugging.
 
-This is deliberately the *only* compiler-flag knob. Yakimo does not
+This is deliberately the *only* compiler-flag knob. Yaki Imo does not
 accept arbitrary `CFLAGS`: the flags a distribution is compiled with
 are part of its ABI contract, so the level is declared, bounded, and
 hashed into every package's identity. Two consequences follow:
 
 - **Flipping the level rebuilds the world.** An `o2` artifact and an
-  `o3` artifact are different packages to Yakimo, so the artifact
+  `o3` artifact are different packages to Yaki Imo, so the artifact
   cache can never hand you one when you asked for the other.
 - **A recipe can still pin its own flags.** If a package is known to
   miscompile under aggressive optimization, its build script exports
@@ -444,12 +444,12 @@ month's you) gets the same set, not "whatever the index has today".
 
 ## 10. Testing safely with `PKG_ROOT`
 
-Every state path Yakimo uses is prefixed by `PKG_ROOT` when set. You
+Every state path Yaki Imo uses is prefixed by `PKG_ROOT` when set. You
 can exercise the full toolchain against a throwaway root without
 touching `/`:
 
 ```
-$ export PKG_ROOT=/tmp/yakimo-test
+$ export PKG_ROOT=/tmp/Yaki Imo-test
 $ mkdir -p $PKG_ROOT/etc/pkg
 $ $EDITOR $PKG_ROOT/etc/pkg/mirrors.toml     # point at a repo
 $ pkg key trust-root root.json               # trust bootstrap (in-root)
@@ -458,7 +458,7 @@ $ pkg sync && pkg install hello
 
 ### 10.1 The seed ports tree
 
-The `ports/` directory in the Yakimo source tree is a small
+The `ports/` directory in the Yaki Imo source tree is a small
 Gentoo-ports-style recipe collection meant for live testing: the C
 library and its prerequisites (linux-headers, glibc, libxcrypt — all
 built from source), libraries
