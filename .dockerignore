@@ -3,3 +3,8 @@
 # the container build.
 target/
 .git/
+live/
+old/
+ports/
+sandbox/
+Dockerfile.template

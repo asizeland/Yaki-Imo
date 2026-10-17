@@ -1,0 +1,18 @@
+WORKDIR /src
+COPY . .
+RUN cargo build --release
+
+#test
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommendeds \
+    git strace tree bash curl ca-certificates file \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git config --global user.name "John Doe" \
+    git config --global user.email "some.email@email.com" \
+    git config --global init.defaultBranch main \
+    git config --global --add safe.directory "*"
+
+COPY --from=builder /target/x86_64-unknown-linux-gnu/debug/pkg-cli /usr/local/bin/pkg
+WORKDIR /test
+CMD ["bash"]

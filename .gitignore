@@ -1,6 +1,7 @@
 /target
 old/
 docs/
-/live/.build/
-/live/.build-output.log
-/live/result
+target/
+live/
+sandbox/
+Dockerfile
