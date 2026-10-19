@@ -1,10 +1,10 @@
 # Yaki Imo User Guide
 
 Yaki Imo is a source-based package manager. It builds every package from
-a recipe on your machine, keeps every build in a content-addressed
-store, and can undo any transaction.
+a recipe on your machine (as there currently is no repo), keeps every build in a 
+content-addressed store, and can undo any transaction.
 
-This guide uses short sentences and plain words on purpose. Each
+This is intended to be a comprehensive guide. Each
 section says what a mechanism does, how to use it, and — when the
 mechanism is not obvious — why it exists.
 
@@ -22,7 +22,7 @@ mechanism is not obvious — why it exists.
 10. Testing safely with `PKG_ROOT`
 11. Making your own packages
 12. Exit codes and troubleshooting
-13. Testing in containers (Docker)
+13.  Testing in containers (Docker)
 
 ---
 
@@ -31,8 +31,7 @@ mechanism is not obvious — why it exists.
 **The store.** A package never installs files directly into `/usr`.
 A build produces a tree under `/usr/lib/pkg/.store/`, one directory
 per *identity*. The visible system is a tree of relative symlinks that
-point into the store. Example:
-
+pointinto the store. Example:
 ```
 /usr/bin/lua -> ../lib/pkg/.store/lua-5.4.7+ab1463413912/usr/bin/lua
 ```
@@ -460,7 +459,7 @@ $ pkg sync && pkg install hello
 ### 10.1 The seed ports tree
 
 The `ports/` directory in the Yaki Imo source tree is a small
-Gentoo-ports-style recipe collection meant for live testing: the C
+ebuild/ports-style recipe collection meant for live testing: the C
 library and its prerequisites (linux-headers, glibc, libxcrypt — all
 built from source), libraries
 (zlib, bzip2, ncurses, readline), tools (sqlite, lua, less, tar, gzip,
@@ -703,8 +702,7 @@ Common messages:
 
 Two Dockerfiles live in the project root. They exist so you can build
 and exercise Yakimo without touching your host system — no packages to
-install, no state to clean up, and a distro environment that differs
-from the development machine.
+install, no state to clean up.
 
 | File | Base | What it is for |
 |---|---|---|
@@ -743,6 +741,85 @@ sh e2e/real-package.sh  # a real autotools package from the internet
 sh e2e/real-binary.sh   # a repackaged binary blob (needs network)
 sh e2e/ports.sh         # the whole ports tree from scratch — hours
 ```
+
+### Installing from the ports tree by hand
+
+The e2e scripts automate everything below, but doing it by hand is the
+best way to learn how the pieces fit. The flow has four stages, and
+each one exists for a reason.
+
+**1. Fetch the sources.** `pkg` never downloads from upstream URLs at
+install time — it fetches from a repo you control, against hashes the
+recipes pin. So first, download every tarball the tree pins and verify
+each SHA-256:
+
+```sh
+sh ports/fetch-distfiles.sh /tmp/dist
+ls /tmp/dist | wc -l        # expect 66
+```
+
+The script is idempotent (verified files are kept) and retries
+transient network errors, so re-running it is always safe.
+
+**2. Build a signed repo and install the recipes.** `ports2repo` turns
+the tree into a repo: every recipe gets a content-derived commit id,
+the distfiles are copied in, and the index/manifest/root documents are
+signed. `install.sh` then copies the recipes into the root:
+
+```sh
+/src/target/debug/examples/ports2repo /tmp/repo http://127.0.0.1:8784 \
+    --distfiles /tmp/dist /src/ports
+sh ports/install.sh /tmp/repo
+```
+
+Two things to note here:
+
+- The second argument is the **URL the repo will be served at**, not a
+  directory — it is baked into the signed manifest as the download
+  prefix for every source.
+- `ports2repo` signs with deterministic **test keys**. That is fine for
+  a localhost repo, but never use it for a repo you distribute.
+
+**3. Serve, trust, sync.** Yakimo fetches only over http(s) —
+`file://` mirrors are refused by design — so serve the repo locally,
+point the configuration at it, trust its root key, and sync:
+
+```sh
+python3 -m http.server 8784 --directory /tmp/repo >/dev/null 2>&1 &
+mkdir -p /etc/pkg
+printf 'mirrors = [\n  "http://127.0.0.1:8784",\n]\n' > /etc/pkg/mirrors.toml
+echo yes | pkg key trust-root /tmp/repo/root.json
+pkg sync
+```
+
+Why sync matters: the resolver reads the local recipe checkout, but
+*building* fetches sources against the signed, cached recipe manifest —
+and that cache is exactly what `pkg sync` creates.
+
+**4. Install.** Package names on the command line are **bare names** —
+`git`, not `dev-vcs/git`. The category directories exist only as
+organization in the source tree; the installed recipe layout is flat.
+
+```sh
+# optional but recommended: let builds use all cores
+printf '[build]\njobs = %s\nmax_pkg_jobs = %s\n' "$(nproc)" "$(nproc)" \
+    > /etc/pkg/config.toml
+
+pkg install --dry-run git   # preview the plan first
+pkg install git             # builds the whole chain from source
+```
+
+The first install compiles the entire dependency chain (glibc, openssl,
+curl, …), so expect it to take a long time.
+
+If something goes wrong, the three most common errors map to the stages
+above:
+
+| Error | Cause |
+|---|---|
+| `there is no version of <category>/<name> in <version>` | You used a category-qualified name, or copied the `ports/` tree into `/var/lib/pkg/recipes/` with its category directories. Use bare names, and install recipes via `install.sh` (stage 2). |
+| `not found: no recipe for <name>` | `/var/lib/pkg/recipes/` has no recipe for that name — stage 2 was not run (note the directory is `recipes`, plural). |
+| `no cached recipe manifest … run pkg sync first` | Stage 3 is incomplete: the repo is not served/trusted/synced. |
 
 Two things to know about how the image is put together:
 
