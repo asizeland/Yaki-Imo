@@ -50,12 +50,17 @@ FROM rust:1-trixie
 #   sed/grep/gawk/diffutils — plus xz (ports tree tarballs), curl and
 #   file for general poking. git + openssh-client: authoring and
 #   pushing recipes from inside the container.
+# bison/flex/gperf/gettext(msgfmt) are part of the build sandbox's
+# host-tool contract (the e2e toolchain farm, e2e/ports.sh): glibc's
+# configure needs bison, and several tree recipes need the rest. On the
+# NixOS dev host these come from the scripts' `nix shell` line.
 # (cargo/rustc/build-essential come with the rust base image.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential perl \
     bash bubblewrap python3 sqlite3 \
     coreutils tar xz-utils gzip binutils \
     sed grep gawk diffutils \
+    bison flex gperf gettext \
     curl file ca-certificates \
     git openssh-client \
     && rm -rf /var/lib/apt/lists/*
