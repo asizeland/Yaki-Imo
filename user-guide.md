@@ -22,6 +22,7 @@ mechanism is not obvious — why it exists.
 10. Testing safely with `PKG_ROOT`
 11. Making your own packages
 12. Exit codes and troubleshooting
+13. Testing in containers (Docker)
 
 ---
 
@@ -695,3 +696,76 @@ Common messages:
   rebuild them from source.
 - **supply-chain gate** — read `pkg audit --supply-chain`; acknowledge
   with `pkg audit --acknowledge <pkg>` only after you have looked.
+
+---
+
+## 13. Testing in containers (Docker)
+
+Two Dockerfiles live in the project root. They exist so you can build
+and exercise Yakimo without touching your host system — no packages to
+install, no state to clean up, and a distro environment that differs
+from the development machine.
+
+| File | Base | What it is for |
+|---|---|---|
+| `dockerfile` | Debian (glibc) | The main test environment. Runs the **full end-to-end suite** and lets you poke at `pkg` interactively. |
+| `dockerfile.alpine` | Alpine (musl) | Verifies the workspace compiles on **musl** and builds the **musl-static release binaries** (the distribution-independent deliverable). The e2e suites cannot run here: they wrap the host's glibc as a package, and Alpine has no glibc. |
+
+Build and enter (from the project root):
+
+```sh
+docker build -f dockerfile -t yakimo-test .
+docker run --rm -it --privileged yakimo-test
+
+docker build -f dockerfile.alpine -t yakimo-test-alpine .
+docker run --rm -it yakimo-test-alpine
+```
+
+**Building the image is itself a test:** the Dockerfile runs the whole
+`cargo test` suite (and, on Alpine, a static-link check) as a build
+step, so an image that builds successfully already proves the unit
+suite passed.
+
+**Why `--privileged` for the Debian container:** Yakimo builds run in
+`bwrap` sandboxes, and `bwrap` inside a container must create nested
+user/mount namespaces and mount `proc` — Docker's default security
+profile forbids that (and `seccomp=unconfined` plus `SYS_ADMIN` alone
+are not enough). Grant it only to this disposable test container; the
+Alpine container needs no such flag for its unit/static-build role.
+
+Inside the Debian container, from `/src`, the end-to-end scripts:
+
+```sh
+sh e2e/run.sh           # smoke: signed repo, install, build gate
+sh e2e/lifecycle.sh     # remove/autoremove, upgrade, undo, mirrors
+sh e2e/options.sh       # build options, store GC, undo interplay
+sh e2e/real-package.sh  # a real autotools package from the internet
+sh e2e/real-binary.sh   # a repackaged binary blob (needs network)
+sh e2e/ports.sh         # the whole ports tree from scratch — hours
+```
+
+Two things to know about how the image is put together:
+
+- **`/src` is a snapshot.** It contains the sources as they were when
+  you built the image, plus the compiled workspace and the cargo
+  registry cache (so builds inside work offline). After changing code
+  on the host, rebuild the image to test the change. To iterate on a
+  live checkout instead, bind-mount it at a *different* path and use a
+  fresh target dir, e.g. `-v "$PWD":/work` then
+  `CARGO_TARGET_DIR=/tmp/target cargo build` inside `/work`.
+- **Git is included for recipe work.** Both images have `git` and an
+  SSH client, with a placeholder identity ("Yakimo Tester") so
+  `git commit` works immediately — set your own name/email before
+  authoring for real. To *push*, mount your credentials at run time:
+
+  ```sh
+  docker run --rm -it \
+      -v "$HOME/.gitconfig:/root/.gitconfig:ro" \
+      -v "$HOME/.ssh:/root/.ssh:ro" \
+      yakimo-test
+  ```
+
+  (Or forward your SSH agent instead of mounting keys:
+  `-v "$SSH_AUTH_SOCK:/ssh-agent" -e SSH_AUTH_SOCK=/ssh-agent`.) The
+  mounted-repo case is covered too: `safe.directory=*` is preset so
+  root in the container can work in a checkout owned by your host user.

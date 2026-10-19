@@ -132,7 +132,7 @@ for tool in env sh bash cc gcc make tar gzip sed grep awk find xargs \
             uname install cp mv mkdir ln rm cat chmod touch basename \
             dirname sort uniq wc tr head tail ld as nm readelf objcopy \
             strip sleep date expr printf test; do
-    p=$(command -v "$tool" 2>/dev/null) && ln -sf "$p" "$TOOLBIN/$tool"
+    p=$(command -v "$tool" 2>/dev/null) && ln -sf "$(readlink -f "$p")" "$TOOLBIN/$tool"
 done
 
 cat > "$E2E/shim/bwrap" <<EOF
@@ -148,10 +148,19 @@ filtered() {
                 fi
                 shift 3 ;;
             --)
-                # NixOS hosts only: the store must resolve inside the
-                # sandbox for host-symlinked tools. Absent on FHS hosts.
-                [ -d /nix/store ] && printf '%s\0' --ro-bind /nix/store /nix/store
-                printf '%s\0' --ro-bind "$TOOLBIN" /usr/bin
+                if [ -d /nix/store ]; then
+                    # NixOS: no /usr toolset — the store and the
+                    # toolchain farm must resolve inside the sandbox.
+                    printf '%s\0' --ro-bind /nix/store /nix/store
+                    printf '%s\0' --ro-bind "$TOOLBIN" /usr/bin
+                else
+                    # FHS hosts: /usr /bin /lib are already bound by
+                    # the profile. No farm — overlaying /usr/bin would
+                    # shadow it with symlinks pointing back into the
+                    # farm (ELOOP). Only /etc/alternatives is needed,
+                    # so cc/awk-style alternative symlinks resolve.
+                    [ -d /etc/alternatives ] && printf '%s\0' --ro-bind /etc/alternatives /etc/alternatives
+                fi
                 printf '%s\0' "\$@"
                 break ;;
             *) printf '%s\0' "\$1"; shift ;;

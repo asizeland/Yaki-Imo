@@ -148,10 +148,15 @@ filtered() {
                 fi
                 shift 3 ;;
             --)
-                # NixOS hosts only: the store must resolve inside the
-                # sandbox for host-symlinked tools. Absent on FHS hosts.
-                [ -d /nix/store ] && printf '%s\0' --ro-bind /nix/store /nix/store
-                printf '%s\0' --ro-bind "$TOOLBIN" /usr/bin
+                # NixOS hosts only: the store and the toolchain farm
+                # must resolve inside the sandbox. FHS hosts already
+                # have /usr /bin /lib bound by the profile — overlaying
+                # the farm there would shadow /usr/bin with symlinks
+                # that point back into the farm itself (ELOOP).
+                if [ -d /nix/store ]; then
+                    printf '%s\0' --ro-bind /nix/store /nix/store
+                    printf '%s\0' --ro-bind "$TOOLBIN" /usr/bin
+                fi
                 # /bin too: the sandbox RO-binds host /bin, and on this
                 # host /bin/sh is the readline-linked nix bash — fatal
                 # once LD_LIBRARY_PATH carries dep lib dirs (see the sh

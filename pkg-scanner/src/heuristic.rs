@@ -247,16 +247,14 @@ mod tests {
         // Not hardcoding which specific libraries end up in DT_NEEDED —
         // an earlier version of this test assumed `-lm` always produces
         // a separate `libm.so.6` entry, which stopped being true once
-        // glibc 2.34 merged libm into libc.so.6 directly (this sandbox
-        // runs glibc 2.39, well past that merge). `libc.so.6` itself is
-        // the one thing guaranteed present for any dynamically-linked
-        // binary, and its name is guaranteed to appear as a raw string
-        // in the file too (it's literally stored in .dynstr) — a
-        // realistic, always-available case to verify gets excluded.
+        // glibc 2.34 merged libm into libc.so.6 directly. Nor which C
+        // library the host uses (libc.so.6 on glibc hosts,
+        // libc.musl-x86_64.so.1 on musl): what matters is that the
+        // needed list is non-empty, so the exclusion assertion below
+        // cannot pass vacuously.
         assert!(
-            elf_info.needed.iter().any(|n| n == "libc.so.6"),
-            "sanity check: libc.so.6 should be in DT_NEEDED, got {:?}",
-            elf_info.needed
+            !elf_info.needed.is_empty(),
+            "sanity check: a dynamically-linked C binary should have DT_NEEDED entries"
         );
 
         let candidates = find_dlopen_candidates(&bytes, &elf_info.needed);

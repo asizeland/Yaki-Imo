@@ -1,0 +1,103 @@
+# syntax=docker/dockerfile:1
+#
+# dockerfile.alpine — Alpine/musl test container for the Yakimo package
+# manager workspace.
+#
+# What this image is for:
+#   * building the workspace on musl (the host targets so far were all
+#     glibc — Alpine is the canonical musl environment);
+#   * the full `cargo test` suite (runs during the image build, so a
+#     green image means a green suite);
+#   * the musl-static release binaries `pkg-cli` / `pkg-init` (SPEC §17)
+#     — statically linked and verified to have no INTERP segment;
+#   * an interactive shell with the workspace, the cargo registry cache
+#     and the release binaries on hand for poking at the package manager
+#     on a non-NixOS, FHS-normal system.
+#
+# The base is the official `rust` image (Alpine underneath), NOT bare
+# Alpine + apk cargo: the locked dependencies need a current stable
+# toolchain (edition2024 cargo, some crates require rustc ≥ 1.88),
+# which is newer than Alpine's packaged Rust.
+#
+# What it cannot run: the e2e suites (e2e/run.sh, lifecycle.sh,
+# options.sh, real-*.sh, ports*.sh). They detect the host libc as
+# *glibc* and wrap it as a package (the build gate requires a declared
+# libc.so.6 provider); Alpine has musl, so that detection and the gate
+# do not apply. For those, use the glibc-based sibling image
+# (dockerfile). The scripts are still copied in, and E2E_INNER=1 is
+# preset so they skip their `nix shell` re-exec on any host that can
+# satisfy their toolchain needs directly.
+#
+# Build:  docker build -f dockerfile.alpine -t yakimo-test-alpine .
+# Shell:  docker run --rm -it --privileged yakimo-test-alpine
+#         (--privileged is only needed if you exercise bwrap inside
+#         the container: nested namespaces + mounting proc require it.
+#         The unit tests and plain pkg usage do not.)
+
+# ---------- stage 1: build & unit-test on musl ----------
+FROM rust:1-alpine3.21 AS build
+
+# build-base: cc for the bundled SQLite / zstd / ring C parts.
+# perl: build scripts of the crypto crates.
+RUN apk add --no-cache build-base perl
+
+WORKDIR /src
+COPY . .
+
+# The whole unit suite. Sandbox tests are pure bwrap-argv construction
+# tests, so no namespaces or bwrap binary are needed here.
+RUN cargo test --locked --workspace
+
+# musl-static release binaries (SPEC §17: panic=abort, lto, strip — the
+# workspace [profile.release]). The x86_64-unknown-linux-musl target
+# defaults to crt-static, so no RUSTFLAGS are needed — and setting them
+# globally would break proc-macro compilation on this host target. The
+# readelf check is the actual guarantee: it fails the build if a
+# dynamic binary ever slips through.
+RUN cargo build --locked --release -p pkg-cli -p pkg-init
+RUN ! readelf -l target/release/pkg-cli 2>/dev/null | grep -q INTERP \
+    && ! readelf -l target/release/pkg-init 2>/dev/null | grep -q INTERP
+
+# ---------- stage 2: interactive test environment ----------
+FROM rust:1-alpine3.21
+
+# The C toolchain plus everything the e2e scripts' tool list maps to on
+# apk: gcc/perl/bubblewrap/python3/coreutils/tar/gzip/make/sqlite/
+# binutils/sed/grep/gawk/diffutils — bash and curl for general poking,
+# git + openssh-client for authoring and pushing recipes from inside.
+# (cargo/rustc come with the rust base image.)
+RUN apk add --no-cache \
+    build-base perl \
+    bash bubblewrap python3 sqlite \
+    coreutils tar xz gzip make binutils \
+    sed grep gawk diffutils \
+    curl file \
+    git openssh-client
+
+# The built workspace (including target/) and the rustup/cargo homes
+# (toolchain + registry cache), so `cargo build --offline` inside the
+# container just works.
+COPY --from=build /src /src
+COPY --from=build /usr/local/cargo /usr/local/cargo
+COPY --from=build /usr/local/rustup /usr/local/rustup
+
+# Binaries on PATH under their spec names.
+RUN ln -sf /src/target/release/pkg-cli /usr/local/bin/pkg \
+    && ln -sf /src/target/release/pkg-init /usr/local/bin/pkg-init
+
+# A placeholder git identity so `git commit` works out of the box —
+# override with your own (git config --global user.name/user.email),
+# or mount your real ~/.gitconfig and ~/.ssh at run time when you want
+# to push. safe.directory=* lets root work in bind-mounted repos owned
+# by your host uid.
+RUN git config --global user.name "Yakimo Tester" \
+    && git config --global user.email "yakimo@localhost" \
+    && git config --global init.defaultBranch main \
+    && git config --global --add safe.directory "*"
+
+# e2e scripts re-exec into `nix shell` unless this is set; there is no
+# nix in this image by design.
+ENV E2E_INNER=1
+
+WORKDIR /src
+CMD ["/bin/bash"]
