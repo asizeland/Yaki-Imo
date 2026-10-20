@@ -77,7 +77,7 @@ NetworkManager plus the self-hosting sys-devel toolchain) and its end-to-end pro
 |---|--------|----------|
 | 1 | Build-sandbox environment contract settled: dep binds at `/pkg/deps/<name>`, full build-dep closure, dep-provided tools on PATH, compile-time search paths over bound deps | §7.1 |
 | 2 | Post-build tree normalization: relocatable `.pc` rewrite, `.la` stripping, the Python-bytecode precompile convention | §7.10 (new) |
-| 3 | Gate semantics clarified: undeclared linkage is a hard failure for source builds (exit 3); the report-and-record reframing applies to the glibc floor/ceiling check only | §8, §15, §16.1 |
+| 3 | Gate semantics clarified: undeclared linkage is a hard failure for source builds (exit 3); the foreign-glibc floor check is a hard failure against the in-scope libc ceiling (a declared dep's packaged libc when present); report-and-record applies to ISA notes and binary-blob findings | §8, §15, §16.1 |
 | 4 | Parallelism configuration made concrete: `[build] jobs` / `max_pkg_jobs` | §7.9.1 |
 | 5 | The reference ports tree and upstream version tracking (`watch.toml`) | §10.9 (new) |
 | 6 | glibc is built from source in the reference bootstrap; the prebuilt-tarball exception is retained but no longer load-bearing | §18.2 |
@@ -734,9 +734,13 @@ this for meson and glib's codegen modules.)
 **Post-build verification, split by failure class *(v15 Δ §3)*.** v12 reframed "the gate" as
 report-and-record; the implementation sharpened that into two different answers for two different checks:
 
-- **Foreign-glibc floor/ceiling and ISA notes: report and record.** Under source-only, floor ≤ ceiling holds
-  by construction — a binary is built against the system's own glibc — so the interesting failure is a recipe
-  escaping its sandbox to a foreign libc, not a version skew between artifact and host.
+- **Foreign-glibc floor/ceiling: hard failure; ISA notes: report and record.** The ceiling is the newest
+  `GLIBC_` version the libc *in scope* defines — a declared dependency's packaged `libc.so.6` when the
+  contract includes one (bootstrap/foreign-host builds routinely package a newer glibc than the host runs;
+  that is the point), otherwise the running host's glibc. floor ≤ ceiling then holds by construction, so the
+  interesting failure is a recipe escaping its sandbox to a foreign libc, not a version skew between
+  artifact and host. `pkg check` applies the same rule from the other side: its ceiling is the target root's
+  *installed* (active) glibc, falling back to the running host's when the root has no glibc.
 - **Undeclared `DT_NEEDED` linkage: a hard gate failure** (`PkgError::Gate`, CLI exit 3) for source builds.
   A binary linked against a library no declared dependency provides means the build saw something it
   shouldn't have — an undeclared system lib or a sandbox escape — and shipping it would break the dep graph
@@ -1282,8 +1286,9 @@ sync      → fetch and verify signed index against trust chain (§10.5, §10.6)
                 critical set built twice, mismatch aborts (§10.5.6)
   → verify    → static: sonames + GLIBC floor/ceiling + ISA notes; link_interface_hash (§7.7.2);
                 heuristic: dlopen string-grep + known plugin-config parsing.
-                Undeclared linkage BLOCKS source builds (exit 3); floor/ceiling and
-                binary-blob findings report and record (§8)
+                Undeclared linkage BLOCKS source builds (exit 3), as does a floor above
+                the in-scope libc ceiling; ISA notes and binary-blob findings report and
+                record (§8)
   → package   → tree normalization (relocatable .pc rewrite, .la stripping — §7.10);
                 versioned directory in .store/; stable symlink
   → stage     → [exclusive lock] re-validate resolution inputs, re-solve once on drift (§9.4);
@@ -1696,7 +1701,7 @@ cascades) and the v13 glibc hardening were specified without roadmap placement. 
 | **Python payloads precompile bytecode at package time** *(v15)* | Activation symlinks point into the store; runtime `__pycache__` writes would pollute it and trip `db check`. |
 | **Upstream tracking is per-recipe (`watch.toml`) with an explicit `stable_regex`** *(v15)* | "Latest" and "latest stable" differ per project; the filter is declared per recipe, and `--apply` produces a complete reviewable bump (version + hash) through the normal attestation path. |
 | **glibc is recipe-built in the reference bootstrap; stage-1 borrows the host toolchain** *(v15)* | Live media always has a toolchain to borrow; the prebuilt-glibc exception survives for hosts where it truly doesn't, but nothing in the reference flow needs it. |
-| **Undeclared linkage is a hard gate failure (exit 3); foreign-glibc findings report and record** *(v15)* | A binary linked against an undeclared library breaks the graph every other mechanism relies on; a floor/ceiling note under source-only is informational by construction. |
+| **Undeclared linkage is a hard gate failure (exit 3); the foreign-glibc floor check is hard too, against the in-scope libc ceiling** *(v15)* | A binary linked against an undeclared library breaks the graph every other mechanism relies on; a floor above the newest libc in scope (a declared dep's packaged libc when present, else the host's) means the build saw a libc outside its contract. |
 
 ---
 
@@ -1749,8 +1754,9 @@ glob pin syntax (removed).
 **A.10 v15 merge notes.** v15 was authored against the implementation, not a delta document; its placements:
 sandbox environment contract → §7.1; normalization passes → §7.10 (new); gate split → §8, §15, §16.1;
 parallelism keys → §7.9.1; ports tree + watch → §10.9 (new); bootstrap → §18.2; init wording → header + §13.
-The v15 §8 wording narrows v12's "reports and records, does not block installs": that reframing survives only
-for the foreign-glibc floor/ceiling check. Where this document and the code disagree beyond these rulings,
+The v15 §8 wording narrows v12's "reports and records, does not block installs": report-and-record survives
+only for ISA notes and binary-blob findings; undeclared linkage and a floor above the in-scope libc ceiling
+are hard failures. Where this document and the code disagree beyond these rulings,
 the code is younger than the text — file it.
 
 ---

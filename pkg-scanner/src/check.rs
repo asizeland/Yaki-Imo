@@ -7,8 +7,11 @@
 //!
 //! Scans every installed package's binaries for:
 //!
-//! - **Floor/ceiling violations** (`floor > host glibc`): a binary that
-//!   cannot run on this system. In the source-only world this "can't
+//! - **Floor/ceiling violations** (`floor > ceiling`): a binary that
+//!   cannot run in this root. The ceiling is the root's *installed*
+//!   glibc (passed in by the caller), which on a live system is the
+//!   running one; the two differ exactly when checking a foreign or
+//!   bootstrap root. In the source-only world a violation "can't
 //!   happen" for anything built locally (v12 §9) — so when it *does*
 //!   appear, it's a meaningful signal: a binary installed out-of-band,
 //!   a `--force`-broken dependency edge (v11 §16.5), or a foreign-libc
@@ -126,7 +129,7 @@ impl fmt::Display for CheckFinding {
                 ceiling,
             } => write!(
                 f,
-                "{package}: {}: requires GLIBC_{floor}, host glibc is {ceiling} — \
+                "{package}: {}: requires GLIBC_{floor}, this root's glibc is {ceiling} — \
                  this binary cannot run on this system",
                 path.display()
             ),
@@ -166,7 +169,8 @@ pub enum FindingKind {
     UnknownGlibcFloor,
 }
 
-/// Classifies one binary's [`ElfInfo`] against the host glibc ceiling.
+/// Classifies one binary's [`ElfInfo`] against the glibc ceiling (the
+/// root's installed glibc — see module docs).
 pub fn classify(info: &ElfInfo, host_glibc: &Version) -> Option<FindingKind> {
     match &info.glibc_floor {
         Some(floor) if floor > host_glibc => Some(FindingKind::FloorAboveCeiling {

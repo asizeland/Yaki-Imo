@@ -8,14 +8,22 @@
 //! # Framing (v12 §9): verification, not an install gate
 //!
 //! In the source-only world, **floor ≤ ceiling holds by construction**:
-//! a binary is built against the system's own glibc, so the binary's
-//! GLIBC floor can never exceed the host ceiling — unless the recipe
-//! escaped its sandbox and linked against a *foreign* libc. That
-//! escape, not version skew, is the failure this gate detects. Per
-//! v12 §9 the pipeline stage "reports and records rather than blocking
-//! installs" — but a detected sandbox escape is a hard
-//! `PkgError::Gate`, because installing an artifact linked against a
-//! libc that isn't the system's is never the right move.
+//! a binary is built against a libc the dependency contract accounts
+//! for, so the binary's GLIBC floor can never exceed the newest libc
+//! in scope — unless the recipe escaped its sandbox and linked against
+//! a *foreign* libc. That escape, not version skew, is the failure this
+//! gate detects. Per v12 §9 the pipeline stage "reports and records
+//! rather than blocking installs" — but a detected sandbox escape is a
+//! hard `PkgError::Gate`, because installing an artifact linked against
+//! a libc that isn't in the dependency contract is never the right
+//! move.
+//!
+//! "Newest libc in scope" is deliberately not just the running host's:
+//! when a declared dependency provides `libc.so.6` (the packaged glibc
+//! — which on a bootstrap or foreign-host build is routinely NEWER than
+//! the host's, that being the point), the ceiling is the newest GLIBC_
+//! version that packaged libc defines. Only when no declared dep
+//! provides libc does the host's own glibc remain the ceiling.
 //!
 //! The real checks (per SPEC):
 //!
@@ -26,7 +34,10 @@
 //!    recorded runtime dependency edges (pkg-review: "DT_NEEDED
 //!    extraction becomes more important, not less").
 //! 2. **Foreign-libc detection** (the residual of the old floor/ceiling
-//!    gate): floor > host ceiling ⇒ hard failure.
+//!    gate): floor > ceiling ⇒ hard failure, where the ceiling is the
+//!    newest GLIBC_ version defined by a declared dep's `libc.so.6`,
+//!    falling back to the running host's glibc when no dep provides
+//!    libc.
 //! 3. **Link-interface extraction recorded.** Every artifact's
 //!    [`crate::elf::LinkInterface`] is extracted and handed back in the
 //!    [`GateReport`] for the caller (pkg-build) to record into
@@ -136,14 +147,41 @@ pub fn verify_build_with_policy(
     // Sonames provided by the declared dependency set. Scanning each
     // dep's store dir is the ground truth — the resolver's *claim* is
     // checked against what the deps actually contain.
+    //
+    // While scanning, also learn the newest GLIBC_ version a declared
+    // dep's libc.so.6 DEFINES (its .gnu.version_d): when the packaged
+    // glibc is in the dependency contract it is the libc these
+    // artifacts link against, so its newest defined version — not the
+    // host's — is the floor ceiling. Bootstrap and foreign-host builds
+    // legitimately produce binaries newer than the host's glibc.
     let mut dep_provided: BTreeSet<String> = BTreeSet::new();
+    let mut dep_libc_ceiling: Option<Version> = None;
     for dep in declared_deps {
         for artifact in walk_elf_files(&dep.store_dir)? {
             for li in extract_link_interface(&artifact)? {
+                if li.soname == "libc.so.6" {
+                    for defined in &li.symbol_versions {
+                        let Some(version_str) = defined.strip_prefix("GLIBC_") else {
+                            continue;
+                        };
+                        let Ok(version) = version_str.parse::<Version>() else {
+                            continue;
+                        };
+                        dep_libc_ceiling = Some(match dep_libc_ceiling {
+                            Some(current) if current >= version => current,
+                            _ => version,
+                        });
+                    }
+                }
                 dep_provided.insert(li.soname.clone());
             }
         }
     }
+
+    let ceiling: &Version = match &dep_libc_ceiling {
+        Some(packaged) if packaged > host_glibc => packaged,
+        _ => host_glibc,
+    };
 
     let mut report = GateReport::default();
     let mut self_provided: BTreeSet<String> = BTreeSet::new();
@@ -174,10 +212,11 @@ pub fn verify_build_with_policy(
         }
 
         match &info.glibc_floor {
-            Some(floor) if floor > host_glibc => {
+            Some(floor) if floor > ceiling => {
                 return Err(PkgError::Gate(format!(
-                    "{}: requires GLIBC_{floor} but host glibc is {host_glibc} — \
-                     the recipe linked against a foreign libc (sandbox escape?)",
+                    "{}: requires GLIBC_{floor} but the newest libc in scope is \
+                     {ceiling} — the recipe linked against a foreign libc \
+                     (sandbox escape?)",
                     artifact.display()
                 )));
             }
@@ -330,6 +369,92 @@ mod tests {
     fn undeclared_sonames_treats_no_needs_as_clean() {
         // Static binaries / no DT_NEEDED at all: nothing to check.
         assert!(undeclared_sonames(&[], &set(&[]), &set(&[])).is_empty());
+    }
+
+    #[test]
+    fn declared_packaged_libc_raises_the_floor_ceiling() {
+        // Foreign-host / bootstrap scenario: the packaged glibc is
+        // NEWER than the running host's. An artifact linked against
+        // the packaged libc legitimately requires its newest versions
+        // — the ceiling is the declared dep's libc, not the host's.
+        use std::process::Command;
+
+        // A plain fixture first: this test needs a glibc host (on musl
+        // the implicit libc is a different soname and the undeclared-
+        // soname pass would flag it — nothing about this test applies).
+        // The fixtures are freestanding (-nostdlib), so the test is
+        // host-libc-agnostic: no implicit -lc fight over the libc.so.6
+        // soname, and musl hosts behave identically.
+        let dir = tempfile::tempdir().unwrap();
+        // A fake "packaged libc" exporting one symbol at a version far
+        // beyond any real glibc.
+        let dep_dir = dir.path().join("dep");
+        std::fs::create_dir_all(&dep_dir).unwrap();
+        std::fs::write(
+            dir.path().join("fake.c"),
+            "int pkg_gate_probe(void){return 0;}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("v.map"),
+            "GLIBC_42.0 { global: pkg_gate_probe; };\n",
+        )
+        .unwrap();
+        let ok = Command::new("cc")
+            .arg("-shared")
+            .arg("-fPIC")
+            .arg(dir.path().join("fake.c"))
+            .arg(format!("-Wl,--version-script={}", dir.path().join("v.map").display()))
+            .arg("-Wl,-soname,libc.so.6")
+            .arg("-o")
+            .arg(dep_dir.join("libc.so.6"))
+            .status()
+            .unwrap();
+        assert!(ok.success(), "cc failed to build the fake libc fixture");
+
+        // A package artifact linked against the fake libc: its floor is
+        // GLIBC_42.0, above any real host.
+        let pkg_dir = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            dir.path().join("prog.c"),
+            "extern int pkg_gate_probe(void);\nvoid _start(void){ (void)pkg_gate_probe(); }\n",
+        )
+        .unwrap();
+        let ok = Command::new("cc")
+            .arg("-nostdlib")
+            .arg(dir.path().join("prog.c"))
+            .arg(dep_dir.join("libc.so.6"))
+            .arg("-o")
+            .arg(pkg_dir.join("prog"))
+            .status()
+            .unwrap();
+        assert!(ok.success(), "cc failed to link the prog fixture");
+        let bytes = std::fs::read(pkg_dir.join("prog")).unwrap();
+        let info = parse_elf(&bytes).unwrap();
+        assert_eq!(
+            info.glibc_floor,
+            Some("42.0".parse().unwrap()),
+            "the fixture must carry the fake libc's floor"
+        );
+
+        let host: Version = "2.39".parse().unwrap();
+
+        // Without the dep, 42.0 exceeds every libc in scope: foreign.
+        let err = verify_build(&pkg_dir, &host, &[]).unwrap_err();
+        assert!(
+            matches!(err, PkgError::Gate(_)),
+            "floor above every in-scope libc must fail: {err:?}"
+        );
+
+        // With the packaged libc declared, its defined versions set the
+        // ceiling and the same artifact passes.
+        let dep = DeclaredDep {
+            name: "glibc".to_string(),
+            store_dir: dep_dir,
+        };
+        verify_build(&pkg_dir, &host, &[dep])
+            .expect("a declared packaged libc is the ceiling");
     }
 
     #[test]

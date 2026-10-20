@@ -1,0 +1,5 @@
+export PATH="/pkg/deps/ninja/usr/bin:/pkg/deps/python3/usr/bin:$PATH"
+DESTDIR="$PKGDIR" ninja -C bwrap-build install
+# bwrap needs the setuid bit (or unprivileged user namespaces) to set up
+# its sandbox; setuid matches what distributions ship.
+chmod u+s "$PKGDIR/usr/bin/bwrap"

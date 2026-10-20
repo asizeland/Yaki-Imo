@@ -5,8 +5,9 @@ category = "sys-apps"
 # The system tool kit: mount/blkid/fdisk/dmesg and the libuuid,
 # libblkid, libmount libraries (libuuid is also a NetworkManager dep).
 # login/su/sulogin are left to shadow/sysvinit territory; systemd
-# integration is off (sysvinit system).
+# integration is off (sysvinit system). zlib is declared (fsck.cramfs)
+# — undeclared, configure would link the HOST's zlib instead.
 [dependencies]
-link = ["ncurses"]
-runtime = ["glibc", "ncurses"]
+link = ["ncurses", "zlib"]
+runtime = ["glibc", "ncurses", "zlib"]
 build = ["pkgconf"]

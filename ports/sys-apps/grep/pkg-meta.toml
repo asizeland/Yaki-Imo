@@ -3,4 +3,5 @@ version = "3.12"
 category = "sys-apps"
 
 [dependencies]
-runtime = ["glibc"]
+link = ["pcre2"]
+runtime = ["glibc", "pcre2"]

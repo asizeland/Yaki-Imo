@@ -1,4 +1,6 @@
 tar xJf findutils-4.10.0.tar.xz
 cd findutils-4.10.0
-./configure --prefix=/usr --disable-nls
+# --without-selinux: none in the tree; the host's libselinux would
+# leak in undeclared (gate-fatal).
+./configure --prefix=/usr --disable-nls --without-selinux
 make

@@ -5,12 +5,15 @@ cd util-linux-2.41.1
 sed -i '1s|^#!/bin/bash|#!/usr/bin/bash|' tools/all_errnos tools/all_syscalls
 export PATH="/pkg/deps/pkgconf/usr/bin:$PATH"
 # --disable-liblastlog2: lastlog2 wants sqlite3; not worth the dep.
+# --without-tinfo / --without-readline: dmesg's colors and fdisk's
+# prompts would otherwise pick up the HOST's libtinfo/libreadline
+# through the read-only host binds — undeclared linkage, gate-fatal.
 # --libdir=/usr/lib: util-linux defaults shared libs to /lib, but the
 # loader's compiled-in search path is /usr/lib — anything linking
 # libblkid/libmount/libuuid would fail at runtime.
 ./configure --prefix=/usr --libdir=/usr/lib --disable-static \
     --enable-libuuid --enable-libblkid --enable-libmount \
-    --disable-liblastlog2 \
+    --disable-liblastlog2 --without-tinfo --without-readline \
     --disable-login --disable-nologin --disable-sulogin \
     --disable-su --disable-runuser --disable-chfn-chsh \
     --without-systemd --without-udev --without-python \

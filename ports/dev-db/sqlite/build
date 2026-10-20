@@ -10,5 +10,10 @@ if [ "$PKG_OPT_FTS5" = "1" ]; then
 else
     FTS5=--disable-fts5
 fi
-./configure --prefix=/usr "$FTS5"
+# readline/editline/zlib stay off even when the HOST happens to have
+# them (foreign roots bind the host /usr read-only, and configure would
+# otherwise auto-detect them — undeclared linkage, rightly gate-fatal).
+# zlib has no configure switch, so its cache variables are pre-seeded.
+ac_cv_header_zlib_h=no ac_cv_search_deflate=no \
+    ./configure --prefix=/usr "$FTS5" --disable-readline --disable-editline
 make

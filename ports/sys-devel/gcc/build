@@ -7,6 +7,8 @@ tar xJf gcc-15.2.0.tar.xz
 mkdir -p sysroot
 cp -rL /pkg/deps/glibc/. sysroot/
 cp -rL /pkg/deps/linux-headers/usr/include sysroot/usr/
+# --without-zstd: LTO bytecode compression is optional, and the host's
+# libzstd would leak into lto-dump undeclared (gate-fatal).
 # LIBRARY_PATH carries every declared dep's lib dir — including
 # glibc's. xgcc's target-lib links pass --sysroot=<the build sysroot>
 # and rely on ld's script-inside-sysroot path rewriting; but a libc.so
@@ -29,6 +31,7 @@ cd gcc-build
     --disable-nls \
     --disable-bootstrap \
     --with-system-zlib \
+    --without-zstd \
     --with-build-sysroot="$PWD/../sysroot" \
     --disable-libcc1
 make

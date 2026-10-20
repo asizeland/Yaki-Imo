@@ -1,4 +1,6 @@
 tar xJf sed-4.10.tar.xz
 cd sed-4.10
-./configure --prefix=/usr --disable-nls
+# --without-selinux: no selinux in the tree; the host's libselinux
+# would leak in undeclared (gate-fatal).
+./configure --prefix=/usr --disable-nls --without-selinux
 make

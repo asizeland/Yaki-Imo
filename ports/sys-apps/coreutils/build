@@ -1,4 +1,6 @@
 tar xJf coreutils-9.12.tar.xz
 cd coreutils-9.12
-./configure --prefix=/usr --disable-nls
+# --without-selinux: none in the tree; the host's libselinux would
+# leak into chcon undeclared (gate-fatal).
+./configure --prefix=/usr --disable-nls --without-selinux
 make

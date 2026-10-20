@@ -1,0 +1,9 @@
+name = "libcap"
+version = "2.76"
+category = "sys-libs"
+
+# POSIX capabilities library + tools (getcap/setcap/capsh/captree).
+# bubblewrap links against it; the tools are also how a live system
+# inspects and grants file capabilities.
+[dependencies]
+runtime = ["glibc"]

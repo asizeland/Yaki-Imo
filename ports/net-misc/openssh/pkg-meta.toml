@@ -3,8 +3,11 @@ version = "10.0.1"
 category = "net-misc"
 
 # ssh client + sshd. No PAM (not packaged); privilege separation uses
-# /var/empty. Runtime setup (host keys, sshd user) is a live-system
-# step, not a package one.
+# /var/empty. libcrypt (libxcrypt) is declared explicitly: password
+# crypt() support — without declaring it, configure picks up the HOST's
+# libcrypt through the read-only host binds (undeclared, gate-fatal).
+# Runtime setup (host keys, sshd user) is a live-system step, not a
+# package one.
 [dependencies]
-link = ["openssl", "zlib"]
-runtime = ["glibc", "openssl", "zlib"]
+link = ["openssl", "zlib", "libxcrypt"]
+runtime = ["glibc", "openssl", "zlib", "libxcrypt"]

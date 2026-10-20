@@ -3,4 +3,5 @@ version = "9.12"
 category = "sys-apps"
 
 [dependencies]
-runtime = ["glibc"]
+link = ["gmp"]
+runtime = ["glibc", "gmp"]

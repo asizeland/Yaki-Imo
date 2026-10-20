@@ -8,7 +8,9 @@ cd gettext-0.26
 # failing is also what made the build break: without HAVE_ICONV,
 # libtextstyle compiles a stub whose flush() signature doesn't match
 # the vtable, a hard error under GCC 15.
-am_cv_func_iconv_works=yes ./configure --prefix=/usr --disable-nls --disable-openmp
+# --without-selinux / --without-libxml2: neither is in the tree; the
+# host's libselinux/libxml2 would leak in undeclared (gate-fatal).
+am_cv_func_iconv_works=yes ./configure --prefix=/usr --disable-nls --disable-openmp --without-selinux --without-libxml2
 # libasprintf's link rule is `--tag=CXX ... || --tag=CC ...`: the CXX
 # tag is deliberately unconfigured (LT_INIT has no CXX tag), so the
 # first attempt is SUPPOSED to fail and the CC fallback builds the

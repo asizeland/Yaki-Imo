@@ -72,6 +72,21 @@ mkdir -p "$SEED/lib64"
 LD_PATH=$(ldd /bin/sh | awk '/ld-linux/{print $1; exit}')
 cp "$(readlink -f "$LD_PATH")" "$SEED/lib64/ld-linux-x86-64.so.2"
 
+# Packaged-loader seed (foreign-glibc hosts only — on NixOS this never
+# triggers meaningfully, see the shim): once the packaged glibc is
+# installed, a build whose sandbox binds /pkg/deps/glibc gets the
+# packaged libc.so.6 injected via LD_LIBRARY_PATH. The HOST loader
+# (seeded above) paired with the packaged libc is a mismatched pair and
+# segfaults even trivial tools (Debian trixie: 2.41 loader + 2.42 libc
+# kills tar at startup — every post-glibc build died at `tar xf`). The
+# consistent pair is packaged loader + packaged libc, so the shim below
+# swaps the /lib64 bind to a copy of the activated packaged loader for
+# exactly those sandboxes. Sandboxes without the packaged glibc bound
+# (pre-glibc builds, dep-less packages, fetch/hook) keep the host seed,
+# whose loader/libc pair is equally consistent.
+SEEDPKG=$E2E/seed-pkg
+mkdir -p "$SEEDPKG/lib64"
+
 # ---------------------------------------------------------------
 # 3. ports tree -> signed repo; install recipes.
 # ---------------------------------------------------------------
@@ -149,7 +164,21 @@ done
 
 cat > "$E2E/shim/bwrap" <<EOF
 #!/bin/sh
+# Cache a copy of the ACTIVATED packaged loader for binding at /lib64
+# (see the seed-pkg note in ports.sh). Resolved host-side through the
+# root's relative activation link; re-taken whenever the target changes.
+# Never fatal — callers fall back to the host seed.
+pkg_loader_seed() {
+    src=\$(readlink -f "$ROOT/lib64/ld-linux-x86-64.so.2" 2>/dev/null) || return 1
+    [ -f "\$src" ] || return 1
+    [ "\$(cat "$SEEDPKG/.src" 2>/dev/null)" = "\$src" ] && return 0
+    cp "\$src" "$SEEDPKG/lib64/.tmp.\$\$" || return 1
+    mv -f "$SEEDPKG/lib64/.tmp.\$\$" "$SEEDPKG/lib64/ld-linux-x86-64.so.2" || return 1
+    printf '%s' "\$src" > "$SEEDPKG/.src.\$\$" &&
+        mv -f "$SEEDPKG/.src.\$\$" "$SEEDPKG/.src"
+}
 filtered() {
+    PKG_GLIBC_BOUND=0
     while [ "\$#" -gt 0 ]; do
         case "\$1" in
             --ro-bind|--bind)
@@ -157,6 +186,25 @@ filtered() {
                     printf '%s\0%s\0%s\0' "\$1" "\$2" "\$3"
                 else
                     echo "bwrap-shim: skipping missing bind source \$2" >&2
+                fi
+                shift 3 ;;
+            --setenv)
+                if [ "\$2" = LD_LIBRARY_PATH ]; then
+                    # A build that binds the packaged glibc must pair it
+                    # with the packaged loader — swap /lib64 below.
+                    case "\$3" in */pkg/deps/glibc/*) PKG_GLIBC_BOUND=1 ;; esac
+                    # Foreign-host aux libs: the sandbox binds no /etc
+                    # (no ld.so.cache), and an upstream-glibc loader's
+                    # defaults exclude distro triarch dirs — host tools
+                    # would die on libacl & co. Append AFTER the dep dirs
+                    # so the packaged libc still wins the soname race.
+                    v="\$3"
+                    for d in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu; do
+                        [ -d "\$d" ] && v="\$v:\$d"
+                    done
+                    printf '%s\0%s\0%s\0' "\$1" "\$2" "\$v"
+                else
+                    printf '%s\0%s\0%s\0' "\$1" "\$2" "\$3"
                 fi
                 shift 3 ;;
             --)
@@ -174,7 +222,65 @@ filtered() {
                 # once LD_LIBRARY_PATH carries dep lib dirs (see the sh
                 # override above). Later binds shadow earlier ones.
                 printf '%s\0' --ro-bind "$TOOLBIN" /bin
-                printf '%s\0%s\0%s\0' --ro-bind "$SEED/lib64" /lib64
+                # /lib64: the host seed loader — unless this FOREIGN host
+                # sandbox has the packaged glibc bound, in which case its
+                # libc comes from /pkg/deps/glibc via LD_LIBRARY_PATH and
+                # the loader must be the packaged one (a mismatched
+                # loader/libc pair segfaults even trivial tools). NixOS
+                # needs none of this (farm tools carry /nix/store
+                # interpreters, and the farm gcc links its own glibc).
+                ld64="$SEED/lib64"
+                if [ ! -d /nix/store ] && [ "\$PKG_GLIBC_BOUND" = 1 ] && pkg_loader_seed; then
+                    ld64="$SEEDPKG/lib64"
+                    # The packaged libc.so & co. are ld SCRIPTS with
+                    # absolute /usr/lib references (glibc slibdir). The
+                    # sandbox's /usr/lib is the foreign host's, where
+                    # those paths don't exist — every link died with
+                    # "cannot find /usr/lib/libc.so.6". Binding the files
+                    # individually can't work either: bwrap can't create
+                    # file mountpoints inside the read-only /usr/lib
+                    # bind. A symlink-farm overlay breaks too: the
+                    # compiler resolves /usr/lib/gcc/<triplet>/<ver>/
+                    # ../../../../include/c++ — after the gcc symlink hop
+                    # the .. steps land at /, not /usr (C++ headers
+                    # vanished; ninja died on <vector>). So: mount a
+                    # TMPFS over /usr/lib (bwrap can create mountpoints
+                    # in tmpfs) and bind every entry into place — host
+                    # entries by their host paths (bwrap resolves bind
+                    # sources host-side, following symlinks), plus the
+                    # packaged files the host lacks. Real mounts, no
+                    # symlinks: .. traversal stays intact.
+                    printf '%s\0%s\0' --tmpfs /usr/lib
+                    hostbases=" "
+                    for f in /usr/lib/*; do
+                        if [ -e "\$f" ]; then
+                            base=\${f##*/}
+                            hostbases="\$hostbases\$base "
+                            printf '%s\0%s\0%s\0' --ro-bind "\$f" "/usr/lib/\$base"
+                        fi
+                    done
+                    glib=\$(dirname "\$(dirname "\$src")")/usr/lib
+                    for f in "\$glib"/*; do
+                        if { [ -e "\$f" ] || [ -L "\$f" ]; } && [ ! -d "\$f" ]; then
+                            base=\${f##*/}
+                            case "\$hostbases" in
+                                *" \$base "*) ;;
+                                *) printf '%s\0%s\0%s\0' --ro-bind "\$f" "/usr/lib/\$base" ;;
+                            esac
+                        fi
+                    done
+                    glib=\$(dirname "\$(dirname "\$src")")/usr/lib
+                    for f in "\$glib"/*; do
+                        if { [ -e "\$f" ] || [ -L "\$f" ]; } && [ ! -d "\$f" ]; then
+                            base=\${f##*/}
+                            case "\$hostbases" in
+                                *" \$base "*) ;;
+                                *) printf '%s\0%s\0%s\0' --ro-bind "\$f" "/usr/lib/\$base" ;;
+                            esac
+                        fi
+                    done
+                fi
+                printf '%s\0%s\0%s\0' --ro-bind "\$ld64" /lib64
                 printf '%s\0' "\$@"
                 break ;;
             *) printf '%s\0' "\$1"; shift ;;
@@ -654,8 +760,23 @@ pass "db check clean after batch 4"
 #    normal FHS host where /usr/include/zlib.h is simply there) but
 #    declares only glibc.
 # ---------------------------------------------------------------
-ZLIB_OUT=$(nix build --no-link --print-out-paths nixpkgs#zlib)
-ZLIB_DEV=$(nix build --no-link --print-out-paths nixpkgs#zlib.dev)
+if command -v nix >/dev/null 2>&1; then
+    ZLIB_INC=$(nix build --no-link --print-out-paths nixpkgs#zlib.dev)/include
+    ZLIB_LIBDIR=$(nix build --no-link --print-out-paths nixpkgs#zlib)/lib
+else
+    # No nix on this host (e.g. the Debian test container): the system
+    # zlib plays the same role — present in the sandbox through the RO
+    # host binds, undeclared in the recipe.
+    for d in /usr/include /usr/local/include; do
+        [ -f "$d/zlib.h" ] && { ZLIB_INC=$d; break; }
+    done
+    for d in /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib \
+             /lib/x86_64-linux-gnu; do
+        [ -e "$d/libz.so" ] && { ZLIB_LIBDIR=$d; break; }
+    done
+fi
+: "${ZLIB_INC:?no host zlib headers for the badlink test}"
+: "${ZLIB_LIBDIR:?no host libz for the badlink test}"
 
 mkdir -p "$E2E/overlay3/app-misc/badlink"
 cat > "$E2E/overlay3/app-misc/badlink/pkg-meta.toml" <<'EOF'
@@ -678,7 +799,7 @@ int main(void) {
     return 0;
 }
 C
-cc -O2 -I$ZLIB_DEV/include badlink.c -o badlink -L$ZLIB_OUT/lib -lz
+cc -O2 -I$ZLIB_INC badlink.c -o badlink -L$ZLIB_LIBDIR -lz
 EOF
 cat > "$E2E/overlay3/app-misc/badlink/install" <<'EOF'
 mkdir -p "$PKGDIR/usr/bin"

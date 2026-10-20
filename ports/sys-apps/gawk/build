@@ -1,4 +1,6 @@
 tar xJf gawk-5.4.1.tar.xz
 cd gawk-5.4.1
-./configure --prefix=/usr --disable-nls
+# --without-readline: only the interactive debugger uses it, and the
+# HOST's libreadline would leak in undeclared (gate-fatal).
+./configure --prefix=/usr --disable-nls --without-readline
 make

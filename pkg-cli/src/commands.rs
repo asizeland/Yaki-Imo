@@ -2397,12 +2397,24 @@ fn cmd_check(
                     installed_from_store()?
                 }
             };
-            let host = running_glibc_version().ok_or_else(|| {
-                PkgError::Parse(
-                    "could not determine the running glibc version (ldd --version); \
-                     cannot check floors without a ceiling".into(),
-                )
-            })?;
+            // The ceiling is the root's own glibc when one is installed:
+            // `pkg check` answers "can these binaries run in THIS root",
+            // and a foreign/bootstrap root routinely carries a newer
+            // glibc than the host running the command. (A staged-pending
+            // major bump keeps the OLD row installed until the boot-time
+            // swap, so the installed row is always the active one.) Only
+            // a root with no glibc at all falls back to the host's.
+            let host = installed
+                .iter()
+                .find(|p| p.name == "glibc")
+                .and_then(|p| p.version.parse::<Version>().ok())
+                .or_else(running_glibc_version)
+                .ok_or_else(|| {
+                    PkgError::Parse(
+                        "could not determine a glibc ceiling (no glibc installed, and \
+                         ldd --version gave nothing); cannot check floors".into(),
+                    )
+                })?;
             let mut deep_notes = Vec::new();
             let findings = scan_installed(&installed, &host, depth, &mut deep_notes)?;
             if findings.is_empty() {
