@@ -151,6 +151,29 @@ pub struct BuildContext {
     /// build-only dep may be absent at runtime, so linking against one
     /// without a link/runtime declaration must still fail the gate.
     pub build_deps: Vec<pkg_scanner::DeclaredDep>,
+    /// Foreign (non-yakimo) library directories the sandboxed host tools
+    /// may need, appended to `LD_LIBRARY_PATH` after the dep dirs (see
+    /// [`foreign_lib_dirs`]). Empty on yakimo-native systems.
+    pub host_lib_dirs: Vec<String>,
+}
+
+/// Foreign library directories a host tool inside the build sandbox may
+/// need. The sandbox binds no `/etc`, so the loader in there has no
+/// config and no cache — only its compiled-in default dirs plus
+/// `LD_LIBRARY_PATH`. On a foreign distro the sandboxed `/usr/bin`
+/// tools link libraries outside the packaged world (Debian's triarch
+/// dir), and an upstream-glibc loader's defaults do not include those
+/// paths: the tool dies with "error while loading shared libraries"
+/// before the build script's first command. Probed against the active
+/// root so e2e scratch roots and yakimo-native systems yield nothing.
+/// (In-sandbox path == host path: the profile binds them 1:1.)
+pub fn foreign_lib_dirs() -> Vec<String> {
+    let root = pkg_core::paths::root();
+    ["/usr/lib/x86_64-linux-gnu", "/lib/x86_64-linux-gnu"]
+        .iter()
+        .filter(|d| root.join(d.trim_start_matches('/')).is_dir())
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// The result of one recipe run.
@@ -202,15 +225,22 @@ pub fn build_env(ctx: &BuildContext, recipe: &Recipe) -> PkgResult<Vec<(String, 
     // default path finds nothing. Put every bound dep's usr/lib on
     // LD_LIBRARY_PATH so /pkg/deps/<name>/usr/bin/* actually runs. This
     // changes no link decisions (the sandbox has no competing libs); it
-    // only makes dep-provided executables runnable.
+    // only makes dep-provided executables runnable. Dep dirs come first
+    // (the packaged tool wins); foreign host lib dirs (foreign_lib_dirs)
+    // trail so the sandboxed host tools of a foreign distro find their
+    // out-of-tree libraries without /etc present. dep_lib_path stays
+    // dep-only: it is reused for LIBRARY_PATH (link time) below, and
+    // foreign libraries must never enter link decisions.
     let dep_lib_path: Vec<String> = ctx
         .gate_deps
         .iter()
         .chain(ctx.build_deps.iter())
         .map(|d| format!("/pkg/deps/{}/usr/lib", d.name))
         .collect();
-    if !dep_lib_path.is_empty() {
-        env.push(("LD_LIBRARY_PATH".into(), dep_lib_path.join(":")));
+    let mut lib_path = dep_lib_path.clone();
+    lib_path.extend(ctx.host_lib_dirs.iter().cloned());
+    if !lib_path.is_empty() {
+        env.push(("LD_LIBRARY_PATH".into(), lib_path.join(":")));
     }
     // The compile-time halves of the same idea: with deps mounted at
     // /pkg/deps/<name> rather than merged into /usr, a compiler looking
@@ -829,6 +859,7 @@ default = false
             }),
             gate_deps: Vec::new(),
             build_deps: Vec::new(),
+            host_lib_dirs: Vec::new(),
         }
     }
 
@@ -900,6 +931,31 @@ default = false
         let env = build_env(&ctx(sel), &recipe).unwrap();
         let pa = env.iter().find(|(k, _)| k == "PKG_OPT_PULSEAUDIO").unwrap();
         assert_eq!(pa.1, "1");
+    }
+
+    #[test]
+    fn host_lib_dirs_trail_dep_dirs_and_stay_out_of_link_paths() {
+        let recipe = Recipe {
+            manifest: manifest_with_options(),
+            dir: PathBuf::from("/recipe"),
+            recipe_commit: "abc".into(),
+        };
+        let mut c = ctx(BTreeMap::new());
+        c.gate_deps = vec![pkg_scanner::DeclaredDep {
+            name: "zlib".into(),
+            store_dir: PathBuf::from("/store/zlib-1.3+ab1"),
+        }];
+        c.host_lib_dirs = vec!["/usr/lib/x86_64-linux-gnu".into()];
+        let env = build_env(&c, &recipe).unwrap();
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        // Runtime: dep dirs first, foreign host dirs trailing.
+        assert_eq!(
+            get("LD_LIBRARY_PATH").as_deref(),
+            Some("/pkg/deps/zlib/usr/lib:/usr/lib/x86_64-linux-gnu")
+        );
+        // Link time stays dep-only: foreign libraries must never enter
+        // link decisions.
+        assert_eq!(get("LIBRARY_PATH").as_deref(), Some("/pkg/deps/zlib/usr/lib"));
     }
 
     #[test]

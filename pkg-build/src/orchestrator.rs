@@ -1232,6 +1232,7 @@ fn build_node(
             recipe_manifest: recipe_manifest.clone(),
             gate_deps: gate_deps.clone(),
             build_deps: build_deps.clone(),
+            host_lib_dirs: crate::recipe::foreign_lib_dirs(),
         };
         let outcome = run_recipe_phases(&node.recipe, &ctx);
         let tail = outcome
@@ -1275,6 +1276,7 @@ fn build_node(
             recipe_manifest: recipe_manifest.clone(),
             gate_deps: gate_deps.clone(),
             build_deps: build_deps.clone(),
+            host_lib_dirs: crate::recipe::foreign_lib_dirs(),
         };
         match crate::repro::double_build(
             &node.recipe,

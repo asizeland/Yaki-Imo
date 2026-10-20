@@ -47,8 +47,9 @@ PORTS2REPO=$WS/target/debug/examples/ports2repo
 
 # Refresh the toolchain farm (ports.sh built it; new farm tools added
 # since the last full run must appear here too). Same rules as
-# e2e/ports.sh: type -P skips shell builtins, readlink -f resolves to
-# the real /nix/store path so links don't dangle in the sandbox.
+# e2e/ports.sh: a PATH walk skips shell builtins (type -P is a bashism;
+# /bin/sh may be dash), readlink -f resolves to the real path so links
+# don't dangle in the sandbox.
 TOOLBIN=$E2E/toolbin
 for tool in env sh bash ar ranlib make tar gzip xz sed grep \
             awk gawk cut diff cmp find xargs uname install cp mv mkdir ls pwd \
@@ -59,7 +60,17 @@ for tool in env sh bash ar ranlib make tar gzip xz sed grep \
     p=$(command -v "$tool" 2>/dev/null || true)
     case "$p" in
         /*) ;;
-        *) p=$(type -P "$tool" 2>/dev/null || true) ;;
+        *)
+            p=""
+            old_ifs=$IFS; IFS=:
+            for d in $PATH; do
+                if [ -x "$d/$tool" ] && [ ! -d "$d/$tool" ]; then
+                    p=$d/$tool
+                    break
+                fi
+            done
+            IFS=$old_ifs
+            ;;
     esac
     [ -n "$p" ] && ln -sf "$(readlink -f "$p")" "$TOOLBIN/$tool" || true
 done

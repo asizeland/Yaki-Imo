@@ -3039,6 +3039,9 @@ fn cmd_build_env(name: &str, resolve: bool) -> PkgResult<()> {
         }),
         gate_deps: Vec::new(),
         build_deps: Vec::new(),
+        // The env printout should show what a real build on this host
+        // would see, foreign lib dirs included.
+        host_lib_dirs: pkg_build::recipe::foreign_lib_dirs(),
     };
     for (k, v) in pkg_build::recipe::build_env(&ctx, &recipe)? {
         println!("{k}={v}");

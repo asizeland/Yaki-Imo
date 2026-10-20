@@ -132,6 +132,38 @@ fn resolve_link_target(link: &Path, target: &Path) -> PathBuf {
     out
 }
 
+/// The physical location a link planned at `link_path` will occupy:
+/// `link_path` with its longest *existing* ancestor canonicalized and
+/// the not-yet-existing tail appended. The kernel resolves a relative
+/// symlink against the link's PHYSICAL parent directory, and on
+/// usrmerge systems (`/lib64 -> /usr/lib64`, `/bin -> /usr/bin`, …) the
+/// lexical and physical parents differ — a target computed against the
+/// lexical path dangles (fatal when the link is the dynamic loader:
+/// every exec fails ENOENT). Canonicalizing only the existing prefix
+/// leaves store-introduced directories (which apply_symlink_ops creates
+/// as real dirs) untouched.
+fn physical_link_path(link_path: &Path) -> PathBuf {
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut cursor: &Path = link_path;
+    // Always strip at least the final component: the link itself may
+    // already exist (re-point/upgrade), and canonicalizing IT would
+    // follow it into the store — we want the link's physical LOCATION,
+    // never its target.
+    while let Some(name) = cursor.file_name() {
+        tail.push(name);
+        let Some(parent) = cursor.parent() else { break };
+        cursor = parent;
+        if cursor.exists() {
+            break;
+        }
+    }
+    let mut out = fs::canonicalize(cursor).unwrap_or_else(|_| cursor.to_path_buf());
+    for name in tail.iter().rev() {
+        out.push(name);
+    }
+    out
+}
+
 /// Computes the symlink ops that make `identity`'s store dir live under
 /// `fhs_root` (`/` for the system; an env root for `pkg env`). One
 /// symlink per file/symlink in the store dir; directories become real
@@ -157,7 +189,11 @@ pub fn plan_activation_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec<S
             if ftype.is_dir() {
                 stack.push(path);
             } else {
-                let link_path = fhs_root.join(rel);
+                // Plan at the link's PHYSICAL location: the relative
+                // target must resolve from the directory the kernel
+                // actually sees (usrmerge symlinked parents), not the
+                // lexical store-relative one. See physical_link_path.
+                let link_path = physical_link_path(&fhs_root.join(rel));
                 ops.push(SymlinkOp {
                     new_target: Some(relative_target(&link_path, &path)),
                     link_path,
@@ -478,6 +514,29 @@ pub fn plan_resync_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec<Symli
     Ok(ops)
 }
 
+/// Runs the root's ldconfig to regenerate /etc/ld.so.cache from the
+/// live ld.so.conf after activation linked a package-shipped cache over
+/// it (`ldconfig -r <root>` for non-`/ ` roots). Best-effort: failures
+/// warn, never fail the transaction — the loader's compiled-in default
+/// dirs cover yakimo-native layouts, and on a foreign host where the
+/// packaged ldconfig cannot even exec (e.g. a NixOS dev box building
+/// into a scratch root) the e2e roots are self-consistent anyway.
+fn regenerate_ld_so_cache() {
+    let root = pkg_core::paths::root();
+    let ldconfig = root.join("sbin/ldconfig");
+    if !ldconfig.exists() {
+        return;
+    }
+    let mut cmd = std::process::Command::new(&ldconfig);
+    if root != Path::new("/") {
+        cmd.arg("-r").arg(&*root);
+    }
+    match cmd.status() {
+        Ok(s) if s.success() => {}
+        other => eprintln!("pkg: warning: ldconfig regeneration failed: {other:?}"),
+    }
+}
+
 /// The one stage→activate→commit path. `target` is the complete
 /// post-transaction set. Caller supplies the generation-recording
 /// closure so the same path serves `record_generation` (normal) and
@@ -535,6 +594,24 @@ where
     }
     with_old_targets(&mut ops);
     apply_symlink_ops(&ops)?;
+
+    // A just-activated package shipping sbin/ldconfig (glibc) means the
+    // loader world changed: regenerate the live ld.so.cache from the
+    // live ld.so.conf NOW, mid-transaction — subsequent builds in this
+    // same transaction spawn tools against this root. (The glibc recipe
+    // no longer ships a cache file at all: it is a generated host
+    // artifact, and its build-sandbox contents would hide every other
+    // directory the live config knew. The recipe does ship an
+    // ld.so.conf.d drop-in putting its libdir first, so a foreign
+    // root's older libc loses the soname race and loader/libc stay a
+    // consistent pair.)
+    if activate.iter().any(|id| {
+        store_root_for(id.arch, store_roots)
+            .map(|r| r.join(id.store_dir_name()).join("sbin/ldconfig").exists())
+            .unwrap_or(false)
+    }) {
+        regenerate_ld_so_cache();
+    }
 
     // (3) DB commit LAST: the whole package-set change and its
     // generation record commit atomically together (Issue 2 §2 /
@@ -1033,6 +1110,36 @@ mod tests {
         assert!(rm[0].new_target.is_none());
         apply_symlink_ops(&rm).unwrap();
         assert!(!link.exists() && !link.is_symlink());
+    }
+
+    #[test]
+    fn activation_through_usrmerge_symlinked_parent_resolves() {
+        // usrmerge layout: <fhs>/lib64 is a SYMLINK to usr/lib64. The
+        // kernel resolves a relative link target from the physical
+        // parent (/usr/lib64), so planning at the lexical path
+        // (/lib64/…) would dangle the loader link and kill every exec.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store/glibc-2.42+ab1");
+        fs::create_dir_all(store.join("lib64")).unwrap();
+        fs::write(store.join("lib64/ld-linux-x86-64.so.2"), b"elf").unwrap();
+        let fhs = tmp.path().join("fhs");
+        fs::create_dir_all(fhs.join("usr/lib64")).unwrap();
+        std::os::unix::fs::symlink("usr/lib64", fhs.join("lib64")).unwrap();
+
+        let mut ops = plan_activation_ops(&store, &fhs).unwrap();
+        assert_eq!(ops.len(), 1);
+        // The op targets the physical location, not the lexical one.
+        assert_eq!(ops[0].link_path, fhs.join("usr/lib64/ld-linux-x86-64.so.2"));
+        with_old_targets(&mut ops);
+        apply_symlink_ops(&ops).unwrap();
+
+        // The link resolves through the usrmerge alias to the store
+        // file under KERNEL semantics (canonicalize follows everything).
+        let via_alias = fhs.join("lib64/ld-linux-x86-64.so.2");
+        assert_eq!(
+            fs::canonicalize(&via_alias).unwrap(),
+            fs::canonicalize(store.join("lib64/ld-linux-x86-64.so.2")).unwrap()
+        );
     }
 
     #[test]

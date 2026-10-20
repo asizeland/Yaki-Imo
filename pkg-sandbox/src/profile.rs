@@ -214,17 +214,28 @@ fn build_profile(scratch_dir: &Path, pkgdir: Option<&Path>) -> ProfileData {
     if let Some(pkgdir) = pkgdir {
         bind_rw.push(pkgdir.to_path_buf());
     }
+    // Toolchain + runtime linker/config roots, read-only. The
+    // dependency tree lives under the store (`/var/lib/pkg/store`),
+    // which pkg-build binds RO per resolved dep at run time in
+    // addition to these (see run.rs).
+    let mut bind_ro: Vec<PathBuf> = ["/usr", "/bin", "/lib", "/lib64"]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    // FHS toolchain entry points managed by Debian-style alternatives
+    // (/usr/bin/awk, cc, c++, …) are symlinks into /etc/alternatives.
+    // /etc itself stays unbound for builds (hermeticity floor above),
+    // but without this one directory those tools dangle inside the
+    // sandbox — glibc's config.status dies with `awk: command not
+    // found`. Conditional: bwrap rejects a bind whose source is
+    // missing, and non-FHS hosts (NixOS) have no /etc/alternatives.
+    if Path::new("/etc/alternatives").is_dir() {
+        bind_ro.push(PathBuf::from("/etc/alternatives"));
+    }
     ProfileData {
         name: BUILD_PROFILE_NAME.to_string(),
         version: Some(BUILTIN_PROFILE_VERSION.to_string()),
-        // Toolchain + runtime linker/config roots, read-only. The
-        // dependency tree lives under the store (`/var/lib/pkg/store`),
-        // which pkg-build binds RO per resolved dep at run time in
-        // addition to these (see run.rs).
-        bind_ro: ["/usr", "/bin", "/lib", "/lib64"]
-            .iter()
-            .map(PathBuf::from)
-            .collect(),
+        bind_ro,
         bind_rw,
         net: false,
         env_allow: ["PATH", "LANG", "LC_ALL", "TZ", "TERM"]
@@ -534,9 +545,28 @@ mod tests {
         // Toolchain is RO…
         assert!(data.bind_ro.contains(&PathBuf::from("/usr")));
         // …and /etc is not bound at all for builds (no /etc write,
-        // and no host-config leakage).
-        assert!(!data.bind_ro.iter().any(|p| p.starts_with("/etc")));
+        // and no host-config leakage) — with exactly one carve-out:
+        // /etc/alternatives on hosts that have it (Debian toolchain
+        // symlinks resolve through it; see build_profile).
+        assert!(
+            !data
+                .bind_ro
+                .iter()
+                .any(|p| p.starts_with("/etc") && p != Path::new("/etc/alternatives"))
+        );
         assert!(!data.bind_rw.iter().any(|p| p.starts_with("/etc")));
+    }
+
+    #[test]
+    fn build_profile_binds_etc_alternatives_exactly_when_the_host_has_it() {
+        let scratch = Path::new("/var/lib/pkg/build/1");
+        let data = SandboxProfile::Build.resolve(scratch, None);
+        // bwrap rejects binds with missing sources, so the bind must
+        // appear iff the host actually has the directory.
+        assert_eq!(
+            data.bind_ro.contains(&PathBuf::from("/etc/alternatives")),
+            Path::new("/etc/alternatives").is_dir()
+        );
     }
 
     #[test]

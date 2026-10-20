@@ -101,11 +101,23 @@ for tool in env sh bash ar ranlib make tar gzip xz sed grep \
     # command -v reports shell builtins (echo, test, printf) as bare
     # names, which would produce dangling farm links — and make execs
     # simple commands DIRECTLY (no shell), so a builtin is not good
-    # enough. type -P skips builtins and finds the PATH binary.
+    # enough. Fall back to a PATH walk for the real binary. (type -P
+    # would do this in one call, but it is a bashism and /bin/sh may
+    # be dash — e.g. in the Debian test container.)
     p=$(command -v "$tool" 2>/dev/null || true)
     case "$p" in
         /*) ;;
-        *) p=$(type -P "$tool" 2>/dev/null || true) ;;
+        *)
+            p=""
+            old_ifs=$IFS; IFS=:
+            for d in $PATH; do
+                if [ -x "$d/$tool" ] && [ ! -d "$d/$tool" ]; then
+                    p=$d/$tool
+                    break
+                fi
+            done
+            IFS=$old_ifs
+            ;;
     esac
     [ -n "$p" ] && ln -sf "$(readlink -f "$p")" "$TOOLBIN/$tool" || true
 done
