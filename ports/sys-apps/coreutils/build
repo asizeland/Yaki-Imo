@@ -1,6 +1,7 @@
 tar xJf coreutils-9.12.tar.xz
 cd coreutils-9.12
-# --without-selinux: none in the tree; the host's libselinux would
-# leak into chcon undeclared (gate-fatal).
-./configure --prefix=/usr --disable-nls --without-selinux
+# --without-selinux / --without-openssl: selinux isn't in the tree,
+# and openssl's libcrypto would be used by cksum — the host's would
+# leak in undeclared (gate-fatal). gmp IS declared.
+./configure --prefix=/usr --disable-nls --without-selinux --without-openssl
 make
