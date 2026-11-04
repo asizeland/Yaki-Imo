@@ -1,0 +1,11 @@
+name = "openrc"
+version = "0.64.1"
+category = "sys-apps"
+
+# Dependency-ordered service management and an optional PID 1. Optional
+# audit/SELinux/PAM integrations and legacy networking scripts are off;
+# NetworkManager provides networking. No services are enabled on install.
+[dependencies]
+link = ["libcap"]
+runtime = ["glibc", "libcap"]
+build = ["meson", "ninja", "python3", "pkgconf"]

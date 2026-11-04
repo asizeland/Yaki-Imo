@@ -109,9 +109,7 @@ pub fn format_dry_run_preview(plan: &DryRunPlan) -> String {
         let _ = writeln!(out, "  largest: {largest}");
     }
 
-    out.push_str(
-        "defer with: pkg upgrade --skip-rebuilds   schedule: pkg cascade --at 03:00\n",
-    );
+    out.push_str("defer with: pkg upgrade --skip-rebuilds   schedule: pkg cascade --at 03:00\n");
     out
 }
 
@@ -176,7 +174,10 @@ mod tests {
     fn eta_scaling() {
         assert_eq!(format_eta(Duration::from_secs(30)), "≈30 s");
         assert_eq!(format_eta(Duration::from_secs(48 * 60)), "≈48 m");
-        assert_eq!(format_eta(Duration::from_secs(3 * 3600 + 25 * 60)), "≈3 h 25 m");
+        assert_eq!(
+            format_eta(Duration::from_secs(3 * 3600 + 25 * 60)),
+            "≈3 h 25 m"
+        );
         assert_eq!(format_work(Duration::from_secs(38880)), "≈10.8 h");
     }
 }

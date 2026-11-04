@@ -90,6 +90,14 @@ it against the packaged glibc is the stage-2 bootstrap.
 | sys-devel/mpc | complex FP library | autotools | gcc dep |
 | sys-devel/binutils | assembler + linker | autotools (out-of-tree) | `--disable-gprofng` (libtool C++ link probe misfires in the sandbox) |
 | sys-devel/gcc | compiler | autotools (out-of-tree) | C/C++, `--disable-bootstrap`; ships libgcc/libstdc++ — retires ninja/gperf's static-C++ workarounds |
+| sys-devel/dkms | kernel-module build manager | shell + Makefiles | real DKMS 3.3.0; invoked by `pkg` after driver/kernel activation |
+| sys-apps/openrc | service manager | meson | dependency-ordered services; no runlevels enabled by default |
+| sys-devel/bc | build calculator | autotools | kernel build dependency; no readline/libedit |
+| dev-libs/elfutils | ELF tools + libraries | autotools | libelf/objtool support for kernel builds |
+| app-arch/zstd | compressor + library | Makefiles | extracts NVIDIA run archives; gzip/xz support declared |
+| sys-kernel/linux | kernel + modules | kernel Kbuild | configured 6.19.14-yakimo kernel and external-module build tree |
+| sys-firmware/intel-microcode | CPU firmware | install-only payload | cumulative normal Intel microcode set; no caveats directory |
+| x11-drivers/nvidia-drivers | proprietary GPU driver | vendor run archive + Kbuild | RTX 4070-capable 595.112.07; modules matched to the packaged kernel |
 
 The **chrootable set** (bash through xz above): with
 them installed, the root can be chrooted into (`arch-chroot`-style,
@@ -100,6 +108,14 @@ goes one step further: with `sysvinit` installed it boots the tree's
 sysinit action runs. The **sys-devel set** closes the loop: `ports.sh`
 finishes by compiling and running C and C++ programs with the packaged
 gcc+binutils inside that same chroot — the root can rebuild itself.
+
+The hardware section checks the kernel image, module metadata, microcode
+files, and NVIDIA userspace without a GPU. It cannot prove that Intel
+microcode was applied or that an RTX 4070 initializes; those checks require
+the physical machine. NVIDIA modules are built through DKMS after package
+activation. A driver change rebuilds every installed kernel; a new kernel
+rebuilds every installed DKMS driver. Logs are kept under `/var/log/pkg/`.
+Module signing and removal/undo cleanup are not implemented yet.
 
 ## Turning the tree into a repository
 

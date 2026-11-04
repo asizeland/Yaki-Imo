@@ -325,7 +325,10 @@ pub enum AlternativesAction {
     /// List virtual packages and current preferred providers.
     List,
     /// Set the preferred provider for future resolutions.
-    Set { virtual_name: String, provider: String },
+    Set {
+        virtual_name: String,
+        provider: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -337,7 +340,8 @@ pub enum ProfileAction {
 }
 
 #[derive(Debug, Subcommand)]
-pub enum EnvAction {    /// Resolve + materialize a named environment.
+pub enum EnvAction {
+    /// Resolve + materialize a named environment.
     Create {
         name: String,
         #[arg(long, value_name = "manifest.toml")]

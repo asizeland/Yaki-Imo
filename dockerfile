@@ -28,9 +28,10 @@
 #   sh e2e/run.sh           # smoke: repo, signatures, install, gate
 #   sh e2e/lifecycle.sh     # remove/autoremove, upgrade, undo, mirrors
 #   sh e2e/options.sh       # build options, store GC, undo interplay
+#   sh e2e/dkms.sh          # kernel/module triggers and nonfatal failure
 #   sh e2e/real-package.sh  # a real autotools package from the internet
 #   sh e2e/real-binary.sh   # repackaged binary blob (needs network)
-#   sh e2e/ports.sh         # the full 66-recipe tree from scratch —
+#   sh e2e/ports.sh         # the full ports tree from scratch —
 #                           # long (hours), the pre-bootstrap dress rehearsal
 
 # ---------- stage 1: build & unit-test ----------
@@ -59,10 +60,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential perl \
     bash bubblewrap python3 sqlite3 \
     coreutils tar xz-utils gzip binutils \
-    sed grep gawk diffutils \
+    sed grep gawk diffutils nano\
     bison flex gperf gettext \
     curl file ca-certificates \
-    git openssh-client \
+    git openssh-client kmod \
     && rm -rf /var/lib/apt/lists/*
 
 # The built workspace (including target/) and the rustup/cargo homes
@@ -75,16 +76,6 @@ COPY --from=build /usr/local/rustup /usr/local/rustup
 # Binaries on PATH under their spec names.
 RUN ln -sf /src/target/release/pkg-cli /usr/local/bin/pkg \
     && ln -sf /src/target/release/pkg-init /usr/local/bin/pkg-init
-
-# A placeholder git identity so `git commit` works out of the box —
-# override with your own (git config --global user.name/user.email),
-# or mount your real ~/.gitconfig and ~/.ssh at run time when you want
-# to push. safe.directory=* lets root work in bind-mounted repos owned
-# by your host uid.
-RUN git config --global user.name "Yakimo Tester" \
-    && git config --global user.email "yakimo@localhost" \
-    && git config --global init.defaultBranch main \
-    && git config --global --add safe.directory "*"
 
 # e2e scripts re-exec into `nix shell` unless this is set; there is no
 # nix in this image by design.

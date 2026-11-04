@@ -372,7 +372,10 @@ mod tests {
         let dep = Dependency::at_least("glibc", "2.39".parse().unwrap());
         match dep {
             Dependency::Package { constraint, .. } => {
-                assert_eq!(constraint, VersionConstraint::AtLeast("2.39".parse().unwrap()));
+                assert_eq!(
+                    constraint,
+                    VersionConstraint::AtLeast("2.39".parse().unwrap())
+                );
             }
             _ => panic!("expected Package variant"),
         }

@@ -23,6 +23,7 @@
 
 pub mod cache;
 pub mod cascade;
+pub mod dkms;
 pub mod glibc;
 pub mod orchestrator;
 pub mod recipe;

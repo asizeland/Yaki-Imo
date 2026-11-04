@@ -46,7 +46,10 @@ pub fn parse_elf(bytes: &[u8]) -> PkgResult<ElfInfo> {
     let needed = elf.libraries.iter().map(|s| s.to_string()).collect();
     let glibc_floor = extract_glibc_floor(&elf);
 
-    Ok(ElfInfo { needed, glibc_floor })
+    Ok(ElfInfo {
+        needed,
+        glibc_floor,
+    })
 }
 
 fn extract_glibc_floor(elf: &Elf) -> Option<Version> {
@@ -227,7 +230,11 @@ pub fn public_header_fingerprint(tree: &Path) -> Option<String> {
             if ft.is_dir() {
                 stack.push(path);
             } else if ft.is_file() {
-                let rel = path.strip_prefix(&include_root).ok()?.to_string_lossy().into_owned();
+                let rel = path
+                    .strip_prefix(&include_root)
+                    .ok()?
+                    .to_string_lossy()
+                    .into_owned();
                 let bytes = std::fs::read(&path).ok()?;
                 let digest = sha2::Sha256::digest(&bytes);
                 let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
@@ -404,9 +411,14 @@ mod tests {
         if !info.needed.iter().any(|n| n == "libc.so.6") {
             return;
         }
-        let floor = info.glibc_floor.expect("a dynamically-linked glibc binary should have a floor");
+        let floor = info
+            .glibc_floor
+            .expect("a dynamically-linked glibc binary should have a floor");
         let baseline: Version = "2.2.5".parse().unwrap();
-        assert!(floor >= baseline, "floor {floor} should be at least {baseline}");
+        assert!(
+            floor >= baseline,
+            "floor {floor} should be at least {baseline}"
+        );
     }
 
     #[test]
@@ -434,7 +446,10 @@ mod tests {
         let bytes = std::fs::read(&binary_path).unwrap();
         let info = parse_elf(&bytes).unwrap();
         assert_eq!(info.glibc_floor, None);
-        assert!(info.needed.is_empty(), "a static binary has no DT_NEEDED entries");
+        assert!(
+            info.needed.is_empty(),
+            "a static binary has no DT_NEEDED entries"
+        );
     }
 
     #[test]
@@ -490,7 +505,10 @@ mod tests {
         assert_eq!(fp1, fp2, "deterministic over the same tree");
         std::fs::write(inc.join("foo.h"), b"int foo_answer(void); /* v2 */\n").unwrap();
         let fp3 = public_header_fingerprint(dir.path()).unwrap();
-        assert_ne!(fp1, fp3, "header content change must perturb the fingerprint");
+        assert_ne!(
+            fp1, fp3,
+            "header content change must perturb the fingerprint"
+        );
 
         // No /usr/include (or an empty one) → None.
         let empty = tempdir().unwrap();
@@ -508,7 +526,9 @@ mod tests {
         assert_eq!(h1, h2, "input order must not affect the hash");
         // Same truncation convention as AbiTag/OptTag: 8 lowercase hex.
         assert_eq!(h1.len(), 8);
-        assert!(h1.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(h1
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
     #[test]
@@ -567,7 +587,10 @@ mod tests {
         let binary_path = dir.path().join("hello");
         compile_c("int main(){return 0;}", &binary_path);
         let interfaces = extract_link_interface(&binary_path).unwrap();
-        assert!(interfaces.is_empty(), "an executable provides no linkable interface");
+        assert!(
+            interfaces.is_empty(),
+            "an executable provides no linkable interface"
+        );
     }
 
     // --- v2: static consumption ---
@@ -578,14 +601,22 @@ mod tests {
     /// established), `Some((binary_path, archive_path, other_archive))`
     /// otherwise. `dir` must outlive the returned paths.
     fn build_static_consumption_fixture(dir: &Path) -> Option<(PathBuf, PathBuf, PathBuf)> {
-        let run = |cmd: &mut Command| -> bool {
-            cmd.status().map(|s| s.success()).unwrap_or(false)
-        };
+        let run =
+            |cmd: &mut Command| -> bool { cmd.status().map(|s| s.success()).unwrap_or(false) };
 
         let lib_src = dir.join("pkglib.c");
-        std::fs::write(&lib_src, "int pkgtest_archive_only_symbol(void){return 42;}\n").unwrap();
+        std::fs::write(
+            &lib_src,
+            "int pkgtest_archive_only_symbol(void){return 42;}\n",
+        )
+        .unwrap();
         let lib_obj = dir.join("pkglib.o");
-        if !run(Command::new("cc").arg("-c").arg(&lib_src).arg("-o").arg(&lib_obj)) {
+        if !run(Command::new("cc")
+            .arg("-c")
+            .arg(&lib_src)
+            .arg("-o")
+            .arg(&lib_obj))
+        {
             return None;
         }
         let archive = dir.join("libpkgconsumed.a");
@@ -597,11 +628,20 @@ mod tests {
         let other_src = dir.join("other.c");
         std::fs::write(&other_src, "int pkgtest_other_symbol(void){return 7;}\n").unwrap();
         let other_obj = dir.join("other.o");
-        if !run(Command::new("cc").arg("-c").arg(&other_src).arg("-o").arg(&other_obj)) {
+        if !run(Command::new("cc")
+            .arg("-c")
+            .arg(&other_src)
+            .arg("-o")
+            .arg(&other_obj))
+        {
             return None;
         }
         let other_archive = dir.join("libpkgother.a");
-        if !run(Command::new("ar").arg("rcs").arg(&other_archive).arg(&other_obj)) {
+        if !run(Command::new("ar")
+            .arg("rcs")
+            .arg(&other_archive)
+            .arg(&other_obj))
+        {
             return None;
         }
 
@@ -615,7 +655,12 @@ mod tests {
         let binary = dir.join("main");
         // Default cc output is unstripped, so the copied-in symbols land
         // in .symtab where the comparison can see them.
-        if !run(Command::new("cc").arg(&main_src).arg(&archive).arg("-o").arg(&binary)) {
+        if !run(Command::new("cc")
+            .arg(&main_src)
+            .arg(&archive)
+            .arg("-o")
+            .arg(&binary))
+        {
             return None;
         }
 
@@ -630,7 +675,8 @@ mod tests {
             return;
         };
 
-        let consumed = detect_static_consumption(&binary, &[archive.clone(), other_archive.clone()]);
+        let consumed =
+            detect_static_consumption(&binary, &[archive.clone(), other_archive.clone()]);
         assert!(
             consumed.contains(&archive.to_string_lossy().into_owned()),
             "expected the linked archive to be flagged, got {consumed:?}"

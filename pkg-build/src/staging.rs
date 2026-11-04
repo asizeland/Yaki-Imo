@@ -182,7 +182,9 @@ pub fn plan_activation_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec<S
                     store_dir.display()
                 ))
             })?;
-            if rel.as_os_str() == cache::MANIFEST_NAME {
+            if rel.as_os_str() == cache::MANIFEST_NAME
+                || rel.as_os_str() == cache::RECIPE_MANIFEST_NAME
+            {
                 continue; // store bookkeeping, not FHS content
             }
             let ftype = entry.file_type().map_err(PkgError::Io)?;
@@ -230,8 +232,7 @@ pub fn plan_deactivation_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec
         let current = fs::read_link(&op.link_path).ok();
         let owned = match (&current, &op.new_target) {
             (Some(cur), Some(new)) => {
-                resolve_link_target(&op.link_path, cur)
-                    == resolve_link_target(&op.link_path, new)
+                resolve_link_target(&op.link_path, cur) == resolve_link_target(&op.link_path, new)
             }
             _ => false,
         };
@@ -262,9 +263,7 @@ pub fn apply_symlink_ops(ops: &[SymlinkOp]) -> PkgResult<()> {
                 if let Some(parent) = op.link_path.parent() {
                     fs::create_dir_all(parent).map_err(PkgError::Io)?;
                 }
-                let tmp = op
-                    .link_path
-                    .with_extension("pkg-new");
+                let tmp = op.link_path.with_extension("pkg-new");
                 let _ = fs::remove_file(&tmp);
                 std::os::unix::fs::symlink(target, &tmp).map_err(PkgError::Io)?;
                 fs::rename(&tmp, &op.link_path).map_err(PkgError::Io)?;
@@ -273,9 +272,7 @@ pub fn apply_symlink_ops(ops: &[SymlinkOp]) -> PkgResult<()> {
                 // Removal: only remove if it still points where we
                 // expect — never unlink something a later transaction
                 // already re-pointed.
-                if fs::read_link(&op.link_path).ok().as_deref()
-                    == op.old_target.as_deref()
-                {
+                if fs::read_link(&op.link_path).ok().as_deref() == op.old_target.as_deref() {
                     let _ = fs::remove_file(&op.link_path);
                 }
             }
@@ -310,7 +307,11 @@ pub fn store_root_for(arch: Arch, store_roots: &[PathBuf]) -> PkgResult<PathBuf>
 /// commit that follows is last (§7.5).
 ///
 /// Returns the final store dir.
-pub fn stage_into_store(pkgdir: &Path, identity: &Identity, store_root: &Path) -> PkgResult<PathBuf> {
+pub fn stage_into_store(
+    pkgdir: &Path,
+    identity: &Identity,
+    store_root: &Path,
+) -> PkgResult<PathBuf> {
     let dir_name = identity.store_dir_name();
     let final_dir = store_root.join(&dir_name);
     let stage_root = store_root.join(STAGE_DIR_NAME);
@@ -383,15 +384,13 @@ impl ActivationSet {
                 name: row.name.clone(),
                 version: row.version.clone(),
                 abi_tag: row.abi_tag,
-                opt_tag: row.opt_tag.parse().map_err(|e| {
-                    PkgError::Parse(format!("bad opt_tag in packages row: {e}"))
-                })?,
+                opt_tag: row
+                    .opt_tag
+                    .parse()
+                    .map_err(|e| PkgError::Parse(format!("bad opt_tag in packages row: {e}")))?,
                 arch: row.arch,
             };
-            members.insert(
-                (row.name, row.arch),
-                (identity, row.installed_explicitly),
-            );
+            members.insert((row.name, row.arch), (identity, row.installed_explicitly));
         }
         Ok(ActivationSet { members })
     }
@@ -404,9 +403,10 @@ impl ActivationSet {
                 name: row.name.clone(),
                 version: row.version,
                 abi_tag: row.abi_tag,
-                opt_tag: row.opt_tag.parse().map_err(|e| {
-                    PkgError::Parse(format!("bad opt_tag in generation row: {e}"))
-                })?,
+                opt_tag: row
+                    .opt_tag
+                    .parse()
+                    .map_err(|e| PkgError::Parse(format!("bad opt_tag in generation row: {e}")))?,
                 arch: row.arch,
             };
             members.insert((row.name, row.arch), (identity, row.installed_explicitly));
@@ -445,9 +445,7 @@ impl ActivationSet {
         let mut missing = Vec::new();
         for (_, (identity, _)) in &self.members {
             let dir_name = identity.store_dir_name();
-            let exists = store_roots
-                .iter()
-                .any(|root| root.join(&dir_name).is_dir());
+            let exists = store_roots.iter().any(|root| root.join(&dir_name).is_dir());
             if !exists {
                 missing.push(PathBuf::from(dir_name));
             }
@@ -477,7 +475,7 @@ pub fn plan_resync_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec<Symli
     for entry in fs::read_dir(store_dir).map_err(PkgError::Io)? {
         let entry = entry.map_err(PkgError::Io)?;
         let top = entry.file_name();
-        if top == cache::MANIFEST_NAME {
+        if top == cache::MANIFEST_NAME || top == cache::RECIPE_MANIFEST_NAME {
             continue;
         }
         let walk_root = fhs_root.join(&top);
@@ -488,7 +486,9 @@ pub fn plan_resync_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec<Symli
         while let Some(dir) = stack.pop() {
             for entry in fs::read_dir(&dir).map_err(PkgError::Io)?.flatten() {
                 let path = entry.path();
-                let Ok(ftype) = entry.file_type() else { continue };
+                let Ok(ftype) = entry.file_type() else {
+                    continue;
+                };
                 if ftype.is_dir() {
                     stack.push(path);
                     continue;
@@ -496,7 +496,9 @@ pub fn plan_resync_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec<Symli
                 if !ftype.is_symlink() || planned.contains(&path) {
                     continue;
                 }
-                let Ok(target) = fs::read_link(&path) else { continue };
+                let Ok(target) = fs::read_link(&path) else {
+                    continue;
+                };
                 let resolved = resolve_link_target(&path, &target);
                 // A live link pointing into this store dir with no file
                 // in the new build: stale, remove it.
@@ -692,10 +694,7 @@ where
                 .map_err(|e| PkgError::Db(e.to_string()))?;
             Ok(ActivationReport {
                 activated: activate.iter().map(|i| i.store_dir_name()).collect(),
-                deactivated: deactivate
-                    .iter()
-                    .map(|(i, _)| i.store_dir_name())
-                    .collect(),
+                deactivated: deactivate.iter().map(|(i, _)| i.store_dir_name()).collect(),
                 symlink_ops: ops.len(),
                 generation_id: gen_id,
             })
@@ -734,6 +733,11 @@ pub fn activate_built_package(
         arch: node.arch,
     };
     let root = store_root_for(node.arch, store_roots)?;
+    let recipe_manifest = node.recipe.dir.join("pkg-meta.toml");
+    if recipe_manifest.is_file() {
+        fs::copy(recipe_manifest, pkgdir.join(cache::RECIPE_MANIFEST_NAME))
+            .map_err(PkgError::Io)?;
+    }
 
     // A rebuild-in-place (same identity, recipe changed) produces an
     // empty package-set diff below — without help, the fresh store
@@ -747,7 +751,10 @@ pub fn activate_built_package(
 
     stage_into_store(pkgdir, &identity, &root)?;
     if rebuild_in_place {
-        apply_symlink_ops(&plan_resync_ops(&root.join(identity.store_dir_name()), pkg_core::paths::root())?)?;
+        apply_symlink_ops(&plan_resync_ops(
+            &root.join(identity.store_dir_name()),
+            pkg_core::paths::root(),
+        )?)?;
     }
 
     // The target set = current set with this identity swapped in.
@@ -806,9 +813,9 @@ pub struct UndoReport {
 /// what the first one reverted (toggle), never step further back the
 /// way §5.3's sequential chain requires.
 pub fn live_state_gen(gens: &[GenerationRow]) -> PkgResult<i64> {
-    let latest = gens.last().ok_or_else(|| {
-        PkgError::NotFound("no generations recorded; nothing to undo".into())
-    })?;
+    let latest = gens
+        .last()
+        .ok_or_else(|| PkgError::NotFound("no generations recorded; nothing to undo".into()))?;
     Ok(match (latest.kind, latest.undoes) {
         (GenerationKind::Undo, Some(undone)) => pre_transaction_gen(gens, undone),
         _ => latest.id,
@@ -867,12 +874,11 @@ pub fn undo_to_generation(
     store_roots: &[PathBuf],
 ) -> PkgResult<UndoReport> {
     let gens = queries::list_generations(conn)?;
-    let latest = gens.last().ok_or_else(|| {
-        PkgError::NotFound("no generations recorded; nothing to undo".into())
-    })?;
-    let target = queries::get_generation(conn, gen_id)?.ok_or_else(|| {
-        PkgError::NotFound(format!("no generation with id {gen_id}"))
-    })?;
+    let latest = gens
+        .last()
+        .ok_or_else(|| PkgError::NotFound("no generations recorded; nothing to undo".into()))?;
+    let target = queries::get_generation(conn, gen_id)?
+        .ok_or_else(|| PkgError::NotFound(format!("no generation with id {gen_id}")))?;
 
     // (1) Sequential-only.
     let live = live_state_gen(&gens)?;
@@ -900,7 +906,8 @@ pub fn undo_to_generation(
     }
 
     // (3) glibc: undo never rolls the libc anchor.
-    let target_set = ActivationSet::from_generation(queries::generation_package_set(conn, gen_id)?)?;
+    let target_set =
+        ActivationSet::from_generation(queries::generation_package_set(conn, gen_id)?)?;
     let current_set = ActivationSet::current(conn)?;
     let glibc_of = |set: &ActivationSet| {
         set.members
@@ -1062,7 +1069,9 @@ mod tests {
         ]);
         let missing = target.missing_store_dirs(&[root]);
         assert_eq!(missing.len(), 2);
-        assert!(missing.iter().any(|p| p.to_string_lossy().contains("openssl")));
+        assert!(missing
+            .iter()
+            .any(|p| p.to_string_lossy().contains("openssl")));
         assert!(missing.iter().any(|p| p.to_string_lossy().contains("curl")));
     }
 
@@ -1164,14 +1173,16 @@ mod tests {
     #[test]
     fn relative_target_climbs_from_link_parent() {
         let link = Path::new("/usr/bin/sqlite3");
-        let target =
-            Path::new("/usr/lib/pkg/.store/sqlite-3.45.3+ab1/usr/bin/sqlite3");
+        let target = Path::new("/usr/lib/pkg/.store/sqlite-3.45.3+ab1/usr/bin/sqlite3");
         assert_eq!(
             relative_target(link, target),
             PathBuf::from("../lib/pkg/.store/sqlite-3.45.3+ab1/usr/bin/sqlite3")
         );
         // Round-trip through the lexical resolver.
-        assert_eq!(resolve_link_target(link, &relative_target(link, target)), target);
+        assert_eq!(
+            resolve_link_target(link, &relative_target(link, target)),
+            target
+        );
     }
 
     #[test]
@@ -1199,8 +1210,7 @@ mod tests {
         apply_symlink_ops(&ops).unwrap();
         assert!(fhs.join("usr/bin/added").is_symlink(), "new file linked");
         assert!(
-            !fhs.join("usr/bin/dropped").exists()
-                && !fhs.join("usr/bin/dropped").is_symlink(),
+            !fhs.join("usr/bin/dropped").exists() && !fhs.join("usr/bin/dropped").is_symlink(),
             "stale link removed"
         );
         assert_eq!(

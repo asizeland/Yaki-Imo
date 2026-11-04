@@ -1,68 +1,75 @@
-# Yaki Imo User Guide
+# Yakimo User Guide
 
-Yaki Imo is a source-based package manager. It builds every package from
-a recipe on your machine (as there currently is no repo), keeps every build in a 
-content-addressed store, and can undo any transaction.
+Yakimo builds software on your machine from small build instructions called
+**recipes**. It stores each build separately and can undo package changes.
+At present, it builds from source; it does not yet download prebuilt packages.
 
-This is intended to be a comprehensive guide. Each
-section says what a mechanism does, how to use it, and — when the
-mechanism is not obvious — why it exists.
+This guide explains how to use Yakimo and how to make packages. It starts
+with the basic ideas, then gives commands and examples. Technical terms are
+explained where they are first used.
+
+The documentation has three parts:
+
+- **This user guide:** installation, daily use, configuration, and packaging.
+- **[Technical manual](docs/technical-manual.md):** what happens inside each
+  feature and why the less obvious tools exist.
+- **[Developer's manual](docs/developers-manual.md):** how the source code is
+  organized and how to contribute to Yakimo itself.
 
 ## Contents
 
-1. The five ideas you need
-2. Setup: mirrors, trust, sync
+1. The five basic ideas
+2. Setting up mirrors, trust, and synchronization
 3. Everyday commands
-4. Build options (the "USE flags")
+4. Build options (similar to Gentoo's USE flags)
 5. Configuration files
-6. Controlling parallelism
-7. Undo, generations, garbage collection
+6. Controlling build speed and processor use
+7. Undo, generations, and disk cleanup
 8. Security and verification
 9. Named environments
 10. Testing safely with `PKG_ROOT`
-11. Making your own packages
+11. Making and publishing your own packages
 12. Exit codes and troubleshooting
-13.  Testing in containers (Docker)
+13. Testing in containers (Docker)
 
 ---
 
-## 1. The five ideas you need
+## 1. The five basic ideas
 
-**The store.** A package never installs files directly into `/usr`.
-A build produces a tree under `/usr/lib/pkg/.store/`, one directory
-per *identity*. The visible system is a tree of relative symlinks that
-pointinto the store. Example:
+**The store keeps the real files.** A package does not copy its files
+straight into `/usr`. Each build gets its own directory under
+`/usr/lib/pkg/.store/`. The usual locations, such as `/usr/bin/lua`,
+contain **symlinks**: small pointers to those stored files. For example:
+
 ```
 /usr/bin/lua -> ../lib/pkg/.store/lua-5.4.7+ab1463413912/usr/bin/lua
 ```
 
-The links are relative. You can copy the whole tree, chroot into it,
-or boot it as `/`. Absolute links would break in all three cases.
+The pointers use relative paths. This lets you move the whole system tree,
+enter it with `chroot`, or boot it as `/` without breaking the links.
 
-**Identity.** A package is not just a name and a version. Its identity
-also carries an ABI tag (a hash of what it links against) and an
-option tag (a hash of the build options you chose, when they differ
-from the defaults). Two builds of the same version with different
-options are different identities. They can both exist in the store at
-the same time. This is why undo and option flips are safe.
+**Identity identifies an exact build.** A package is more than a name and
+version. Its identity also records its architecture, the libraries it was
+built against (its **ABI tag**), and any non-default build options (its
+**option tag**). The tags are short hashes: fixed-length fingerprints of
+those inputs. Two builds of version 2.1 with different options can therefore
+stay in the store at the same time. This makes option changes and undo safe.
 
-**Recipes.** Yaki Imo builds from recipes, not binary packages. A recipe
-is a small directory: a manifest (`pkg-meta.toml`), a pinned source
-list (`source.toml`), and shell scripts for the build phases. Chapter
-11 covers the format.
+**Recipes describe how to build software.** A recipe is a small directory
+containing package details, an exact source download and checksum, and shell
+scripts for the build steps. Chapter 11 explains the format.
 
-**Generations and undo.** Every transaction records a *generation*:
-the exact set of identities that were live before and after. Undo
-re-applies an older set. There is no separate undo log to go stale —
-the generation table fully determines the symlink tree.
+**Generations make undo possible.** Each install, upgrade, or removal is a
+transaction. Yakimo records the package set before and after it as a
+**generation**. Undo restores an earlier recorded package set; it does not
+try to reverse individual file edits.
 
-**The sandbox and the gate.** Builds run in a bubblewrap sandbox: no
-network, the only writable places are the build scratch and the output
-directory. After the build, the scanner checks every produced binary:
-it must link only libraries that the recipe declared as dependencies,
-and it must not link a libc newer than the one running. A build that
-breaks these rules is rejected, not installed. This is what keeps
-"it worked on my machine" out of the package set.
+**The sandbox and scanner check builds.** A build runs in an isolated
+bubblewrap sandbox. It has no network access and can write only to its work
+and output directories. Afterward, the scanner checks the new programs and
+libraries. They may use only libraries declared by the recipe, and they must
+not require a newer C library than the system provides. Yakimo rejects a
+build that breaks these rules instead of installing it.
 
 ---
 
@@ -70,7 +77,7 @@ breaks these rules is rejected, not installed. This is what keeps
 
 ### 2.1 Mirrors
 
-`/etc/pkg/mirrors.toml` lists the repositories Yaki Imo syncs from:
+`/etc/pkg/mirrors.toml` lists the repositories Yakimo syncs from:
 
 ```toml
 mirrors = [
@@ -79,121 +86,124 @@ mirrors = [
 ]
 ```
 
-The first mirror is canonical. Later mirrors are fallbacks for
-transient failures only. Rollback protection (an older index is
-rejected) is pinned to the first mirror.
+The first entry is the main mirror. Yakimo tries the others only when an
+earlier mirror cannot provide a usable file. Yakimo remembers the newest
+repository index it accepted and rejects an older one, which prevents a
+mirror from rolling your package metadata back to an earlier state.
 
-### 2.2 Trust bootstrap
+### 2.2 Choosing which repository keys to trust
 
-Every repository index is signed. Before the first sync you must tell
-Yaki Imo which root key set to trust:
+Every repository index has a digital signature. Before the first sync, tell
+Yakimo which root keys may authorize that repository:
 
 ```
 # pkg key trust-root /path/to/root.json
 ```
 
-This is the one step that can never be fully automatic: trust has to
-enter the system from outside it. Get `root.json` from the project out
-of band. The command shows you the fingerprints and asks before it
-writes anything.
+Obtain `root.json` separately from the project, using a channel you trust.
+The command shows the key fingerprints and asks for confirmation. This step
+matters because a file downloaded from an untrusted server cannot, by itself,
+prove that the server should be trusted.
 
-`pkg key list` shows the current trust state. `pkg key show-chain`
-shows the full delegation chain (root → repository → timestamp roles).
+`pkg key list` shows the current trust state. `pkg key show-chain` shows how
+the root keys authorize the repository and timestamp keys.
 
-### 2.3 Sync
+### 2.3 Synchronizing package information
 
 ```
-# pkg sync            # fetch and verify the index
-# pkg sync --status   # cache age and freshness, no network
-# pkg sync --force    # ignore the cache TTL
+# pkg sync            # fetch and verify the package index
+# pkg sync --status   # show cache age and freshness; no network
+# pkg sync --force    # fetch now even if the cache is still fresh
 ```
 
-Sync downloads the signed index and the recipe manifest. Builds only
-use the synced manifest — not the raw recipe files — so what you build
-is always what the repository signed.
+Sync downloads the signed package index and recipe manifest. The manifest
+lists the exact sources and checksums for each recipe. Builds use this synced,
+verified manifest rather than trusting an unreviewed local source file.
 
 ---
 
 ## 3. Everyday commands
 
-```
-# pkg search hello            # search the index
-# pkg info hello              # identity, options in use, provenance
-# pkg install hello           # build + install (asks first)
-# pkg install -y hello        # no questions
-# pkg install hello@2.1       # an exact version
-# pkg upgrade                 # upgrade everything installed explicitly
-# pkg upgrade --dry-run       # resolve and preview, then stop
-# pkg remove hello            # refuses if something still needs it
-# pkg remove --recursive foo  # also remove the reverse dependents
-# pkg autoremove              # drop dependency-only packages nobody needs
-# pkg why hello               # the dependency chain that pulled it in
-# pkg explain 'foo>=2'        # show the resolver's work for a constraint
-```
-
-`pkg info` shows the installed identity including the option tag, the
-option values that differ from the recipe defaults, and the provenance
-record (which recipe commit and index version the build came from).
-
-If a package fails to build, the failed subtree is marked and the rest
-of the transaction continues. The build is checkpointed: run the same
-command again and already-built packages are not rebuilt.
-
-### Pins
-
-A pin freezes a package:
+In these examples, `#` means to run the command as root and `$` means an
+ordinary user. Do not type the prompt character itself.
 
 ```
-# pkg pin ffmpeg 6.1                  # stay on exactly this build
-# pkg pin ffmpeg 6.1 --mode abi-track # follow ABI-compatible updates only
+# pkg search hello            # search the package index
+# pkg info hello              # show the installed build and its options
+# pkg install hello           # build and install; ask before changing anything
+# pkg install -y hello        # install without asking for confirmation
+# pkg install hello@2.1       # request an exact version
+# pkg upgrade                 # upgrade packages you installed explicitly
+# pkg upgrade --dry-run       # show the plan without changing the system
+# pkg remove hello            # refuse if an installed package still needs it
+# pkg remove --recursive foo  # also remove packages that depend on foo
+# pkg autoremove              # remove dependencies that are no longer needed
+# pkg why hello               # show which required package led to this install
+# pkg explain 'foo>=2'        # explain why this version request cannot be met
+```
+
+`pkg info` also shows where the installed build came from: its recipe commit,
+repository index version, and any options that differ from the defaults.
+
+If one package fails to build, packages that do not depend on it can still
+finish. Completed builds are saved. Fix the problem and run the same command
+again; Yakimo does not rebuild those completed packages.
+
+### Pins: preventing unwanted upgrades
+
+A pin keeps a package on a chosen version or upgrade track:
+
+```
+# pkg pin ffmpeg 6.1                  # keep this exact version
+# pkg pin ffmpeg 6.1 --mode abi-track # allow updates that keep the same ABI
 # pkg pin ffmpeg                      # show the current pin
-# pkg unpin ffmpeg
+# pkg unpin ffmpeg                    # allow normal upgrades again
 ```
 
-Use a pin when an upgrade would break something you care about.
-`abi-track` is the middle ground: you get fixes, but not a soname bump
-that would cascade rebuilds through your system.
+Use a pin when an upgrade would break something you need. ABI means the
+interface that lets already-compiled programs use a library. `abi-track`
+allows compatible fixes but avoids an interface change that would require
+other packages to be rebuilt.
 
 ### Alternatives and profiles
 
 ```
 # pkg alternatives list
 # pkg alternatives set virtual/awk gawk
-# pkg rebuild --affected              # rebuild what a provider switch invalidated
+# pkg rebuild --affected  # rebuild packages affected by a provider change
 
 # pkg profile list
-# pkg profile apply <name>            # apply a named system profile
+# pkg profile apply <name>
 ```
 
-A *virtual* is a name several packages can provide (`virtual/awk` →
-gawk, mawk, …). `pkg alternatives` picks the provider. A *profile* is
-a named set of constraints the distribution ships (e.g. a hardened
-profile); applying one constrains what the resolver may pick.
+A **virtual** is a requirement that several packages can satisfy. For example,
+both gawk and mawk may provide `virtual/awk`. `pkg alternatives` chooses which
+one Yakimo prefers. A **profile** is a named set of package rules supplied by
+the distribution, such as rules for a hardened system.
 
-### Cascades
+### Rebuild cascades
 
-When a library's link interface changes, every package built against
-it must be rebuilt. That set is a *cascade*. Cascades are planned at
-resolve time and can be deferred to a quiet hour:
+When a library's interface changes, programs built against the old interface
+may need to be rebuilt. Yakimo calls this group of dependent rebuilds a
+**cascade**. It includes the cascade in the installation plan. You can postpone
+it and run it later:
 
 ```
-# pkg cascade --at 03:00        # schedule the pending cascade
-# pkg cascade --execute-pending # run it now (what the timer calls)
+# pkg cascade --at 03:00        # schedule the pending rebuilds
+# pkg cascade --execute-pending # run the pending rebuilds now
 ```
 
 ---
 
-## 4. Build options (the "USE flags")
+## 4. Build options (similar to Gentoo's USE flags)
 
-Options are Yaki Imo's counterpart to Gentoo's USE flags. The design rule is
-that options are **declared and additive**: a recipe declares exactly
-which knobs exist, and an option can only *add* things (a dependency,
-a configure flag). An option can never silently remove or rewrite
-another part of the package. This keeps "what will I get?" answerable.
+Build options control optional package features. Each recipe declares its
+available options and their default values. Options are **additive**: enabling
+one can add a dependency or a configure argument, but it cannot secretly
+remove or replace another part of the package. This makes the result easier
+to predict.
 
-### 4.1 Seeing them
-
-Options are meant to be visible, not buried in recipe files:
+### 4.1 Viewing available options
 
 ```
 # pkg options sqlite
@@ -201,72 +211,67 @@ sqlite 3.45.3
   fts5 = true   (default: true)
       Full-text search (FTS4/FTS5) support
 
-# pkg options               # your whole standing configuration,
-                            # including the file each value came from
+# pkg options               # show your saved choices and their source files
 ```
 
-`pkg info <name>` complements this for installed packages: it shows
-which option values the installed build actually used.
+`pkg info <name>` shows the options used by the build that is actually
+installed.
 
-### 4.2 Setting them once
+### 4.2 Changing options for one command
 
-Per command, either form works:
+Either form works:
 
 ```
 # pkg install ffmpeg --opt x11=0 --opt pulseaudio=1
 # pkg install 'ffmpeg[opt:x11=0]'
 ```
 
-A per-command choice is never saved. It applies to this transaction
-only.
+These choices apply only to this command. Yakimo does not save them.
 
-### 4.3 Setting them standing
+### 4.3 Saving your choices
 
-`/etc/pkg/options.toml`:
+Put permanent choices in `/etc/pkg/options.toml`:
 
 ```toml
-# Applies to every package that declares the key.
+# Applies to every package that declares this option.
 [defaults]
 nls = false
 
-# Applies to one package.
+# Applies only to ffmpeg.
 [package.ffmpeg]
 x11 = true
 pulseaudio = false
 ```
 
-Precedence, strongest first: per-command flags → `[package.<name>]` →
-`[defaults]` → the recipe's declared default.
+If more than one setting applies, the strongest wins, in this order:
+command-line option → package setting → default setting → recipe default.
 
-### 4.4 Splitting the config into several files
+### 4.4 Organizing options in separate files
 
-If your option set grows large, you do not have to keep it in one
-file. The main file can pull in siblings:
+You can keep large option sets in separate files next to `options.toml`:
 
 ```toml
 # /etc/pkg/options.toml
 include = ["sound.toml", "desktop.toml"]
 ```
 
-The names are plain file names in the same directory — no absolute
-paths, no `..`, no subdirectories. Included files use the same
-`[defaults]` / `[package.<name>]` tables. An included file cannot
-include further files: one level, so the merge order stays obvious.
-Includes apply in the order listed; the main file is strongest.
-`pkg options` shows which file each value came from.
+Included files use the same `[defaults]` and `[package.<name>]` tables.
+Only plain file names in the same directory are allowed: no absolute paths,
+`..`, or subdirectories. An included file cannot include another file.
+Yakimo reads includes in the listed order; settings in the main file win.
+`pkg options` shows which file supplied each value.
 
-Why the strictness? A silently ignored option is the config-file
-version of a silent misconfiguration. Unknown keys, non-boolean
-values, misspelled package names, and missing include files are all
-hard errors that name the file.
+Unknown options, values other than `true`/`false`, misspelled package names,
+and missing include files are errors. Yakimo reports the file instead of
+silently ignoring a possible mistake.
 
-### 4.5 What an option flip does
+### 4.5 What changes when an option changes
 
-Flipping an option produces a *new identity* (the option tag changes),
-so the package is rebuilt and the old build stays in the store. Undo
-can return to it. Options marked `abi_affecting = false` by the recipe
-(documentation, pure runtime data) still get a new identity but do not
-force dependents to rebuild.
+Changing an option creates a new package identity, so Yakimo rebuilds the
+package and keeps the old build for undo. A recipe may mark an option as
+`abi_affecting = false` when it changes only documentation or runtime data.
+That option still creates a new identity but does not force dependent
+packages to rebuild.
 
 ---
 
@@ -310,7 +315,7 @@ The `[paths]` overrides exist because some machines keep state on
 unusual mounts. The defaults follow the filesystem hierarchy standard;
 override only if you need to.
 
-Unknown keys and wrong value types are hard errors everywhere. Yaki Imo
+Unknown keys and wrong value types are hard errors everywhere. Yakimo
 never guesses what a config line meant.
 
 ---
@@ -336,13 +341,13 @@ on one token, so `jobs` builds never deadlock; they just queue.
 compiled with: `o2` (the default), `o3` for more aggressive
 optimization, `os` for smaller binaries, `o0`/`o1` for debugging.
 
-This is deliberately the *only* compiler-flag knob. Yaki Imo does not
+This is deliberately the *only* compiler-flag knob. Yakimo does not
 accept arbitrary `CFLAGS`: the flags a distribution is compiled with
 are part of its ABI contract, so the level is declared, bounded, and
 hashed into every package's identity. Two consequences follow:
 
 - **Flipping the level rebuilds the world.** An `o2` artifact and an
-  `o3` artifact are different packages to Yaki Imo, so the artifact
+  `o3` artifact are different packages to Yakimo, so the artifact
   cache can never hand you one when you asked for the other.
 - **A recipe can still pin its own flags.** If a package is known to
   miscompile under aggressive optimization, its build script exports
@@ -356,109 +361,136 @@ path to ISA-specific builds.
 
 ---
 
-## 7. Undo, generations, garbage collection
+## 7. Undo, generations, and disk cleanup
 
 ```
 # pkg history            # list transactions
-# pkg history 7          # what generation 7 changed
+# pkg history 7          # show what generation 7 changed
 # pkg undo               # undo the most recent transaction
-# pkg undo 4             # undo transaction 4
-# pkg undo --rebuild-missing   # rebuild pruned store dirs instead of failing
+# pkg undo 4             # undo transaction 4, if it is the next sequential undo
 ```
 
-Undo is strictly sequential. You can only undo the latest transaction,
-then the one before it. The package set — not a diff — is restored, so
-undo cannot half-apply.
+Undo is strictly sequential: undo the latest transaction, then the one before
+it. Yakimo restores the recorded package set rather than trying to reverse a
+list of individual commands.
 
-Undo restores the package set and the symlink tree. It does not touch
-`/etc`, and it does not roll back a staged glibc swap (that has its
-own rollback path; undo says so when it applies).
+Undo restores packages and their symlinks. It does not change `/etc`, user
+data, pins, or a staged glibc swap. Running programs may still use old
+libraries until they are restarted.
 
 ```
-# pkg clean              # prune store dirs nothing references
-# pkg clean --garbage    # ALSO release the generation holds (undo data)
-# pkg clean --cache      # reclaim the artifact cache
+# pkg clean              # remove store builds not needed by the system or recent undo
+# pkg clean --garbage    # also release old builds kept for undo
+# pkg clean --cache      # clear the reusable build-artifact cache
 ```
 
-`pkg clean` is always safe for undo: store dirs pinned by a restorable
-generation are kept. `pkg clean --garbage` releases those holds — it
-prints exactly which generations stop being restorable before it does
-anything. After that, undoing them needs `--rebuild-missing`, which
-rebuilds the missing store dirs from source.
+Ordinary `pkg clean` keeps installed builds and builds referenced by up to
+five recent restorable generations. `pkg clean --garbage` releases those undo
+holds and warns which generations will stop being restorable.
 
-Why generations exist at all: the store makes old builds cheap to
-keep, and generations make them *addressable*. "Go back to how the
-system was on Tuesday" is a data lookup, not a reinstall.
+**Current limitation:** after those stored builds are removed, undo cannot yet
+rebuild them. The `--rebuild-missing` option explains the missing directories
+but does not complete the promised rebuild. Do not use `--garbage` if you still
+need the affected undo history.
+
+Generations make old builds easy to select: returning to an earlier package
+set is a lookup and activation operation, not a manual reinstall.
 
 ---
 
 ## 8. Security and verification
 
 ```
-# pkg audit                       # advisories affecting installed packages
-# pkg audit --supply-chain        # attestations, provenance, reproducibility
-# pkg audit --supply-chain --critical
-# pkg audit --glibc               # processes still running a deleted glibc
-# pkg audit --acknowledge <pkg>   # accept a finding after you looked at it
-# pkg check                       # link health across the system
-# pkg check firefox --depth deep  # deeper scan of one package
-# pkg check ./some-binary --suggest   # which installed package provides
-                                     # each unresolved library
-# pkg db check                    # database ↔ store integrity
-# pkg db regenerate               # rebuild the db from the store
+# pkg audit                       # show security notices for installed packages
+# pkg audit --supply-chain        # check signatures, source records, and reproducibility
+# pkg audit --supply-chain --critical  # check only the critical package set
+# pkg audit --glibc               # find running processes using a removed C library
+# pkg audit --acknowledge <pkg>   # accept a finding after investigating it
+# pkg check                       # check library links across the system
+# pkg check firefox --depth deep  # perform a deeper scan of one package
+# pkg check ./some-binary --suggest   # suggest providers for missing libraries
+# pkg db check                    # compare the package database with the store
+# pkg db regenerate               # rebuild the database from the store
 ```
 
-Two notes on why these exist:
+Two similar checks have different jobs:
 
-- **The supply-chain gate.** An unacknowledged hard supply-chain
-  finding blocks new transactions. This is deliberate friction: the
-  point is that you cannot *not notice*. `pkg audit --acknowledge`
-  unblocks once you have actually read the finding.
-- **`pkg check` vs the build gate.** The gate runs at build time (new
-  artifacts). `pkg check` runs against what is installed now — useful
-  after manual changes, restores from backup, or suspicion of
-  corruption.
+- **The supply-chain check runs before a transaction.** A serious,
+  unacknowledged finding blocks installs and upgrades so that you cannot
+  overlook it. Read `pkg audit --supply-chain` first. Use
+  `pkg audit --acknowledge <pkg>` only after investigating the finding.
+- **`pkg check` examines files that are already installed.** The scanner
+  checks new files at build time; this command is useful after manual changes,
+  restoring a backup, or suspected corruption.
+
+Other useful inspection and maintenance commands are:
+
+```
+# pkg fetch hello                 # download and verify hello's declared sources
+# pkg build hello --no-cache      # force a build without using the artifact cache
+# pkg build-env hello             # show the environment a build would receive
+# pkg isolate /usr/bin/hello      # run a program in a temporary mount namespace
+# pkg bootstrap --verify-layout   # check that a staged glibc swap is safe
+# pkg apply-pending-restarts      # restart OpenRC services using deleted files
+```
+
+`pkg isolate` is for trying a program with extra isolation; it is not a
+security boundary for an untrusted program. `pkg apply-pending-restarts`
+exists because replacing a library on disk does not make an already running
+service use the new copy. Restarting the affected services completes that
+kind of upgrade.
 
 ---
 
 ## 9. Named environments
 
-Environments are package sets you can activate into your shell without
-touching the system — a project toolchain, a media box, a CI
-sandbox:
+A named environment adds a selected package set to your shell's search paths
+without changing the system-wide package set. It can provide a project
+toolchain or a separate set of media tools:
 
 ```
 # pkg env create media
 # pkg env create ci --from manifest.toml
-# eval "$(pkg env activate media)"    # PATH/MANPATH/PKG_CONFIG_PATH prepended
-# pkg env show media                  # resolved identities + option deltas
-# pkg env update media
-# pkg env export media                # a shareable manifest + identity lock
+# eval "$(pkg env activate media)"  # prepend PATH, MANPATH, and PKG_CONFIG_PATH
+# pkg env show media                # show the exact builds in the environment
+# pkg env update media              # recreate it from its saved manifest
+# pkg env export media              # print its manifest and exact identity lock
 # pkg env delete media
 ```
 
-An exported environment pins exact identities, so a teammate (or next
-month's you) gets the same set, not "whatever the index has today".
+An exported environment records exact identities, so another setup can use the
+same set rather than whichever versions are newest that day.
+
+**Current limitation:** environment creation links packages that are already
+installed; it does not yet resolve and build missing packages from the
+manifest. An environment changes shell search paths. It is not a container or
+a security sandbox.
 
 ---
 
 ## 10. Testing safely with `PKG_ROOT`
 
-Every state path Yaki Imo uses is prefixed by `PKG_ROOT` when set. You
-can exercise the full toolchain against a throwaway root without
-touching `/`:
+`PKG_ROOT` places Yakimo's main package state beneath a test directory. Use it
+to try repository, build, install, and undo operations without installing into
+your real `/usr` tree:
 
 ```
-$ export PKG_ROOT=/tmp/Yaki Imo-test
-$ mkdir -p $PKG_ROOT/etc/pkg
-$ $EDITOR $PKG_ROOT/etc/pkg/mirrors.toml     # point at a repo
-$ pkg key trust-root root.json               # trust bootstrap (in-root)
-$ pkg sync && pkg install hello
+$ export PKG_ROOT=/tmp/yakimo-test
+$ mkdir -p "$PKG_ROOT/etc/pkg"
+$ $EDITOR "$PKG_ROOT/etc/pkg/mirrors.toml"  # point at a repository
+$ pkg key trust-root root.json             # import the test root's trust keys
+$ pkg sync
+$ pkg install hello
 ```
+
+`PKG_ROOT` changes paths; it is not a container. Host tools and network access
+are still used for builds, and some host-inspection, service-restart, cgroup,
+and early-boot operations are not redirected. Use the disposable container
+below when a test needs stronger separation.
 
 ### 10.1 The seed ports tree
 
-The `ports/` directory in the Yaki Imo source tree is a small
+The `ports/` directory in the Yakimo source tree is a small
 ebuild/ports-style recipe collection meant for live testing: the C
 library and its prerequisites (linux-headers, glibc, libxcrypt — all
 built from source), libraries
@@ -495,7 +527,7 @@ inittab action through the tree's own `/bin/sh`.
 
 `live/` builds an x86_64 NixOS live ISO for testing `pkg` in a VM. It is
 a disposable host with a local signed test repository and build toolchain,
-not a bootable Yaki Imo distribution. Build and boot it with:
+not a bootable Yakimo distribution. Build and boot it with:
 
 ```
 $ sh live/build.sh
@@ -525,23 +557,90 @@ A recipe carries a `watch.toml` describing how to poll its upstream
 the recipe. The bump then goes through review and signing like any
 other tree change. (This is the same role Debian's `uscan` plays.)
 
+### 10.4 OpenRC and Intel/NVIDIA hardware recipes
+
+The tree includes OpenRC alongside SysVinit, a configured Linux kernel,
+Intel CPU microcode, and NVIDIA's proprietary driver. Install them with:
+
+```sh
+pkg install sysvinit openrc linux intel-microcode nvidia-drivers
+```
+
+OpenRC installs service definitions but does not enable services for you.
+On the live system, use `rc-update` to choose runlevels. A basic service
+setup looks like this:
+
+```sh
+rc-update add devfs sysinit
+rc-update add sysfs sysinit
+rc-update add procfs sysinit
+rc-update add udev sysinit
+rc-update add localmount boot
+rc-update add dbus default
+rc-update add NetworkManager default
+rc-status                 # show the current runlevel and service state
+```
+
+The kernel package installs `/boot/vmlinuz-6.19.14-yakimo`, its modules,
+configuration, and a matching external-module build tree under
+`/usr/src/`. It does not yet configure a bootloader or generate an
+initramfs. Early Intel microcode loading requires that boot configuration;
+installing the files alone does not prove the CPU received an update.
+
+The NVIDIA recipe installs the source for `nvidia`, `nvidia-modeset`,
+`nvidia-drm`, and `nvidia-uvm`. At the end of the transaction, Yakimo asks
+DKMS to build and install those modules for each installed kernel. It also
+installs NVML and `nvidia-smi`, CUDA/OpenCL userspace, the Ada GSP firmware,
+and Vulkan/EGL vendor manifests. Vulkan/OpenGL loader and X11 libraries are
+separate packages needed by the future desktop stack; installing the driver
+alone is not a complete graphical desktop.
+
+Installing a new kernel automatically rebuilds the installed NVIDIA modules
+for that kernel. Reinstalling or upgrading the driver builds it for every
+installed kernel. Use `dkms status` to inspect DKMS's view of the modules.
+A failed module build produces a warning but does not remove the new kernel.
+Read `/var/log/pkg/dkms-nvidia-drivers-<kernel>.log`, fix the cause, and run
+`pkg build nvidia-drivers` to try again before booting that kernel.
+
+DKMS modules are generated system files, not immutable store payloads.
+Module signing and automatic cleanup during package removal or undo remain
+follow-up work.
+
+On the Intel + RTX 4070 test machine, check the actual results:
+
+```sh
+grep -m1 microcode /proc/cpuinfo   # inspect the applied microcode revision
+modprobe nvidia
+modprobe nvidia-modeset
+modprobe nvidia-drm
+nvidia-smi                         # must report the RTX 4070 and driver 595.112.07
+```
+
+Container tests verify recipes, linkage, files, and module metadata. They
+cannot verify that your CPU accepted microcode or that the GPU initialized.
+
 ---
 
 ## 11. Making your own packages
 
-A recipe is a directory with up to six files. Two are required
-(`pkg-meta.toml`, `build`, `install` — three, strictly):
+A source recipe normally has four required files and may have three optional
+files:
 
 ```
 myrepo/app-misc/hello/
-  pkg-meta.toml    # what it is, what it needs   (required)
-  source.toml      # where the source comes from  (required)
-  build            # how to compile it            (required)
-  install          # how to fill $PKGDIR          (required)
-  prepare          # patches, pre-configure fixups (optional)
-  check            # run the test suite           (optional)
-  watch.toml       # how to poll upstream         (optional)
+  pkg-meta.toml    # package name, version, dependencies, and options
+  source.toml      # exact source download and SHA-256 checksum
+  build            # commands that compile the software
+  install          # commands that put the results in $PKGDIR
+  prepare          # optional patches or other source changes
+  check            # optional upstream tests; a failure stops the build
+  watch.toml       # optional instructions for finding newer releases
 ```
+
+For a repackaged binary, `[build] binary = true` makes the `build` script
+optional. Some install-only recipes use an empty `build` script. Start by
+copying the recipe for a similar program in `ports/` rather than writing
+every file from scratch.
 
 ### 11.1 pkg-meta.toml
 
@@ -569,6 +668,26 @@ OR-groups (`cronie|fcron`), and virtuals (`virtual/awk`). An entry in
 `link` or `runtime` is what the post-build gate checks against: if
 your binary links a library you did not declare, the build fails and
 the error tells you which installed package provides that library.
+
+For an out-of-tree kernel module, add a `[dkms]` table:
+
+```toml
+[dependencies]
+runtime = ["dkms", "kmod", "gcc", "make"]
+
+[dkms]
+name = "example"
+version = "1.0"
+```
+
+The install phase must place the module source and its upstream-style
+`dkms.conf` in `$PKGDIR/usr/src/example-1.0/`. Do not compile the module in
+the normal build phase. After activation, Yakimo runs DKMS without network
+access. It builds a new or upgraded module for every installed kernel and
+builds an existing module when a new kernel appears. Kernel packages mark
+themselves with `provides = ["virtual/kernel"]` and install a usable
+`/usr/lib/modules/<release>/build` tree. DKMS build failures are warnings;
+the already-activated package remains installed and the log names the cause.
 
 ### 11.2 source.toml
 
@@ -638,17 +757,51 @@ true` in the manifest: the `build` script becomes optional, the
 gate relaxes its undeclared-library check to a warning (the blob
 legitimately links host libraries it does not ship).
 
-### 11.4 The packager's loop
+### 11.4 Test and improve a recipe
 
-```
-$ ports2repo /tmp/repo http://127.0.0.1:8765 --distfiles /tmp/dist myrepo/
-$ python3 -m http.server 8765 --directory /tmp/repo &
-$ export PKG_ROOT=/tmp/test-root
-$ pkg sync && pkg build hello
+Work in a temporary root so a broken recipe cannot change your real system.
+From the Yakimo source checkout:
+
+```sh
+# Download the exact source and check it against source.toml.
+mkdir -p /tmp/dist
+curl -fsSL https://ftp.gnu.org/gnu/hello/hello-2.12.tar.gz \
+    -o /tmp/dist/hello-2.12.tar.gz
+printf '%s  %s\n' \
+    31e066137a962676e89f69d1b65382de95a7ef7d914b8cb956f41ea72e0f516b \
+    /tmp/dist/hello-2.12.tar.gz | sha256sum -c -
+
+# Make a local test repository from your recipe tree.
+cargo run --offline -p pkg-repo --example ports2repo -- \
+    /tmp/hello-repo http://127.0.0.1:8765 \
+    --distfiles /tmp/dist myrepo
+
+# Install its recipes into the temporary root and serve the repository.
+export PKG_ROOT=/tmp/hello-test
+sh ports/install.sh /tmp/hello-repo
+python3 -m http.server 8765 --directory /tmp/hello-repo \
+    >/tmp/hello-http.log 2>&1 &
+
+# Configure the temporary root, trust these test keys, and synchronize.
+mkdir -p "$PKG_ROOT/etc/pkg"
+printf 'mirrors = ["http://127.0.0.1:8765"]\n' \
+    >"$PKG_ROOT/etc/pkg/mirrors.toml"
+pkg key trust-root /tmp/hello-repo/root.json
+pkg sync
+pkg build hello
+pkg install hello
 ```
 
-Then iterate. If the build links something undeclared, the failure
-says exactly what to add:
+`ports2repo` uses deterministic test keys. They are suitable only for this
+kind of local test, never for a public repository.
+
+After changing a recipe, run `ports2repo` and `ports/install.sh` again, then
+run `pkg sync --force`. This updates both the signed source list and the
+recipe used by the resolver. Then run `pkg build hello` again. Without those
+steps, Yakimo may still be testing the previous copy.
+
+If the build uses a library that you did not declare, the error names the
+missing dependency and may name its provider:
 
 ```
 FAILED: hello-1: scanner gate rejected build: .../hello: links against
@@ -657,14 +810,68 @@ any declared dep)
   hint: libz.so.1 — provided by installed package zlib (add it to [dependencies])
 ```
 
-Add the dependency, run `pkg build hello` again. `pkg build` forces a
-rebuild even when the version did not change — it is the recipe-author
-command. (Note: a rebuilt recipe replaces its store tree and re-syncs
-the installed symlinks immediately, so added or removed files show up
-in the live tree at once.)
+Add the provider to the correct dependency list, regenerate and sync the
+test repository, and build again. Also run `pkg install hello` and try the
+installed program: a successful compilation alone does not prove that the
+program works.
 
-When the recipe is ready, `ports/watch.sh` keeps its version current;
-`ports/README.md` covers turning a whole tree into a signed repo.
+`pkg build` forces a source build even when the version has not changed.
+For an already installed recipe, it also replaces its store tree and updates
+the active symlinks, so changed files appear immediately.
+
+### 11.5 Put a new package or update into a repository
+
+There are two different things called the repository here:
+
+1. The **recipe source tree**, such as the `ports/` directory in Git. This
+   is where people write and review recipes.
+2. The **generated package repository**, which contains signed indexes,
+   recipe manifests, and source files. This is what `pkg sync` downloads.
+
+Editing `/var/lib/pkg/recipes/` changes only your machine. It does not update
+either repository for other people.
+
+To contribute a package to the project's recipe tree:
+
+```sh
+git clone <project-git-url>
+cd <project-directory>
+git switch -c add-hello
+
+# Add and test ports/app-misc/hello/ as described above.
+git add ports/app-misc/hello
+git diff --cached
+git commit -m "ports: add hello 2.12"
+git push -u origin add-hello
+```
+
+If you do not have permission to push to the main project, push to your fork
+and open a pull request. Include the recipe files and `watch.toml` where
+possible. Do not commit downloaded tarballs, `/tmp` test roots, or generated
+repository output. Explain how you tested the package and mention any
+runtime steps or limitations.
+
+A repository maintainer then reviews and merges the change, generates a new
+repository with an increased `index_version`, signs it with the deployment's
+real keys, and publishes the generated files. The test keys produced by
+`ports2repo` must not become a public trust root. After publication, users
+receive the package with:
+
+```sh
+pkg sync
+pkg install hello
+```
+
+For a later upstream release, use `ports/watch.sh --apply` when the recipe
+has a suitable `watch.toml`. This updates exact versions and source hashes;
+it does not make clients follow an unreviewed "latest" pointer. The script
+checks the whole tree and may update more than one recipe, so review
+`git diff` and stage only the changes you intend to submit. Test each new
+version and submit its recipe change through the same review process.
+
+If you operate your own test repository, you can regenerate it directly.
+When deleting or renaming a package, use a new output directory or remove
+its stale generated recipe so the old copy is not published again.
 
 ---
 
@@ -673,28 +880,28 @@ When the recipe is ready, `ports/watch.sh` keeps its version current;
 | Code | Meaning |
 |---|---|
 | 0 | success |
-| 1 | resolution failure (`pkg explain <constraint>` for detail) |
-| 2 | build failure (progress is checkpointed — re-running resumes) |
-| 3 | gate refusal (security, supply-chain, glibc staging) |
-| 70 | anything else |
+| 1 | resolution failure (`pkg explain <constraint>` can show the conflict) |
+| 2 | build failure (completed build artifacts can be reused on retry) |
+| 3 | a security or verification check refused the operation |
+| 70 | another kind of error |
 
 Common messages:
 
 - **`unknown option in selection: 'x11'`** — no package in this
   transaction declares that option. Check spelling with
   `pkg options <name>`.
-- **`option conflict on ffmpeg.x11: ...`** — two per-command requests
-  disagree; pick one.
+- **`option conflict on ffmpeg.x11: ...`** — two command-line requests
+  disagree; choose one value.
 - **`options.toml: [package.foo] names undeclared option 'bar'`** —
-  the config drifted from the recipe. Fix or remove the entry. The
-  message names the file (including included files) it came from.
+  the configuration no longer matches the recipe. Fix or remove the entry.
+  The message names the file that contains it.
 - **`<pkg> requires glibc X, but Y is staged-pending`** — reboot to
   apply the pending glibc, or install an older package version.
-- **`no longer restorable`** on undo — the generation's store dirs were
-  released by `clean --garbage`. Use `pkg undo --rebuild-missing` to
-  rebuild them from source.
+- **`no longer restorable`** on undo — `pkg clean --garbage` removed stored
+  builds needed by that generation. Automatic rebuilding during undo is not
+  implemented yet.
 - **supply-chain gate** — read `pkg audit --supply-chain`; acknowledge
-  with `pkg audit --acknowledge <pkg>` only after you have looked.
+  with `pkg audit --acknowledge <pkg>` only after investigating it.
 
 ---
 
@@ -737,6 +944,7 @@ Inside the Debian container, from `/src`, the end-to-end scripts:
 sh e2e/run.sh           # smoke: signed repo, install, build gate
 sh e2e/lifecycle.sh     # remove/autoremove, upgrade, undo, mirrors
 sh e2e/options.sh       # build options, store GC, undo interplay
+sh e2e/dkms.sh          # kernel-triggered modules and nonfatal failure
 sh e2e/real-package.sh  # a real autotools package from the internet
 sh e2e/real-binary.sh   # a repackaged binary blob (needs network)
 sh e2e/ports.sh         # the whole ports tree from scratch — hours
@@ -755,7 +963,7 @@ each SHA-256:
 
 ```sh
 sh ports/fetch-distfiles.sh /tmp/dist
-ls /tmp/dist | wc -l        # expect 66
+ls /tmp/dist | wc -l        # count the currently pinned source files
 ```
 
 The script is idempotent (verified files are kept) and retries
@@ -785,12 +993,18 @@ Two things to note here:
 point the configuration at it, trust its root key, and sync:
 
 ```sh
-python3 -m http.server 8784 --directory /tmp/repo >/dev/null 2>&1 &
+python3 -m http.server 8784 --directory /tmp/repo >/tmp/pkg-http.log 2>&1 &
+sleep 1
+curl -fsS http://127.0.0.1:8784/index.json >/dev/null
 mkdir -p /etc/pkg
 printf 'mirrors = [\n  "http://127.0.0.1:8784",\n]\n' > /etc/pkg/mirrors.toml
 echo yes | pkg key trust-root /tmp/repo/root.json
 pkg sync
 ```
+
+Do not continue if the `curl` check fails: inspect `/tmp/pkg-http.log`
+and confirm that `root.json` and `index.json` exist. This catches a server
+startup race or a failed repository-generation step before `pkg sync`.
 
 Why sync matters: the resolver reads the local recipe checkout, but
 *building* fetches sources against the signed, cached recipe manifest —

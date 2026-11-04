@@ -71,10 +71,7 @@ fn overrides() -> &'static BTreeMap<String, String> {
         let value: toml::Value = match toml::from_str(&text) {
             Ok(v) => v,
             Err(e) => {
-                eprintln!(
-                    "pkg: warning: ignoring {}: {e}",
-                    config.display()
-                );
+                eprintln!("pkg: warning: ignoring {}: {e}", config.display());
                 return BTreeMap::new();
             }
         };

@@ -78,7 +78,6 @@
 //!   pkg-db for content hashing); add `sha2 = "0.10"` to Cargo.toml if
 //!   it is not already a dependency.
 
-
 use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
@@ -199,8 +198,7 @@ pub fn scan_store(
     // package set, Issue 2 §3) are legitimate residents: after an
     // upgrade or undo, superseded dirs stay until `pkg clean` releases
     // them. Not orphans — seed the known set with them.
-    let mut known_names: HashSet<String> =
-        crate::queries::generation_pinned_dir_names(conn, arch)?;
+    let mut known_names: HashSet<String> = crate::queries::generation_pinned_dir_names(conn, arch)?;
 
     // DB -> disk: every installed package (of this arch) should have a
     // directory.

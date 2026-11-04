@@ -1,0 +1,15 @@
+name = "nvidia-drivers"
+version = "595.112.07"
+category = "x11-drivers"
+
+[dependencies]
+link = ["glibc", "gcc", "linux"]
+runtime = ["glibc", "gcc", "linux", "kmod", "dkms"]
+build = ["gcc", "make", "binutils"]
+
+[build]
+binary = true
+
+[dkms]
+name = "nvidia"
+version = "595.112.07"

@@ -106,8 +106,7 @@ impl Version {
     pub fn same_release_core(&self, other: &Version) -> bool {
         let len = self.release.len().max(other.release.len());
         (0..len).all(|i| {
-            self.release.get(i).copied().unwrap_or(0)
-                == other.release.get(i).copied().unwrap_or(0)
+            self.release.get(i).copied().unwrap_or(0) == other.release.get(i).copied().unwrap_or(0)
         })
     }
 
@@ -183,9 +182,7 @@ impl FromStr for Version {
         // dotted-numeric part.
         let (release_part, patch) = match s.split_once("-r") {
             Some((release, rev)) => {
-                let rev: u32 = rev
-                    .parse()
-                    .map_err(|_| VersionParseError(s.to_string()))?;
+                let rev: u32 = rev.parse().map_err(|_| VersionParseError(s.to_string()))?;
                 (release, Some(rev))
             }
             None => (s, None),
@@ -345,7 +342,11 @@ pub struct ArchParseError(String);
 
 impl fmt::Display for ArchParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "invalid architecture (expected \"amd64\" or \"i686\"): {}", self.0)
+        write!(
+            f,
+            "invalid architecture (expected \"amd64\" or \"i686\"): {}",
+            self.0
+        )
     }
 }
 
@@ -397,7 +398,11 @@ pub struct TrackParseError(String);
 
 impl fmt::Display for TrackParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "invalid track (expected \"binary\" or \"source\"): {}", self.0)
+        write!(
+            f,
+            "invalid track (expected \"binary\" or \"source\"): {}",
+            self.0
+        )
     }
 }
 
@@ -975,7 +980,8 @@ mod tests {
     fn parse_canonical_rejects_malformed_strings() {
         assert!(PackageId::parse_canonical("no-abi-tag-here", Arch::Amd64).is_err());
         assert!(PackageId::parse_canonical("+ab1", Arch::Amd64).is_err()); // empty name
-        assert!(PackageId::parse_canonical("openssl+ab1", Arch::Amd64).is_err()); // no version
+        assert!(PackageId::parse_canonical("openssl+ab1", Arch::Amd64).is_err());
+        // no version
     }
 
     // -- v3: OptTag -------------------------------------------------------
@@ -1073,8 +1079,7 @@ mod tests {
     #[test]
     fn parse_store_dir_name_round_trips_without_opt() {
         let id = identity("openssl", "3.0.12", 1, OptTag::none());
-        let parsed =
-            Identity::parse_store_dir_name(&id.store_dir_name(), Arch::Amd64).unwrap();
+        let parsed = Identity::parse_store_dir_name(&id.store_dir_name(), Arch::Amd64).unwrap();
         assert_eq!(parsed, id);
         assert!(parsed.opt_tag.is_default());
     }
@@ -1082,17 +1087,20 @@ mod tests {
     #[test]
     fn parse_store_dir_name_round_trips_with_opt() {
         let id = identity("openssl", "3.0.12", 1, OptTag("3f9a1b2c".to_string()));
-        let parsed =
-            Identity::parse_store_dir_name(&id.store_dir_name(), Arch::Amd64).unwrap();
+        let parsed = Identity::parse_store_dir_name(&id.store_dir_name(), Arch::Amd64).unwrap();
         assert_eq!(parsed, id);
     }
 
     #[test]
     fn parse_store_dir_name_round_trips_with_hyphenated_name_and_patch() {
         // Both of parse_canonical's hyphen hazards plus the opt suffix.
-        let id = identity("ca-certificates", "2.39-r1", 2, OptTag("deadbeef".to_string()));
-        let parsed =
-            Identity::parse_store_dir_name(&id.store_dir_name(), Arch::Amd64).unwrap();
+        let id = identity(
+            "ca-certificates",
+            "2.39-r1",
+            2,
+            OptTag("deadbeef".to_string()),
+        );
+        let parsed = Identity::parse_store_dir_name(&id.store_dir_name(), Arch::Amd64).unwrap();
         assert_eq!(parsed, id);
     }
 
@@ -1144,7 +1152,6 @@ mod tests {
     }
 }
 
-
 // ---------------------------------------------------------------------
 // Serde (string-based) — added in v2.1
 // ---------------------------------------------------------------------
@@ -1156,13 +1163,19 @@ mod tests {
 // through the same parser the CLI uses.
 
 mod serde_impls {
-    use super::{AbiTag, AbiTagParseError, Arch, ArchParseError, OptTag, OptTagParseError, Track, TrackParseError, Version, VersionParseError};
+    use super::{
+        AbiTag, AbiTagParseError, Arch, ArchParseError, OptTag, OptTagParseError, Track,
+        TrackParseError, Version, VersionParseError,
+    };
     use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
     use std::fmt;
     use std::marker::PhantomData;
     use std::str::FromStr;
 
-    fn serialize_string<T: fmt::Display, S: Serializer>(value: &T, s: S) -> Result<S::Ok, S::Error> {
+    fn serialize_string<T: fmt::Display, S: Serializer>(
+        value: &T,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
         s.serialize_str(&value.to_string())
     }
 
@@ -1190,7 +1203,9 @@ mod serde_impls {
     }
 
     impl Serialize for Version {
-        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { serialize_string(self, s) }
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            serialize_string(self, s)
+        }
     }
     impl<'de> Deserialize<'de> for Version {
         fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -1199,7 +1214,9 @@ mod serde_impls {
     }
 
     impl Serialize for AbiTag {
-        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { serialize_string(self, s) }
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            serialize_string(self, s)
+        }
     }
     impl<'de> Deserialize<'de> for AbiTag {
         fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -1208,7 +1225,9 @@ mod serde_impls {
     }
 
     impl Serialize for Arch {
-        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { serialize_string(self, s) }
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            serialize_string(self, s)
+        }
     }
     impl<'de> Deserialize<'de> for Arch {
         fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -1217,7 +1236,9 @@ mod serde_impls {
     }
 
     impl Serialize for Track {
-        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { serialize_string(self, s) }
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            serialize_string(self, s)
+        }
     }
     impl<'de> Deserialize<'de> for Track {
         fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -1226,7 +1247,9 @@ mod serde_impls {
     }
 
     impl Serialize for OptTag {
-        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> { serialize_string(self, s) }
+        fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            serialize_string(self, s)
+        }
     }
     impl<'de> Deserialize<'de> for OptTag {
         fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {

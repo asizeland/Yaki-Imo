@@ -351,8 +351,8 @@ mod tests {
             .collect();
         let missing = undeclared_sonames(
             &needed,
-            &set(&["libssl.so.3"]),   // self-provided
-            &set(&["libc.so.6"]),     // dep-provided
+            &set(&["libssl.so.3"]), // self-provided
+            &set(&["libc.so.6"]),   // dep-provided
         );
         assert_eq!(missing, vec!["libmystery.so.1".to_string()]);
     }
@@ -404,7 +404,10 @@ mod tests {
             .arg("-shared")
             .arg("-fPIC")
             .arg(dir.path().join("fake.c"))
-            .arg(format!("-Wl,--version-script={}", dir.path().join("v.map").display()))
+            .arg(format!(
+                "-Wl,--version-script={}",
+                dir.path().join("v.map").display()
+            ))
             .arg("-Wl,-soname,libc.so.6")
             .arg("-o")
             .arg(dep_dir.join("libc.so.6"))
@@ -453,8 +456,7 @@ mod tests {
             name: "glibc".to_string(),
             store_dir: dep_dir,
         };
-        verify_build(&pkg_dir, &host, &[dep])
-            .expect("a declared packaged libc is the ceiling");
+        verify_build(&pkg_dir, &host, &[dep]).expect("a declared packaged libc is the ceiling");
     }
 
     #[test]
@@ -468,10 +470,7 @@ mod tests {
 
     #[test]
     fn walk_elf_files_finds_elf_by_content_not_name() {
-        let dir = std::env::temp_dir().join(format!(
-            "pkg-gate-test-{}-walk",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("pkg-gate-test-{}-walk", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("bin")).unwrap();
         // An ELF-magic file with a non-obvious name, and a non-ELF file

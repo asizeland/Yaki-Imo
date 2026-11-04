@@ -1,0 +1,8 @@
+name = "zstd"
+version = "1.5.7"
+category = "app-arch"
+
+[dependencies]
+link = ["glibc", "zlib", "xz"]
+runtime = ["glibc", "zlib", "xz"]
+build = ["gcc", "make"]

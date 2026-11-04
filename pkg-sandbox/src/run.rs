@@ -166,9 +166,7 @@ pub fn run_sandboxed_with_binds(
     env: &[(String, String)],
 ) -> PkgResult<SandboxOutcome> {
     if cmd.is_empty() {
-        return Err(PkgError::Build(
-            "run_sandboxed: empty command".to_string(),
-        ));
+        return Err(PkgError::Build("run_sandboxed: empty command".to_string()));
     }
     let pkgdir = env
         .iter()
@@ -255,9 +253,10 @@ pub fn run_sandboxed_with_binds(
 ///   scheduler never orphans a build holding RW scratch dirs.
 /// - `--unshare-net` (iff `!net`): empty network namespace. The core of
 ///   the v14 build hardening — "no runtime network, ever" for builds.
-/// - `--unshare-user --uid 65534 --gid 65534`: private user namespace,
-///   unprivileged identity (see [`SANDBOX_UID`] for the root-invocation
-///   caveat). bwrap sets `no_new_privs` unconditionally in the child —
+/// - `--unshare-user --uid <profile> --gid <profile>`: private user
+///   namespace; 65534 normally, 0 for DKMS's root check (see
+///   [`SANDBOX_UID`] for the root-invocation caveat). bwrap sets
+///   `no_new_privs` unconditionally in the child —
 ///   there is no flag for it and no way to turn it off — so setuid
 ///   binaries inside the sandbox are inert.
 /// - `--unshare-pid`: private PID namespace (build can't see/signal
@@ -316,9 +315,9 @@ fn build_argv_impl(
     }
     argv.push("--unshare-user".into());
     argv.push("--uid".into());
-    argv.push(SANDBOX_UID.to_string());
+    argv.push(data.uid.to_string());
     argv.push("--gid".into());
-    argv.push(SANDBOX_GID.to_string());
+    argv.push(data.uid.to_string());
     argv.push("--unshare-pid".into());
     argv.push("--unshare-ipc".into());
     argv.push("--unshare-uts".into());
@@ -373,7 +372,10 @@ fn build_argv_impl(
     }
     // PATH is load-bearing for any build; if neither the caller nor the
     // host provides one, give the sandbox a sane minimal default.
-    if !argv.windows(3).any(|w| w[0] == "--setenv" && w[1] == "PATH") {
+    if !argv
+        .windows(3)
+        .any(|w| w[0] == "--setenv" && w[1] == "PATH")
+    {
         argv.push("--setenv".into());
         argv.push("PATH".into());
         argv.push("/usr/bin:/bin".into());
@@ -472,10 +474,7 @@ mod tests {
             .collect();
         assert_eq!(
             rw,
-            vec![
-                "/var/lib/pkg/build/1",
-                "/var/lib/pkg/build/1/pkgdir"
-            ]
+            vec!["/var/lib/pkg/build/1", "/var/lib/pkg/build/1/pkgdir"]
         );
         let ro: Vec<&str> = argv
             .windows(3)
@@ -483,9 +482,12 @@ mod tests {
             .map(|w| w[1].as_str())
             .collect();
         assert!(ro.contains(&"/usr"));
-        // No /etc anywhere in a build sandbox (Issue 3.4: no /etc
-        // write; we go further and don't bind it at all).
-        assert!(!ro.iter().any(|p| p.starts_with("/etc")));
+        // The only permitted /etc bind is Debian's alternatives directory,
+        // needed to resolve toolchain symlinks. No other host config enters
+        // the build sandbox, and none of it is writable (Issue 3.4).
+        assert!(!ro
+            .iter()
+            .any(|p| p.starts_with("/etc") && *p != "/etc/alternatives"));
         assert!(!rw.iter().any(|p| p.starts_with("/etc")));
     }
 
@@ -503,22 +505,13 @@ mod tests {
                 PathBuf::from("/var/lib/pkg/store/libfoo-abc123"),
             ),
         ];
-        let argv = build_argv_impl(
-            &build_data(scratch, None),
-            &binds,
-            &cmd,
-            scratch,
-            &[],
-        );
+        let argv = build_argv_impl(&build_data(scratch, None), &binds, &cmd, scratch, &[]);
         let pairs: Vec<(&str, &str)> = argv
             .windows(3)
             .filter(|w| w[0] == "--ro-bind")
             .map(|w| (w[1].as_str(), w[2].as_str()))
             .collect();
-        assert!(pairs.contains(&(
-            "/var/lib/pkg/store/libfoo-abc123",
-            "/pkg/deps/libfoo"
-        )));
+        assert!(pairs.contains(&("/var/lib/pkg/store/libfoo-abc123", "/pkg/deps/libfoo")));
         assert!(pairs.contains(&(
             "/var/lib/pkg/store/libfoo-abc123",
             "/var/lib/pkg/store/libfoo-abc123"
@@ -549,7 +542,10 @@ mod tests {
         // caller nor host provides one (tested separately below).
         assert!(setenv.iter().any(|(k, _)| *k == "PATH"));
         let pkgdir_pos = setenv.iter().position(|(k, _)| *k == "PKGDIR").unwrap();
-        let opt_pos = setenv.iter().position(|(k, _)| *k == "PKG_OPT_SSL").unwrap();
+        let opt_pos = setenv
+            .iter()
+            .position(|(k, _)| *k == "PKG_OPT_SSL")
+            .unwrap();
         assert!(pkgdir_pos < opt_pos, "explicit pairs sorted by key");
     }
 
@@ -564,6 +560,7 @@ mod tests {
             bind_rw: vec![],
             net: false,
             env_allow: vec![],
+            uid: SANDBOX_UID,
         };
         let scratch = Path::new("/var/lib/pkg/build/1");
         let cmd = vec!["make".to_string()];

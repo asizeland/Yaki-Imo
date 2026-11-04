@@ -12,7 +12,7 @@
 > italics (*v12 Δ §n*, etc.) so any paragraph can be traced back to its source delta.
 >
 > v15 is the first revision written *against the running implementation*: its deltas record what the
-> 66-recipe reference ports tree and its end-to-end harness (`e2e/ports.sh`) settled in practice.
+> 76-recipe reference ports tree and its end-to-end harness (`e2e/ports.sh`) settled in practice.
 >
 > **Known gap.** v11 itself was a delta against v10, and v10 was not among the source files. Passages that v11
 > marked "(Unchanged from v10)" are therefore kept as placeholders with that wording. They are listed in
@@ -69,7 +69,7 @@ blocks installs *and* audits; ELF verification reframed as post-build verificati
 
 ### v15 changes (from v14) — the reference tree lands
 
-Written against the running implementation: the seed ports tree (66 recipes, glibc through
+Written against the running implementation: the seed ports tree (76 recipes, glibc through
 NetworkManager plus the self-hosting sys-devel toolchain) and its end-to-end proof
 (`e2e/ports.sh`) settled several points the earlier deltas left abstract.
 
@@ -84,6 +84,7 @@ NetworkManager plus the self-hosting sys-devel toolchain) and its end-to-end pro
 | 7 | Reference-tree init is sysvinit (proven as PID 1); init-system agnosticism unchanged | header, §13 |
 | 8 | Appendix-A rulings: A.4 (glibc `abi_tag` base case governs) and A.5 (exit 3 defined) | §7.7, §8, App. A |
 | 9 | Declared optimization profile `[build] opt_level` (default `o2`) — the bounded exception to the no-arbitrary-`CFLAGS` rule, hashed into every non-glibc `abi_tag` | §4.3, §7.1, §7.9.1 |
+| 10 | DKMS runtime integration: installed-recipe sidecars, every-kernel driver builds, new-kernel triggers, Kernel-Module sandbox, persistent logs, nonfatal failure; exact per-kernel resolver edges, signing, and removal/undo cleanup remain deferred | §4.2, §7.8 |
 
 ---
 
@@ -150,7 +151,7 @@ decision. See §7.9.6.
 **Pinned `[source]` entries (v14).** cargo/npm/go inputs are declared as additional pinned `[source]`
 entries; recipes that cannot express fetches as pinned sources are rejected at lint. See §7.1.
 
-**`[dkms]` table — DEFERRED post-v1 (v12 Δ §5).** Retained as the design of record for when DKMS lands:
+**`[dkms]` table — IMPLEMENTED for runtime module management (v15).** The canonical metadata form is:
 
 ```toml
 # Optional: marks this package as providing a DKMS-managed kernel module.
@@ -168,19 +169,19 @@ name = "nvidia"       # name DKMS registers the module under
 version = "550.78"
 ```
 
-**Canonical manifest form, when implemented: presence of a `[dkms]` table — never flat keys, never a boolean.**
+**Canonical manifest form: presence of a `[dkms]` table — never flat keys, never a boolean.**
 
 ### 4.2 Field Semantics
 
 (Existing entries for `category`, `multilib`, and OR-Groups unchanged from v10.)
 
-**`[dkms]` table — DEFERRED post-v1.**
+**`[dkms]` table — runtime integration implemented; resolver edges deferred.**
 Its presence marks this package as providing a DKMS-managed out-of-tree kernel module. Both `name` and
 `version` are required sub-fields when the table appears at all — TOML's own missing-field checking rejects a
-`[dkms]` table lacking either, rather than the package manager validating that combination itself after
-parsing. When implemented, the resolver adds an implicit dependency on `linux-headers` matched to *every
-currently installed kernel* (not just the running one), and the package manager triggers DKMS rebuilds at
-defined points rather than leaving this to the recipe. See §7.8.
+`[dkms]` table lacking either. The package manager reads the installed store's recipe sidecar and triggers
+DKMS rebuilds at defined points rather than leaving this to the recipe. Exact implicit `linux-headers` edges
+for every installed kernel remain deferred (§7.8.1); recipes declare their concrete toolchain/kernel deps.
+See §7.8.
 
 **`[options]` table.** See §4.3.
 
@@ -558,13 +559,14 @@ the cascade**.
 **Static linking:** consumed `.a` members contribute a content hash of their symbol tables, so a security fix
 still cascades to static consumers while cosmetic rebuilds prune as above.
 
-### 7.8 Out-of-Tree Kernel Modules (DKMS Integration) — DEFERRED post-v1 *(v11; deferred by v12 Δ §5)*
+### 7.8 Out-of-Tree Kernel Modules (DKMS Integration) — RUNTIME IMPLEMENTED; RESOLUTION/LIFECYCLE FOLLOW-UPS
 
-All DKMS integration (§4.2's `[dkms]` semantics, §7.8.1–7.8.4, §19 Phase 7) is **deferred to post-v1**. The v11
-text below remains the design of record for when it lands, with the corrections noted.
+The `[dkms]` manifest, post-activation triggers, a dedicated sandbox, persistent logs, and nonfatal failure are
+implemented at v15. Exact per-kernel resolver edges (§7.8.1), module signing, and removal/undo cleanup remain
+deferred. Installed recipe manifests are retained as hidden, hash-covered store sidecars so a later sync cannot
+change the module identity of an already-installed package.
 
-§20 (Explicit Non-Goals) defers kernel module *building* to DKMS — that remains true. What v10 left
-unspecified is everything around it: dependency tracking, sandboxing, and rebuild triggering. Nvidia's
+§20 (Explicit Non-Goals) defers kernel module *building* to DKMS — that remains true. Nvidia's
 proprietary driver is the concrete case (used as a live example in §5.4's `gaming-stable` profile), and it needs
 a compiler and kernel headers at rebuild time, which fits neither existing sandbox:
 
@@ -576,24 +578,23 @@ a compiler and kernel headers at rebuild time, which fits neither existing sandb
 
 #### 7.8.1 Dependency Tracking
 
-**A package with a `[dkms]` table** (§4.1, §4.2) implicitly depends on `linux-headers` matched to **every
-currently installed kernel**, not just the running one — a system may have multiple kernels installed for
-rescue-boot purposes. The resolver tracks this as a per-kernel dependency edge: `nvidia-driver` →
-`linux-headers(=<kernel-version>)` for each installed `virtual/kernel` provider.
+**DEFERRED:** the target design is an implicit `linux-headers(=<kernel-version>)` edge for every installed
+`virtual/kernel` provider. The current runtime discovers usable `/usr/lib/modules/<release>/build` trees and
+relies on explicit recipe dependencies instead. This supports multiple installed kernel trees, but it is not a
+per-kernel resolver guarantee.
 
-*Known follow-ups, recorded so they are not rediscovered mid-implementation (v12 Δ §5):* depmod scope;
-ownership of `/var/lib/dkms` state; module signing; and the **per-kernel edge schema**, which needs a "module
-built for kernel" table plus kernel-transaction ordering rules (a `Dependency::Package` + `Exact` edge per
-installed kernel, as above, does not by itself express "already built for this kernel").
+The per-kernel edge schema still needs a "module built for kernel" record and kernel-transaction ordering rules.
+`/var/lib/dkms` is writable DKMS-owned state. `depmod` runs with `-b <target>/usr` after `--no-depmod` installation
+so a scratch-root build cannot update the host's module metadata.
 
 #### 7.8.2 Trigger Points
 
 The package manager — not the recipe — triggers DKMS rebuilds, at two points:
 
 1. **Installing or upgrading a package with a `[dkms]` table.** Build against every currently installed kernel.
-2. **Installing a new `virtual/kernel` provider** (§13.6). After initramfs regeneration for that kernel
-   completes, the PM iterates every installed package with a `[dkms]` table and triggers a rebuild against the
-   new kernel.
+2. **Installing a new `virtual/kernel` provider** (§13.6). After the build plan's activated set is committed,
+   the PM iterates every installed package with a `[dkms]` table and builds against each newly appeared usable
+   kernel tree. Initramfs generation is not implemented yet; when it lands, it must precede this phase.
 
 #### 7.8.3 Kernel-Module Sandbox Profile
 
@@ -601,7 +602,7 @@ A new profile is added to §7.2.1's sandbox table:
 
 | Profile | Categories | Hook Permissions |
 |---|---|---|
-| **Kernel-Module** | packages with a `[dkms]` table | Read-write `/lib/modules/<kernel-version>/extra/`. Read-only access to the resolved `linux-headers` tree and standard build toolchain (`gcc`, `make`). No network. No `/etc` write. No service-management binaries (same restriction as all other hook profiles). |
+| **Kernel-Module** | packages with a `[dkms]` table | No network; UID 0 inside the user namespace for DKMS's root check. Read-only host toolchain plus target `/usr`; read-write scratch, `/var/lib/dkms`, and the target `/usr/lib/modules/<kernel-release>/` (the whole directory because depmod updates its metadata). Only a generated `/etc/os-release` is bound; no general `/etc` access. Selected service-binary denial remains a follow-up: binding the toolchain also exposes other host executables. |
 
 #### 7.8.4 Failure Handling
 
@@ -611,10 +612,11 @@ kernel install itself remains committed:
 
 ```
 warning: DKMS rebuild failed for nvidia-driver against kernel 6.9.2.
-         Kernel 6.9.2 is installed and initramfs is up to date, but the
-         nvidia kernel module could not be built. GPU acceleration may be
-         unavailable on this kernel. See /var/log/pkg/dkms-nvidia-6.9.2.log.
+         Kernel 6.9.2 is installed, but the nvidia kernel module could not
+         be built. GPU acceleration may be unavailable on this kernel.
+         See /var/log/pkg/dkms-nvidia-driver-6.9.2.log.
          Your previous kernel (6.8.9) retains a working module, if still installed.
+         Forced builds replace an installed module only after compilation succeeds.
 ```
 
 This mirrors §3.7's security-patch pattern: the core system operation (kernel install) succeeds and is
@@ -1197,8 +1199,8 @@ it as PID 1 in a user namespace and verifies the inittab sysinit action runs. Th
 
 ### 13.6 Initramfs Regeneration
 
-(Unchanged in mechanism from v10; ordering relationship with §7.8: DKMS rebuilds — deferred post-v1 — are
-triggered *after* initramfs regeneration completes for a newly installed kernel, not before.)
+(Unchanged in mechanism from v10; initramfs generation is not implemented in the reference tree. Ordering with
+§7.8 is fixed for when it lands: DKMS rebuilds run *after* initramfs regeneration for a new kernel, not before.)
 
 **Second regeneration trigger** *(v13 Δ §3)*: in addition to kernel updates, the initramfs is regenerated by a
 post-install hook on the `pkg` package itself whenever `pkg` (and thus potentially `glibc-apply`) is updated
@@ -1295,8 +1297,8 @@ sync      → fetch and verify signed index against trust chain (§10.5, §10.6)
                 full transaction set staged; /etc analysis recorded; glibc staged for atomic exchange
   → install   → atomic core: symlink swaps + /etc updates + DB commit (last; includes generation
                 record, §14.1) [lock released]
-                best-effort: post_install hooks, initramfs regeneration (§13.6) — reported
-                separately. (DKMS rebuilds, §7.8, joins this stage when implemented.)
+                best-effort: post_install hooks, initramfs regeneration (§13.6), then DKMS
+                rebuilds (§7.8) — reported separately; DKMS failure never rolls back the commit.
 ```
 
 `sync` is shown as an explicit first stage, though as noted in §10.6, most commands operate against the cached
@@ -1608,7 +1610,7 @@ degrade into.
 | **4. Trust & advisory infrastructure** | Bubblewrap sandboxing, root/repository/timestamp key roles (§10.5), recipe manifest verification (§10.5.5), `pkg sync` (§10.6) | Signatures verified against full trust chain |
 | **5. Heuristic Scanning** | dlopen string-grep, plugin-config parsing, `pkg check` polish, `pkg isolate` | `pkg check /opt/steam/steam` produces useful hints |
 | **6. ISA & Ecosystem** | `glibc-hwcaps`, multi-versioned packages, package creation tooling, repo server + curated profiles, recipe lint CI, `pkg audit` | Security advisories queryable; AVX2 packages run on v2 CPUs |
-| **7. Hardware Enablement — DEFERRED post-v1** | DKMS integration (§7.8), Kernel-Module sandbox profile, per-kernel `linux-headers` tracking | `nvidia-driver` rebuilds automatically across a kernel upgrade |
+| **7. Hardware Enablement — RUNTIME IMPLEMENTED; RESOLUTION DEFERRED** | DKMS integration and Kernel-Module sandbox (§7.8); per-kernel `linux-headers` tracking remains deferred | `nvidia-driver` rebuilds automatically across a kernel upgrade |
 
 *Removed from earlier phases (v12 Δ §1):* the binary repo, binary-repo format, Tier 1 reproducible-build gate
 (Phase 4), and the version-retention policy and Tier 2 reporting (Phase 6). The trust chain and `pkg sync`
@@ -1636,7 +1638,7 @@ cascades) and the v13 glibc hardening were specified without roadmap placement. 
   with no build-stage network (§7.1), the two-attestation critical-set rule and local double-build (§10.5.6)
 - **No custom out-of-tree module build system.** DKMS remains the actual compiler/build orchestration tool for
   kernel modules; the package manager's role is triggering, sandboxing, and dependency tracking around DKMS
-  invocations (§7.8, deferred post-v1), not reimplementing DKMS
+  invocations (§7.8), not reimplementing DKMS
 - No runtime package manager dependency on the host's glibc
 - No jail/container functionality in the package manager (see §16.1, `pkg isolate` is a library-path
   namespace, not a jail; `pkg env` is PATH-priority, not a container, §16.7)
@@ -1681,7 +1683,7 @@ cascades) and the v13 glibc hardening were specified without roadmap placement. 
 | `pkg remove` refuses by default; `installed_explicitly` tracks true origin; migration seeds explicit *(v12)* | Matches established behavior in comparable tools. A false negative leaves disk usage; a false positive removes the system. |
 | Autoremove keeps the `alternatives.toml`-preferred provider *(v12)* | Stricter pins obsolete providers forever; looser could remove what the user just asked for. |
 | `abi-track` pin mode, opt-in; never downgrades; single `--mode` flag syntax *(v11, v12)* | Generalizes the glibc security-vs-major split to any package. Defaulting to it would silently change what a pin means. |
-| DKMS deferred post-v1; canonical `[dkms]` table form *(v11, v12)* | Design of record retained; follow-ups (depmod scope, `/var/lib/dkms` ownership, module signing, per-kernel edge schema) recorded to avoid rediscovery. |
+| Canonical `[dkms]` table; runtime triggers landed at v15 *(v11, v12, v15)* | DKMS remains the builder; Yakimo owns post-commit triggers, sandboxing, target-scoped depmod, and logs. Module signing, exact per-kernel edges, and removal/undo cleanup remain follow-ups. |
 | ELF floor/ceiling check is post-build verification, not an install gate *(v12)* | Under source-only, floor ≤ ceiling holds by construction; the real failure is a recipe escaping its sandbox. |
 | **Frozen `glibc-apply` interface; unknown protocol → no-op boot** *(v13)* | The initramfs copy ages independently of the PM. Minimal interface degrades to "refuses to act," never "acts wrongly." |
 | **Drift check is advisory, not blocking; regeneration hook uses existing §7.2 machinery** *(v13)* | Blocking boot on a hashing disagreement is worse than the drift it detects; no new mechanism introduced. |

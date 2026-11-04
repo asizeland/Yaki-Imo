@@ -201,7 +201,11 @@ impl std::fmt::Display for AttestationError {
             } => write!(
                 f,
                 "insufficient attestations ({have} of {need} required{}): {detail}",
-                if *critical { " for critical-set package" } else { "" }
+                if *critical {
+                    " for critical-set package"
+                } else {
+                    ""
+                }
             ),
         }
     }
@@ -235,10 +239,7 @@ impl From<AttestationError> for PkgError {
 /// Client-side this is a spot-check (cheap, fail-loud); the *enforcement
 /// point* is index-signing time, where the repository role refuses to
 /// sign an index containing an under-attested critical entry (v14 §4).
-pub fn verify_attestations(
-    entry: &RecipeManifestEntry,
-    trust: &TrustStore,
-) -> PkgResult<usize> {
+pub fn verify_attestations(entry: &RecipeManifestEntry, trust: &TrustStore) -> PkgResult<usize> {
     for field in [&entry.name, &entry.version, &entry.recipe_commit] {
         if field.contains('\n') {
             return Err(AttestationError::Malformed(
@@ -343,14 +344,20 @@ mod tests {
             created_at: 0,
             expires_at: u64::MAX,
             root: RoleDelegation::single(&root_key.verifying_key()),
-            repository: RoleDelegation { threshold: 1, keys: BTreeMap::new() },
-            timestamp: RoleDelegation { threshold: 1, keys: BTreeMap::new() },
-            reviewer: RoleDelegation { threshold: 1, keys: reviewers },
+            repository: RoleDelegation {
+                threshold: 1,
+                keys: BTreeMap::new(),
+            },
+            timestamp: RoleDelegation {
+                threshold: 1,
+                keys: BTreeMap::new(),
+            },
+            reviewer: RoleDelegation {
+                threshold: 1,
+                keys: reviewers,
+            },
         };
-        TrustStore::in_memory(
-            root,
-            RoleDelegation::single(&test_key(99).verifying_key()),
-        )
+        TrustStore::in_memory(root, RoleDelegation::single(&test_key(99).verifying_key()))
     }
 
     fn attest(entry: &RecipeManifestEntry, key: &SigningKey) -> Attestation {
@@ -368,7 +375,9 @@ mod tests {
             recipe_commit: "a1b2c3".into(),
             committer_fingerprint: committer,
             sources: vec![Source {
-                url: "https://github.com/tukaani-project/xz/releases/download/v5.6.1/xz-5.6.1.tar.xz".into(),
+                url:
+                    "https://github.com/tukaani-project/xz/releases/download/v5.6.1/xz-5.6.1.tar.xz"
+                        .into(),
                 sha256: "deadbeef".into(),
             }],
             attestations: vec![],
@@ -412,15 +421,17 @@ sig = "11"
         let committer = test_key(1);
         let rev1 = test_key(2);
         let rev2 = test_key(3);
-        let store =
-            store_with_reviewers(&[&committer, &rev1, &rev2]);
+        let store = store_with_reviewers(&[&committer, &rev1, &rev2]);
         let committer_fp = key_fingerprint(&committer.verifying_key());
 
         // committer + one reviewer: NOT enough for critical.
         let mut e = xz_entry(true, Some(committer_fp.clone()));
         e.attestations = vec![attest(&e, &committer), attest(&e, &rev1)];
         let err = verify_attestations(&e, &store).unwrap_err();
-        assert!(err.to_string().contains("insufficient attestations"), "{err}");
+        assert!(
+            err.to_string().contains("insufficient attestations"),
+            "{err}"
+        );
 
         // committer + two reviewers: accepted; counts all three.
         e.attestations = vec![attest(&e, &committer), attest(&e, &rev1), attest(&e, &rev2)];
@@ -468,7 +479,10 @@ sig = "11"
         bad.sig = hex_encode(&[0xEE; 64]); // right key id, forged bytes
         e.attestations = vec![bad, attest(&e, &rev2)];
         let err = verify_attestations(&e, &store).unwrap_err();
-        assert!(err.to_string().contains("invalid attestation signature"), "{err}");
+        assert!(
+            err.to_string().contains("invalid attestation signature"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -485,7 +499,10 @@ sig = "11"
     #[test]
     fn message_is_source_order_independent() {
         let mut a = xz_entry(false, None);
-        a.sources.push(Source { url: "https://b.example/b.tar".into(), sha256: "22".into() });
+        a.sources.push(Source {
+            url: "https://b.example/b.tar".into(),
+            sha256: "22".into(),
+        });
         let mut b = a.clone();
         b.sources.reverse();
         assert_eq!(attestation_message(&a), attestation_message(&b));

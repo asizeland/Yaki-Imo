@@ -84,9 +84,8 @@ fn default_memory_high() -> Option<u64> {
 /// Parses `MemTotal` (reported in KiB) out of `/proc/meminfo`.
 fn meminfo_mem_total_bytes() -> PkgResult<u64> {
     let text = fs::read_to_string("/proc/meminfo")?;
-    parse_mem_total(&text).ok_or_else(|| {
-        pkg_core::PkgError::Parse("/proc/meminfo: no MemTotal line".to_string())
-    })
+    parse_mem_total(&text)
+        .ok_or_else(|| pkg_core::PkgError::Parse("/proc/meminfo: no MemTotal line".to_string()))
 }
 
 /// Pure parser for the `MemTotal:   32768 kB` line — the unit the tests
@@ -149,8 +148,18 @@ pub fn apply_cgroup(path: &Path, limits: &CgroupLimits) -> Vec<CgroupWarning> {
         });
     }
 
-    write_control(path, "cpu.weight", &limits.cpu_weight.to_string(), &mut warnings);
-    write_control(path, "io.weight", &limits.io_weight.to_string(), &mut warnings);
+    write_control(
+        path,
+        "cpu.weight",
+        &limits.cpu_weight.to_string(),
+        &mut warnings,
+    );
+    write_control(
+        path,
+        "io.weight",
+        &limits.io_weight.to_string(),
+        &mut warnings,
+    );
 
     match limits.cpu_max_active_session {
         Some(pct) if session_active() => {
@@ -179,12 +188,7 @@ pub fn apply_cgroup(path: &Path, limits: &CgroupLimits) -> Vec<CgroupWarning> {
 }
 
 /// Writes one cgroup control file, recording a warning on failure.
-fn write_control(
-    dir: &Path,
-    name: &str,
-    value: &str,
-    warnings: &mut Vec<CgroupWarning>,
-) {
+fn write_control(dir: &Path, name: &str, value: &str, warnings: &mut Vec<CgroupWarning>) {
     let file = dir.join(name);
     if let Err(e) = fs::write(&file, value) {
         warnings.push(CgroupWarning {
@@ -302,11 +306,8 @@ mod tests {
     /// "pkg-core only" (SPEC), with no dev-dependencies listed, so
     /// tests make do with std.
     fn scratch_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "pkg-sandbox-test-{}-{}",
-            std::process::id(),
-            tag
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("pkg-sandbox-test-{}-{}", std::process::id(), tag));
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -326,7 +327,10 @@ mod tests {
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         assert_eq!(fs::read_to_string(dir.join("cpu.weight")).unwrap(), "50");
         assert_eq!(fs::read_to_string(dir.join("io.weight")).unwrap(), "50");
-        assert_eq!(fs::read_to_string(dir.join("memory.high")).unwrap(), "12345");
+        assert_eq!(
+            fs::read_to_string(dir.join("memory.high")).unwrap(),
+            "12345"
+        );
         // cpu.max untouched when the ceiling is disabled.
         assert!(!dir.join("cpu.max").exists());
         let _ = fs::remove_dir_all(&dir);

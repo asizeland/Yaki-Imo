@@ -63,7 +63,10 @@ fn delegation_of(keys: &[&SigningKey], threshold: u32) -> RoleDelegation {
         let vk = k.verifying_key();
         map.insert(key_fingerprint(&vk), hex_encode(vk.as_bytes()));
     }
-    RoleDelegation { threshold, keys: map }
+    RoleDelegation {
+        threshold,
+        keys: map,
+    }
 }
 
 fn sign_doc(payload: serde_json::Value, signers: &[&SigningKey]) -> Vec<u8> {
@@ -78,12 +81,22 @@ fn sign_doc(payload: serde_json::Value, signers: &[&SigningKey]) -> Vec<u8> {
             }
         })
         .collect();
-    serde_json::to_vec(&SignedDocument { signed: payload, signatures }).unwrap()
+    serde_json::to_vec(&SignedDocument {
+        signed: payload,
+        signatures,
+    })
+    .unwrap()
 }
 
 /// The recipe files that make up a package's identity, in fixed order.
-const RECIPE_FILES: [&str; 6] =
-    ["pkg-meta.toml", "source.toml", "prepare", "build", "check", "install"];
+const RECIPE_FILES: [&str; 6] = [
+    "pkg-meta.toml",
+    "source.toml",
+    "prepare",
+    "build",
+    "check",
+    "install",
+];
 
 /// Content-derived recipe commit: first 12 hex of the SHA-256 over the
 /// sorted (name, bytes) pairs of the recipe files present.
@@ -185,7 +198,10 @@ fn main() {
                 .unwrap_or_else(|| pin.url.rsplit('/').next().unwrap().to_string());
             let dist = distfiles.join(&file_name);
             let bytes = std::fs::read(&dist).unwrap_or_else(|e| {
-                panic!("{}: distfile {file_name}: {e} (run ports/fetch-distfiles.sh)", dir.display())
+                panic!(
+                    "{}: distfile {file_name}: {e} (run ports/fetch-distfiles.sh)",
+                    dir.display()
+                )
             });
             let got = sha256_hex(&bytes);
             if got != pin.sha256 {
@@ -242,7 +258,10 @@ fn main() {
 
     std::fs::write(
         repo_dir.join("recipe-manifest.toml"),
-        toml::to_string(&RecipeManifest { packages: manifest_entries }).unwrap(),
+        toml::to_string(&RecipeManifest {
+            packages: manifest_entries,
+        })
+        .unwrap(),
     )
     .unwrap();
 
@@ -270,7 +289,10 @@ fn main() {
 
     std::fs::write(
         repo_dir.join("security.json"),
-        sign_doc(serde_json::json!({"format_version": 1, "advisories": []}), &[&repo_key]),
+        sign_doc(
+            serde_json::json!({"format_version": 1, "advisories": []}),
+            &[&repo_key],
+        ),
     )
     .unwrap();
 
@@ -288,7 +310,10 @@ fn main() {
     };
     std::fs::write(
         repo_dir.join("root.json"),
-        sign_doc(serde_json::to_value(&root).unwrap(), &[&root_keys[0], &root_keys[1]]),
+        sign_doc(
+            serde_json::to_value(&root).unwrap(),
+            &[&root_keys[0], &root_keys[1]],
+        ),
     )
     .unwrap();
 

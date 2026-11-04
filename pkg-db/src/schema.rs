@@ -1049,7 +1049,10 @@ mod tests {
              VALUES ('ffmpeg', '7.0', 'ab1', 'a1b2c3d4', 'amd64', 'source', 2)",
             [],
         );
-        assert!(dup.is_err(), "duplicate (name, version, abi_tag, opt_tag, arch) must be rejected");
+        assert!(
+            dup.is_err(),
+            "duplicate (name, version, abi_tag, opt_tag, arch) must be rejected"
+        );
     }
 
     #[test]
@@ -1077,7 +1080,10 @@ mod tests {
              VALUES (1, 2, 'dev')",
             [],
         );
-        assert!(rejected.is_err(), "kind 'dev' must be rejected by the CHECK");
+        assert!(
+            rejected.is_err(),
+            "kind 'dev' must be rejected by the CHECK"
+        );
     }
 
     #[test]
@@ -1099,7 +1105,10 @@ mod tests {
              VALUES (0, 'pkg test', 'rollback', ?1)",
             [SCHEMA_VERSION],
         );
-        assert!(rejected.is_err(), "kind 'rollback' must be rejected by the CHECK");
+        assert!(
+            rejected.is_err(),
+            "kind 'rollback' must be rejected by the CHECK"
+        );
     }
 
     #[test]
@@ -1211,9 +1220,11 @@ mod tests {
 
         // Data survived the rebuild; opt_tag backfilled to ''.
         let (name, opt_tag): (String, String) = conn
-            .query_row("SELECT name, opt_tag FROM packages WHERE id = 1", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
+            .query_row(
+                "SELECT name, opt_tag FROM packages WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .unwrap();
         assert_eq!((name.as_str(), opt_tag.as_str()), ("curl", ""));
 
@@ -1242,7 +1253,14 @@ mod tests {
         .expect("opt_tag must widen the UNIQUE key after migration");
 
         // New v4 tables exist.
-        for table in ["package_options", "generations", "generation_packages", "provenance", "build_history", "link_interface"] {
+        for table in [
+            "package_options",
+            "generations",
+            "generation_packages",
+            "provenance",
+            "build_history",
+            "link_interface",
+        ] {
             let count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -1305,7 +1323,11 @@ mod tests {
 
     #[test]
     fn dependency_kind_display_fromstr_round_trip() {
-        for kind in [DependencyKind::Link, DependencyKind::Runtime, DependencyKind::Build] {
+        for kind in [
+            DependencyKind::Link,
+            DependencyKind::Runtime,
+            DependencyKind::Build,
+        ] {
             let parsed: DependencyKind = kind.to_string().parse().unwrap();
             assert_eq!(parsed, kind);
         }
@@ -1356,9 +1378,11 @@ mod tests {
         )
         .unwrap();
         let peak: Option<i64> = conn
-            .query_row("SELECT peak_rss FROM build_history WHERE name = 'a'", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT peak_rss FROM build_history WHERE name = 'a'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(peak, None);
     }
@@ -1390,10 +1414,13 @@ mod tests {
         )
         .unwrap();
 
-        conn.execute("DELETE FROM packages WHERE id = 1", []).unwrap();
+        conn.execute("DELETE FROM packages WHERE id = 1", [])
+            .unwrap();
         for table in ["provenance", "link_interface"] {
             let n: i64 = conn
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
                 .unwrap();
             assert_eq!(n, 0, "{table} rows must cascade-delete with the package");
         }

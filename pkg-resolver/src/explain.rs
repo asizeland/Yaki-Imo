@@ -141,7 +141,14 @@ pub fn explain_why_installed(
     let mut chains = Vec::new();
     let mut path = vec![target.to_string()];
     let mut visited = HashSet::new();
-    walk(target, reverse_deps, is_explicit, &mut path, &mut chains, &mut visited);
+    walk(
+        target,
+        reverse_deps,
+        is_explicit,
+        &mut path,
+        &mut chains,
+        &mut visited,
+    );
     chains
 }
 
@@ -278,7 +285,9 @@ mod tests {
             &HashMap::new(),
         )
         .expect_err("this catalog is genuinely unsatisfiable");
-        let tree = error.derivation_tree().expect("a NoSolution carries its tree");
+        let tree = error
+            .derivation_tree()
+            .expect("a NoSolution carries its tree");
 
         let PkgError::Resolution(explanation) = explain_from_tree(tree) else {
             panic!("explain_from_tree should produce PkgError::Resolution");
@@ -300,7 +309,10 @@ mod tests {
         let mut catalog = Catalog::new();
         catalog.add_package_version("root", v("1.0.0"), []);
 
-        assert_eq!(explain_resolution_failure(&catalog, "root", v("1.0.0")).map(|e| e.to_string()), None);
+        assert_eq!(
+            explain_resolution_failure(&catalog, "root", v("1.0.0")).map(|e| e.to_string()),
+            None
+        );
     }
 
     // --- why-installed chain walking ---
@@ -313,7 +325,10 @@ mod tests {
         is_explicit.insert("curl".to_string(), true);
 
         let chains = explain_why_installed("openssl", &reverse_deps, &is_explicit);
-        assert_eq!(chains, vec![vec!["openssl".to_string(), "curl".to_string()]]);
+        assert_eq!(
+            chains,
+            vec![vec!["openssl".to_string(), "curl".to_string()]]
+        );
     }
 
     #[test]
@@ -386,7 +401,10 @@ mod tests {
         let is_explicit = HashMap::new();
 
         let chains = explain_why_installed("a", &reverse_deps, &is_explicit);
-        assert!(!chains.is_empty(), "should still produce something, not hang");
+        assert!(
+            !chains.is_empty(),
+            "should still produce something, not hang"
+        );
     }
 
     #[test]

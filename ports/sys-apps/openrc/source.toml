@@ -1,0 +1,4 @@
+[[source]]
+url = "https://github.com/OpenRC/openrc/archive/refs/tags/0.64.1.tar.gz"
+filename = "openrc-0.64.1.tar.gz"
+sha256 = "56d6d24c7fd2ca15d1abd1fb82ce5430629a71acb2c3fa12760300243dbd0baa"

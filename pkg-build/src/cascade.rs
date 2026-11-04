@@ -237,25 +237,19 @@ impl CascadePlan {
 ///
 /// `bumped` entries whose `cascades()` is false contribute only their
 /// own node (they are still rebuilt/updated; they just don't cascade).
-pub fn compute_rebuild_set(
-    conn: &Connection,
-    bumped: &[BumpedPackage],
-) -> PkgResult<CascadePlan> {
+pub fn compute_rebuild_set(conn: &Connection, bumped: &[BumpedPackage]) -> PkgResult<CascadePlan> {
     let mut plan = CascadePlan::default();
     let installed = queries::list_installed_packages(conn)?;
-    let id_of: BTreeMap<&str, i64> = installed
-        .iter()
-        .map(|p| (p.name.as_str(), p.id))
-        .collect();
+    let id_of: BTreeMap<&str, i64> = installed.iter().map(|p| (p.name.as_str(), p.id)).collect();
 
     let mut queue: VecDeque<(String, RebuildReason)> = VecDeque::new();
     for bump in bumped {
-        let reason = if bump.name == "glibc" && !bump.old_version.same_release_core(&bump.new_version)
-        {
-            RebuildReason::GlibcMajorBump
-        } else {
-            RebuildReason::Root
-        };
+        let reason =
+            if bump.name == "glibc" && !bump.old_version.same_release_core(&bump.new_version) {
+                RebuildReason::GlibcMajorBump
+            } else {
+                RebuildReason::Root
+            };
         plan.nodes.insert(
             bump.name.clone(),
             CascadeNode {
@@ -333,7 +327,11 @@ pub fn compute_rebuild_set(
 ///
 /// Pure over the plan plus the comparison result; the caller supplies
 /// `interface_changed` from a fresh `link_interface_hash` measurement.
-pub fn prune_after_build(plan: &mut CascadePlan, name: &str, interface_changed: bool) -> Vec<String> {
+pub fn prune_after_build(
+    plan: &mut CascadePlan,
+    name: &str,
+    interface_changed: bool,
+) -> Vec<String> {
     if interface_changed || !plan.nodes.contains_key(name) {
         return Vec::new();
     }
@@ -442,11 +440,14 @@ mod tests {
             node("python", &["curl", "git"]),
         ]);
         let levels = plan.levels().unwrap();
-        assert_eq!(levels, vec![
-            vec!["openssl".to_string()],
-            vec!["curl".to_string(), "git".to_string()],
-            vec!["python".to_string()],
-        ]);
+        assert_eq!(
+            levels,
+            vec![
+                vec!["openssl".to_string()],
+                vec!["curl".to_string(), "git".to_string()],
+                vec!["python".to_string()],
+            ]
+        );
     }
 
     #[test]

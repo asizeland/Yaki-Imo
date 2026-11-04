@@ -429,6 +429,8 @@ mod tests {
         let (protocol, target) = read_pending_flag(&flag).unwrap().unwrap();
         assert_eq!(protocol, 1);
         assert_eq!(target, "2.40");
-        assert!(read_pending_flag(&tmp.path().join("nonexistent")).unwrap().is_none());
+        assert!(read_pending_flag(&tmp.path().join("nonexistent"))
+            .unwrap()
+            .is_none());
     }
 }

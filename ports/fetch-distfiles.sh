@@ -27,7 +27,7 @@ find "$PORTS" -name source.toml | while read -r f; do
     # Retry with backoff: a transient reset/stall must not abort the
     # whole run (the sha256 pin still guards content correctness).
     attempt=1
-    until curl -sSL --max-time 600 -o "$out" "$url" \
+    until curl -fsSL --max-time 600 -o "$out" "$url" \
         && echo "$sha  $out" | sha256sum -c - >/dev/null; do
         attempt=$((attempt + 1))
         [ "$attempt" -le 4 ] || { echo "FAILED after 4 attempts: $file" >&2; exit 1; }

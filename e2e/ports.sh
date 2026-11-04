@@ -15,12 +15,13 @@ set -eu
 
 if [ -z "${E2E_INNER:-}" ]; then
     exec nix shell \
-        nixpkgs#gcc nixpkgs#perl nixpkgs#bubblewrap nixpkgs#python3 \
+        nixpkgs#gcc nixpkgs#cargo nixpkgs#rustc nixpkgs#perl nixpkgs#bubblewrap nixpkgs#python3 \
         nixpkgs#coreutils nixpkgs#gnutar nixpkgs#gzip nixpkgs#gnumake \
         nixpkgs#sqlite nixpkgs#binutils nixpkgs#gnused nixpkgs#gnugrep \
         nixpkgs#gawk nixpkgs#diffutils nixpkgs#curl nixpkgs#xz \
         nixpkgs#findutils nixpkgs#util-linux nixpkgs#bison nixpkgs#m4 \
         nixpkgs#gettext nixpkgs#flex nixpkgs#gperf nixpkgs#bzip2 nixpkgs#dash \
+        nixpkgs#kmod \
         -c env E2E_INNER=1 sh "$0" "$@"
 fi
 
@@ -110,9 +111,9 @@ pass "recipes installed into \$PKG_ROOT"
 for tool in env sh bash ar ranlib make tar gzip xz sed grep \
             awk gawk cut diff cmp find xargs uname install cp mv mkdir ls pwd \
             ln rm cat chmod touch basename dirname sort uniq wc tr head \
-            tail ld as nm readelf objcopy strip sleep date expr printf \
+            tail ld as nm readelf objcopy strip sleep date dd expr printf \
             test comm m4 od id bison python3 echo true false readlink \
-            msgfmt objdump perl rmdir mktemp flex gperf bzip2; do
+            msgfmt objdump perl rmdir mktemp flex gperf bzip2 depmod; do
     # command -v reports shell builtins (echo, test, printf) as bare
     # names, which would produce dangling farm links — and make execs
     # simple commands DIRECTLY (no shell), so a builtin is not good
@@ -179,10 +180,13 @@ pkg_loader_seed() {
 }
 filtered() {
     PKG_GLIBC_BOUND=0
+    DKMS_ROOT_ACTIVE=0
+    linux_headers_src=
     while [ "\$#" -gt 0 ]; do
         case "\$1" in
             --ro-bind|--bind)
                 if [ -e "\$2" ]; then
+                    [ "\$3" = /pkg/deps/linux-headers ] && linux_headers_src=\$2
                     printf '%s\0%s\0%s\0' "\$1" "\$2" "\$3"
                 else
                     echo "bwrap-shim: skipping missing bind source \$2" >&2
@@ -192,7 +196,10 @@ filtered() {
                 if [ "\$2" = LD_LIBRARY_PATH ]; then
                     # A build that binds the packaged glibc must pair it
                     # with the packaged loader — swap /lib64 below.
-                    case "\$3" in */pkg/deps/glibc/*) PKG_GLIBC_BOUND=1 ;; esac
+                    case "\$3" in
+                        */pkg/deps/glibc/*) PKG_GLIBC_BOUND=1 ;;
+                        "$ROOT/usr/lib") PKG_GLIBC_BOUND=1; DKMS_ROOT_ACTIVE=1 ;;
+                    esac
                     # Foreign-host aux libs: the sandbox binds no /etc
                     # (no ld.so.cache), and an upstream-glibc loader's
                     # defaults exclude distro triarch dirs — host tools
@@ -215,6 +222,9 @@ filtered() {
                 # that point back into the farm itself (ELOOP).
                 if [ -d /nix/store ]; then
                     printf '%s\0' --ro-bind /nix/store /nix/store
+                    # A writable mountpoint parent is needed for the later
+                    # /usr/lib tmpfs when packaged glibc is bound.
+                    printf '%s\0%s\0' --tmpfs /usr
                     printf '%s\0' --ro-bind "$TOOLBIN" /usr/bin
                 fi
                 # /bin too: the sandbox RO-binds host /bin, and on this
@@ -222,34 +232,30 @@ filtered() {
                 # once LD_LIBRARY_PATH carries dep lib dirs (see the sh
                 # override above). Later binds shadow earlier ones.
                 printf '%s\0' --ro-bind "$TOOLBIN" /bin
-                # /lib64: the host seed loader — unless this FOREIGN host
-                # sandbox has the packaged glibc bound, in which case its
-                # libc comes from /pkg/deps/glibc via LD_LIBRARY_PATH and
-                # the loader must be the packaged one (a mismatched
-                # loader/libc pair segfaults even trivial tools). NixOS
-                # needs none of this (farm tools carry /nix/store
-                # interpreters, and the farm gcc links its own glibc).
+                # /lib64: the host seed loader — unless the packaged glibc
+                # is bound, in which case its libc comes from /pkg/deps/glibc
+                # and the loader must be the packaged one. This also matters
+                # on NixOS once a recipe uses the PACKAGED gcc: its linker
+                # scripts and interpreter use /usr/lib and /lib64, while Nix
+                # tools continue to use their absolute /nix/store interpreters.
                 ld64="$SEED/lib64"
-                if [ ! -d /nix/store ] && [ "\$PKG_GLIBC_BOUND" = 1 ] && pkg_loader_seed; then
+                if [ "\$PKG_GLIBC_BOUND" = 1 ] && pkg_loader_seed; then
                     ld64="$SEEDPKG/lib64"
                     # The packaged libc.so & co. are ld SCRIPTS with
-                    # absolute /usr/lib references (glibc slibdir). The
-                    # sandbox's /usr/lib is the foreign host's, where
-                    # those paths don't exist — every link died with
-                    # "cannot find /usr/lib/libc.so.6". Binding the files
-                    # individually can't work either: bwrap can't create
-                    # file mountpoints inside the read-only /usr/lib
-                    # bind. A symlink-farm overlay breaks too: the
-                    # compiler resolves /usr/lib/gcc/<triplet>/<ver>/
-                    # ../../../../include/c++ — after the gcc symlink hop
-                    # the .. steps land at /, not /usr (C++ headers
-                    # vanished; ninja died on <vector>). So: mount a
-                    # TMPFS over /usr/lib (bwrap can create mountpoints
-                    # in tmpfs) and bind every entry into place — host
-                    # entries by their host paths (bwrap resolves bind
-                    # sources host-side, following symlinks), plus the
-                    # packaged files the host lacks. Real mounts, no
-                    # symlinks: .. traversal stays intact.
+                    # absolute /usr/lib references (glibc slibdir). A foreign
+                    # host has different files there; NixOS has no /usr/lib.
+                    # Bind the packaged files or every link dies with
+                    # "cannot find /usr/lib/libc.so.6". Binding files into an
+                    # RO /usr/lib is impossible, and a symlink-farm overlay
+                    # breaks C++ headers through .. traversal after symlink
+                    # resolution. Mount TMPFS and bind real entries instead:
+                    # host entries where present, packaged entries otherwise.
+                    # DKMS needs the target's full library set (objtool's
+                    # libelf is the concrete case), not just glibc's files.
+                    if [ "\$DKMS_ROOT_ACTIVE" = 1 ]; then
+                        printf '%s\0%s\0' --tmpfs /usr/lib
+                        printf '%s\0%s\0%s\0' --ro-bind "$ROOT/usr/lib" /usr/lib
+                    else
                     printf '%s\0%s\0' --tmpfs /usr/lib
                     hostbases=" "
                     for f in /usr/lib/*; do
@@ -269,16 +275,22 @@ filtered() {
                             esac
                         fi
                     done
-                    glib=\$(dirname "\$(dirname "\$src")")/usr/lib
-                    for f in "\$glib"/*; do
-                        if { [ -e "\$f" ] || [ -L "\$f" ]; } && [ ! -d "\$f" ]; then
-                            base=\${f##*/}
-                            case "\$hostbases" in
-                                *" \$base "*) ;;
-                                *) printf '%s\0%s\0%s\0' --ro-bind "\$f" "/usr/lib/\$base" ;;
-                            esac
-                        fi
-                    done
+                    fi
+                    if [ -d /nix/store ]; then
+                        # Packaged gcc's C++ include_next search also needs
+                        # the packaged C/UAPI headers at /usr/include.
+                        printf '%s\0%s\0' --tmpfs /usr/include
+                        glib_inc=\$(dirname "\$(dirname "\$src")")/usr/include
+                        for inc in "\$glib_inc" "\$linux_headers_src/usr/include"; do
+                            [ -d "\$inc" ] || continue
+                            for f in "\$inc"/*; do
+                                if [ -e "\$f" ]; then
+                                    base=\${f##*/}
+                                    printf '%s\0%s\0%s\0' --ro-bind "\$f" "/usr/include/\$base"
+                                fi
+                            done
+                        done
+                    fi
                 fi
                 printf '%s\0%s\0%s\0' --ro-bind "\$ld64" /lib64
                 printf '%s\0' "\$@"
@@ -679,6 +691,55 @@ rm -f "$ROOT/boot-marker" "$ROOT/etc/inittab"
 pass "db check clean after sysvinit"
 
 # ---------------------------------------------------------------
+# 10.1 OpenRC runlevels: SysVinit remains PID 1, OpenRC orders services,
+#      and a service in the default runlevel performs a real action.
+# ---------------------------------------------------------------
+"$PKG" install -y openrc eudev dbus networkmanager >"$E2E/openrc.log" 2>&1 \
+    || { tail -30 "$E2E/openrc.log" >&2; fail "OpenRC and service package install"; }
+$LOADER "$ROOT/sbin/openrc" --version | grep -q "0\.64\.1" \
+    || fail "OpenRC runs"
+for service in udev dbus NetworkManager; do
+    [ -x "$ROOT/etc/init.d/$service" ] || fail "OpenRC service $service installed"
+done
+pass "OpenRC 0.64.1 + eudev/dbus/NetworkManager service scripts installed"
+
+cat > "$ROOT/etc/init.d/yakimo-test" <<'EOF'
+#!/sbin/openrc-run
+description="Yakimo end-to-end service marker"
+start() {
+    ebegin "Writing the Yakimo boot marker"
+    echo openrc-booted > /boot-marker
+    eend 0
+}
+EOF
+chmod 0755 "$ROOT/etc/init.d/yakimo-test"
+mkdir -p "$ROOT/etc/runlevels/default"
+ln -sf ../../init.d/yakimo-test "$ROOT/etc/runlevels/default/yakimo-test"
+cat > "$ROOT/etc/inittab" <<'EOF'
+id:3:initdefault:
+si::sysinit:/sbin/openrc sysinit
+bo::boot:/sbin/openrc boot
+rc:3:wait:/sbin/openrc default
+EOF
+rm -f "$ROOT/boot-marker"
+"$REAL_BWRAP" --die-with-parent --unshare-all --as-pid-1 --uid 0 --gid 0 \
+    --bind "$ROOT" / --proc /proc --dev /dev --tmpfs /run --tmpfs /tmp \
+    --setenv PATH /usr/bin:/bin:/sbin:/usr/sbin --setenv HOME /root \
+    -- /sbin/init >"$E2E/openrc-boot.log" 2>&1 &
+BOOT_PID=$!
+for _ in $(seq 1 100); do
+    [ -f "$ROOT/boot-marker" ] && break
+    sleep 0.2
+done
+kill "$BOOT_PID" 2>/dev/null || true
+wait "$BOOT_PID" 2>/dev/null || true
+[ "$(cat "$ROOT/boot-marker" 2>/dev/null)" = "openrc-booted" ] \
+    || { cat "$E2E/openrc-boot.log" >&2; fail "OpenRC default-runlevel service did not run"; }
+pass "SysVinit + OpenRC: default-runlevel service ran as part of init"
+rm -f "$ROOT/boot-marker" "$ROOT/etc/inittab" \
+      "$ROOT/etc/runlevels/default/yakimo-test" "$ROOT/etc/init.d/yakimo-test"
+
+# ---------------------------------------------------------------
 # 11. Batch 4: the self-hosting toolchain. A live system must be able
 #     to build its own packages — that needs make, the patch/diff
 #     tools, the autotools generators, and above all gcc + binutils.
@@ -824,5 +885,54 @@ pass "failure report hints the providing package (add it to [dependencies])"
 
 "$PKG" db check >/dev/null 2>&1 || fail "db check after rejected build"
 pass "db check clean after the rejected build"
+
+# ---------------------------------------------------------------
+# 13. Hardware foundation: a configured kernel, a usable external-module
+#     tree, Intel microcode, and NVIDIA modules/userspace. These tests do
+#     not claim hardware was detected; that requires the physical PC.
+# ---------------------------------------------------------------
+"$PKG" install -y bc elfutils zstd linux intel-microcode nvidia-drivers \
+    >"$E2E/hardware.log" 2>&1 \
+    || { tail -50 "$E2E/hardware.log" >&2; fail "hardware package install"; }
+KREL=6.19.14-yakimo
+[ -s "$ROOT/boot/vmlinuz-$KREL" ] || fail "kernel image installed"
+[ -s "$ROOT/boot/config-$KREL" ] || fail "kernel config installed"
+[ -s "$ROOT/usr/lib/modules/$KREL/build/Module.symvers" ] \
+    || fail "kernel symbol versions installed"
+[ -s "$ROOT/usr/lib/modules/$KREL/build/Makefile" ] \
+    || fail "external-module build tree installed"
+case $(readlink "$ROOT/usr/lib/modules/$KREL/build") in
+    /*) fail "kernel build link is absolute" ;;
+esac
+find -L "$ROOT/usr/lib/firmware/intel-ucode" -type f | grep -q . \
+    || fail "Intel microcode files installed"
+pass "kernel + Intel microcode: image, config, module tree, and firmware installed"
+
+$LOADER "$ROOT/usr/sbin/modinfo" -b "$ROOT/usr" -k "$KREL" nvidia \
+    | grep -q "vermagic:.*$KREL" || fail "NVIDIA module matches packaged kernel"
+for module in nvidia nvidia-modeset nvidia-drm nvidia-uvm; do
+    [ -s "$ROOT/usr/lib/modules/$KREL/extra/$module.ko" ] \
+        || fail "$module installed"
+done
+[ -L "$ROOT/var/lib/dkms/nvidia/595.112.07/source" ] \
+    || fail "NVIDIA source registered with DKMS"
+[ -s "$ROOT/var/log/pkg/dkms-nvidia-drivers-$KREL.log" ] \
+    || fail "DKMS transaction log installed"
+[ ! -e "$ROOT/.pkg-recipe-manifest.toml" ] \
+    || fail "store recipe sidecar leaked into the FHS root"
+[ -s "$ROOT/usr/src/nvidia-595.112.07/dkms.conf" ] \
+    || fail "NVIDIA DKMS source configuration installed"
+[ -s "$ROOT/usr/lib/firmware/nvidia/595.112.07/gsp_ga10x.bin" ] \
+    || fail "NVIDIA Ada GSP firmware installed"
+[ -s "$ROOT/usr/share/vulkan/icd.d/nvidia_icd.json" ] \
+    || fail "NVIDIA Vulkan ICD manifest installed"
+[ -s "$ROOT/usr/share/egl/egl_vendor.d/10_nvidia.json" ] \
+    || fail "NVIDIA EGL vendor manifest installed"
+$LOADER "$R/nvidia-smi" --help | grep -q "v595\.112\.07" \
+    || fail "nvidia-smi runs without querying a GPU"
+pass "NVIDIA: four kernel modules, GSP firmware, Vulkan/EGL, and nvidia-smi"
+
+"$PKG" db check >/dev/null 2>&1 || fail "db check after hardware packages"
+pass "db check clean after hardware packages"
 echo
 echo "PORTS E2E PASSED"

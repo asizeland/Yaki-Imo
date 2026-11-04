@@ -1,0 +1,18 @@
+cd linux-6.19.14
+export PATH="/pkg/deps/gcc/usr/bin:/pkg/deps/binutils/usr/bin:/pkg/deps/make/usr/bin:/pkg/deps/bc/usr/bin:/pkg/deps/bison/usr/bin:/pkg/deps/flex/usr/bin:/pkg/deps/openssl/usr/bin:$PATH"
+KREL=$(make -s kernelrelease)
+
+mkdir -p "$PKGDIR/boot" "$PKGDIR/usr/lib/modules" "$PKGDIR/usr/src"
+cp arch/x86/boot/bzImage "$PKGDIR/boot/vmlinuz-$KREL"
+cp .config "$PKGDIR/boot/config-$KREL"
+make INSTALL_MOD_PATH="$PKGDIR/usr" INSTALL_MOD_STRIP=1 modules_install
+
+KSRC="$PKGDIR/usr/src/linux-$KREL"
+cp -a . "$KSRC"
+find "$KSRC" -type f \( -name '*.o' -o -name '*.a' -o -name '*.ko' \
+    -o -name '*.cmd' \) -delete
+rm -f "$KSRC/vmlinux" "$KSRC/vmlinux.bin" "$KSRC/arch/x86/boot/bzImage"
+rm -f "$PKGDIR/usr/lib/modules/$KREL/build" \
+      "$PKGDIR/usr/lib/modules/$KREL/source"
+ln -s "../../../src/linux-$KREL" "$PKGDIR/usr/lib/modules/$KREL/build"
+ln -s "../../../src/linux-$KREL" "$PKGDIR/usr/lib/modules/$KREL/source"

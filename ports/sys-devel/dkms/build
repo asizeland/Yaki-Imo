@@ -1,0 +1,2 @@
+tar xzf dkms-3.3.0.tar.gz
+make -C dkms-3.3.0

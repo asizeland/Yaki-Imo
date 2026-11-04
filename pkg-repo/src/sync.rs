@@ -202,7 +202,12 @@ pub fn sync_index(
                 // build fail on the missing manifest.
                 if read_cache(cache_dir, "recipe-manifest.toml")?.is_some() {
                     let vi = trust.verify_index(&bytes)?;
-                    return Ok(index_from_verified(vi, false, now - meta.fetched_at, Vec::new()));
+                    return Ok(index_from_verified(
+                        vi,
+                        false,
+                        now - meta.fetched_at,
+                        Vec::new(),
+                    ));
                 }
             }
         }
@@ -242,7 +247,10 @@ pub fn sync_index(
                 match http_get(&mirror_url(mirror, "security.json"), MAX_SECURITY_BYTES) {
                     Ok(sec) => {
                         if let Err(e) = trust
-                            .verify_signed::<serde_json::Value>(&sec, crate::trust::Role::Repository)
+                            .verify_signed::<serde_json::Value>(
+                                &sec,
+                                crate::trust::Role::Repository,
+                            )
                             .and_then(|_| write_cache(cache_dir, "security.json", &sec))
                         {
                             notes.push(format!("security.json from {mirror} rejected: {e}"));
@@ -272,14 +280,19 @@ pub fn sync_index(
     // stale-cache operation). Still verified through the trust chain.
     if let Some(bytes) = read_cache(cache_dir, "index.json")? {
         let vi = trust.verify_index(&bytes)?;
-        let age = read_meta(cache_dir)?.map(|m| now.saturating_sub(m.fetched_at)).unwrap_or(0);
+        let age = read_meta(cache_dir)?
+            .map(|m| now.saturating_sub(m.fetched_at))
+            .unwrap_or(0);
         notes.push("all mirrors failed; using stale cache".to_string());
         return Ok(index_from_verified(vi, true, age, notes));
     }
 
     Err(PkgError::Io(std::io::Error::new(
         std::io::ErrorKind::NotFound,
-        format!("no reachable mirror and no cached index: {}", notes.join("; ")),
+        format!(
+            "no reachable mirror and no cached index: {}",
+            notes.join("; ")
+        ),
     )))
 }
 
@@ -339,10 +352,14 @@ mod tests {
 
     #[test]
     fn mirror_url_joining() {
-        assert_eq!(mirror_url("https://m1.example/repo", "index.json"),
-                   "https://m1.example/repo/index.json");
-        assert_eq!(mirror_url("https://m1.example/repo/", "index.json"),
-                   "https://m1.example/repo/index.json");
+        assert_eq!(
+            mirror_url("https://m1.example/repo", "index.json"),
+            "https://m1.example/repo/index.json"
+        );
+        assert_eq!(
+            mirror_url("https://m1.example/repo/", "index.json"),
+            "https://m1.example/repo/index.json"
+        );
     }
 
     #[test]
@@ -356,15 +373,18 @@ mod tests {
 
     #[test]
     fn cache_roundtrip_and_meta() {
-        let dir = std::env::temp_dir().join(format!(
-            "pkg-repo-sync-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("pkg-repo-sync-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         write_cache(&dir, "index.json", b"{}").unwrap();
-        assert_eq!(read_cache(&dir, "index.json").unwrap().as_deref(), Some(&b"{}"[..]));
+        assert_eq!(
+            read_cache(&dir, "index.json").unwrap().as_deref(),
+            Some(&b"{}"[..])
+        );
         // meta roundtrip
-        let meta = CacheMeta { fetched_at: 42, index_version: 7 };
+        let meta = CacheMeta {
+            fetched_at: 42,
+            index_version: 7,
+        };
         write_cache(&dir, "meta.json", &serde_json::to_vec(&meta).unwrap()).unwrap();
         let back = read_meta(&dir).unwrap().unwrap();
         assert_eq!(back.fetched_at, 42);

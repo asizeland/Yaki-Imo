@@ -161,9 +161,7 @@ impl BuildPlan {
 /// Kahn-by-relaxation leveling over `name -> in-cascade deps` maps.
 /// Shared by [`BuildPlan::levels`] and kept free-standing so it is
 /// directly unit-testable.
-pub fn level_dag(
-    nodes: BTreeMap<&str, &BTreeSet<String>>,
-) -> PkgResult<Vec<Vec<String>>> {
+pub fn level_dag(nodes: BTreeMap<&str, &BTreeSet<String>>) -> PkgResult<Vec<Vec<String>>> {
     let mut level_of: BTreeMap<&str, usize> = BTreeMap::new();
     loop {
         let mut progressed = false;
@@ -278,7 +276,8 @@ impl SchedConfig {
             // a cache. Callers that can propagate errors should prefer
             // `compiler_wrapper_from_config` directly (hard error per
             // §4.3's unknown-values philosophy).
-            compiler_wrapper: match compiler_wrapper_from_config(&pkg_core::paths::at(CONFIG_PATH)) {
+            compiler_wrapper: match compiler_wrapper_from_config(&pkg_core::paths::at(CONFIG_PATH))
+            {
                 Ok(wrapper) => wrapper,
                 Err(e) => {
                     eprintln!("pkg: warning: ignoring {CONFIG_PATH}: {e}");
@@ -386,7 +385,9 @@ pub fn parse_build_parallelism(config_text: &str) -> PkgResult<BuildParallelism>
             )));
         };
         if n < 1 {
-            return Err(PkgError::Parse(format!("[build] {key} must be ≥ 1, got {n}")));
+            return Err(PkgError::Parse(format!(
+                "[build] {key} must be ≥ 1, got {n}"
+            )));
         }
         Ok(Some(n as u32))
     };
@@ -559,11 +560,7 @@ impl Report {
             for hint in &f.dep_hints {
                 out.push_str(&format!("  hint: {hint}\n"));
             }
-            let blocked: Vec<&str> = self
-                .blocked
-                .iter()
-                .map(String::as_str)
-                .collect();
+            let blocked: Vec<&str> = self.blocked.iter().map(String::as_str).collect();
             if !blocked.is_empty() {
                 out.push_str(&format!("  blocked subtree: {}\n", blocked.join(", ")));
             }
@@ -637,7 +634,11 @@ impl TokenPool {
 /// `queries::build_eta`), scaled by `(host_jobs_recorded /
 /// host_jobs_now)^0.7`. A first-ever build returns `None` — the
 /// caller's fallback is the similar-source-size median (§4.2.4).
-pub fn scaled_eta(conn: &Connection, name: &str, host_jobs_now: u32) -> PkgResult<Option<Duration>> {
+pub fn scaled_eta(
+    conn: &Connection,
+    name: &str,
+    host_jobs_now: u32,
+) -> PkgResult<Option<Duration>> {
     let Some(raw) = queries::build_eta(conn, name)? else {
         return Ok(None);
     };
@@ -665,10 +666,7 @@ pub fn scaled_eta(conn: &Connection, name: &str, host_jobs_now: u32) -> PkgResul
 /// the total work (§4.2.4: "≈3.5 h wall (≈11 h compile work across 8
 /// cores)"). Returns `(critical_path, total_work)`. Pure: takes the
 /// ETA map as input so it's unit-testable without a DB.
-pub fn plan_eta(
-    plan: &BuildPlan,
-    etas: &BTreeMap<String, Duration>,
-) -> (Duration, Duration) {
+pub fn plan_eta(plan: &BuildPlan, etas: &BTreeMap<String, Duration>) -> (Duration, Duration) {
     // Longest-path DP over the DAG in leveling order.
     let mut longest: BTreeMap<&str, Duration> = BTreeMap::new();
     // Iterate to a fixpoint; DAG, so it converges in depth passes.
@@ -781,11 +779,7 @@ struct WorkerOk {
 /// the token pool, per-package activation transactions as each build
 /// completes (Issue 4.2.5), blocked-subtree propagation on failure
 /// (Issue 4.2.6), one OOM retry with halved jobs.
-pub fn execute_plan(
-    conn: &Connection,
-    plan: &BuildPlan,
-    cfg: &SchedConfig,
-) -> PkgResult<Report> {
+pub fn execute_plan(conn: &Connection, plan: &BuildPlan, cfg: &SchedConfig) -> PkgResult<Report> {
     let wall_clock = Instant::now();
     let mut report = Report::default();
     if plan.nodes.is_empty() {
@@ -794,6 +788,11 @@ pub fn execute_plan(
     // Cycle-check up front; leveling order itself isn't used for
     // scheduling (nodes start the moment their deps are activated).
     plan.levels()?;
+    let kernels_before =
+        crate::dkms::installed_kernels(pkg_core::paths::root()).unwrap_or_else(|e| {
+            eprintln!("warning: cannot enumerate installed kernels for DKMS: {e}");
+            std::collections::BTreeSet::new()
+        });
 
     // The recipe manifest is the fetch stage's T7 guard: no source may
     // be fetched except through a manifest entry, so without the cached
@@ -820,7 +819,8 @@ pub fn execute_plan(
     }
 
     let (tx, rx) = channel::<WorkerDone>();
-    let mut running: BTreeMap<String, u32> = BTreeMap::new(); // name → tokens held
+    // name → tokens held
+    let mut running: BTreeMap<String, u32> = BTreeMap::new();
     // Nodes whose post-build re-measurement proved the link interface
     // unchanged (§7.7.2) — the pruning step below consults this.
     let mut iface_unchanged: BTreeSet<String> = BTreeSet::new();
@@ -830,7 +830,15 @@ pub fn execute_plan(
         while let Ok(done) = rx.try_recv() {
             pool.release(done.tokens_held);
             running.remove(&done.name);
-            handle_worker_done(conn, plan, cfg, &mut states, &mut report, done, &mut iface_unchanged)?;
+            handle_worker_done(
+                conn,
+                plan,
+                cfg,
+                &mut states,
+                &mut report,
+                done,
+                &mut iface_unchanged,
+            )?;
         }
 
         // -- prune unchanged subtrees (§7.7.2) ------------------------
@@ -896,9 +904,7 @@ pub fn execute_plan(
         }
 
         if running.is_empty() {
-            let pending = states
-                .values()
-                .any(|s| *s == NodeState::Pending);
+            let pending = states.values().any(|s| *s == NodeState::Pending);
             if !pending {
                 break; // everything terminal
             }
@@ -922,13 +928,22 @@ pub fn execute_plan(
                 Ok(done) => {
                     pool.release(done.tokens_held);
                     running.remove(&done.name);
-                    handle_worker_done(conn, plan, cfg, &mut states, &mut report, done, &mut iface_unchanged)?;
+                    handle_worker_done(
+                        conn,
+                        plan,
+                        cfg,
+                        &mut states,
+                        &mut report,
+                        done,
+                        &mut iface_unchanged,
+                    )?;
                 }
                 Err(_) => break, // all senders dropped; nothing more can finish
             }
         }
     }
 
+    crate::dkms::reconcile_after_plan(conn, cfg, &mut report, &kernels_before);
     report.wall = wall_clock.elapsed();
     Ok(report)
 }
@@ -1204,7 +1219,10 @@ fn build_node(
                     // A cache hit is byte-identical to what a source
                     // build would produce (content-addressed, §7.9.5);
                     // the double-build did not run, so no self-match.
-                    result: Ok(WorkerOk { pkgdir, repro_match: false }),
+                    result: Ok(WorkerOk {
+                        pkgdir,
+                        repro_match: false,
+                    }),
                     log_tail: String::new(),
                     undeclared_sonames: Vec::new(),
                     duration: clock.elapsed(),
@@ -1320,7 +1338,12 @@ fn build_node(
     WorkerDone {
         name: node.name.clone(),
         tokens_held: tokens,
-        result: result.map(|_| WorkerOk { pkgdir, repro_match }).map_err(|e| e.to_string()),
+        result: result
+            .map(|_| WorkerOk {
+                pkgdir,
+                repro_match,
+            })
+            .map_err(|e| e.to_string()),
         log_tail: tail,
         undeclared_sonames,
         duration,
@@ -1408,7 +1431,14 @@ fn handle_worker_done(
                     // Best-effort: the activation commit already
                     // happened, so failures warn rather than abort.
                     if let Ok(dir) = &store_dir {
-                        record_build_metadata(conn, node, dir, done.started_at, ok.repro_match, cfg);
+                        record_build_metadata(
+                            conn,
+                            node,
+                            dir,
+                            done.started_at,
+                            ok.repro_match,
+                            cfg,
+                        );
                     }
                     // Post-build cascade narrowing (§7.7.2): compare the
                     // freshly measured interface hash against what the
@@ -1480,15 +1510,15 @@ fn handle_worker_done(
 fn undeclared_dep_hints(conn: &Connection, sonames: &[String]) -> Vec<String> {
     sonames
         .iter()
-        .map(|soname| {
-            match queries::packages_providing_soname(conn, soname) {
+        .map(
+            |soname| match queries::packages_providing_soname(conn, soname) {
                 Ok(names) if !names.is_empty() => format!(
                     "{soname} — provided by installed package {} (add it to [dependencies])",
                     names.join(", ")
                 ),
                 _ => format!("{soname} — not provided by any installed package"),
-            }
-        })
+            },
+        )
         .collect()
 }
 
@@ -1540,8 +1570,7 @@ fn record_build_metadata(
     repro_match: bool,
     cfg: &SchedConfig,
 ) {
-    if let Err(e) =
-        record_build_metadata_inner(conn, node, store_dir, started_at, repro_match, cfg)
+    if let Err(e) = record_build_metadata_inner(conn, node, store_dir, started_at, repro_match, cfg)
     {
         eprintln!(
             "pkg: warning: failed to record build metadata for {}: {e}",
@@ -1564,7 +1593,8 @@ fn record_build_metadata_inner(
         abi_tag: node.abi_tag,
         arch: node.arch,
     };
-    let Some(row) = queries::find_package_by_identity_opt(conn, &package_id, node.opt_tag.as_str())?
+    let Some(row) =
+        queries::find_package_by_identity_opt(conn, &package_id, node.opt_tag.as_str())?
     else {
         return Err(PkgError::NotFound(format!(
             "activated package {} not found in DB",
@@ -1590,7 +1620,12 @@ fn record_build_metadata_inner(
             &LinkInterfaceRow {
                 package_id: row.id,
                 soname: li.soname.clone(),
-                symbol_versions: li.symbol_versions.iter().cloned().collect::<Vec<_>>().join("\n"),
+                symbol_versions: li
+                    .symbol_versions
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n"),
                 header_fingerprint: header_fp.clone(),
                 link_interface_hash: aggregate.clone(),
             },
@@ -1608,7 +1643,11 @@ fn record_build_metadata_inner(
         .map(|e| serde_json::to_string(&e.sources).unwrap_or_else(|_| "[]".to_string()))
         .unwrap_or_else(|| "[]".to_string());
     let attestations = entry.as_ref().map(|e| {
-        let fps: Vec<&str> = e.attestations.iter().map(|a| a.key_fingerprint.as_str()).collect();
+        let fps: Vec<&str> = e
+            .attestations
+            .iter()
+            .map(|a| a.key_fingerprint.as_str())
+            .collect();
         serde_json::to_string(&fps).unwrap_or_else(|_| "[]".to_string())
     });
     let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")
@@ -1694,7 +1733,9 @@ fn depends_on_transitively(plan: &BuildPlan, name: &str, root: &str) -> bool {
         if !seen.insert(n.to_string()) {
             continue;
         }
-        let Some(node) = plan.nodes.get(n) else { continue };
+        let Some(node) = plan.nodes.get(n) else {
+            continue;
+        };
         for dep in &node.deps_in_cascade {
             if dep == root {
                 return true;
@@ -1781,7 +1822,10 @@ mod tests {
 
     #[test]
     fn build_parallelism_absent_means_defaults() {
-        assert_eq!(parse_build_parallelism("").unwrap(), BuildParallelism::default());
+        assert_eq!(
+            parse_build_parallelism("").unwrap(),
+            BuildParallelism::default()
+        );
         assert_eq!(
             parse_build_parallelism("[cache]\ncompiler = \"off\"\n").unwrap(),
             BuildParallelism::default()
@@ -1790,8 +1834,7 @@ mod tests {
 
     #[test]
     fn build_parallelism_reads_jobs_and_max_pkg_jobs() {
-        let parsed =
-            parse_build_parallelism("[build]\njobs = 8\nmax_pkg_jobs = 2\n").unwrap();
+        let parsed = parse_build_parallelism("[build]\njobs = 8\nmax_pkg_jobs = 2\n").unwrap();
         assert_eq!(parsed.jobs, Some(8));
         assert_eq!(parsed.max_pkg_jobs, Some(2));
     }
@@ -1822,7 +1865,8 @@ mod tests {
             ("o3", OptLevel::O3, "-O3"),
             ("os", OptLevel::Os, "-Os"),
         ] {
-            let parsed = parse_build_opt_level(&format!("[build]\nopt_level = \"{text}\"\n")).unwrap();
+            let parsed =
+                parse_build_opt_level(&format!("[build]\nopt_level = \"{text}\"\n")).unwrap();
             assert_eq!(parsed, want);
             assert_eq!(parsed.cflags(), flag);
             assert_eq!(parsed.as_identity_str(), flag);
@@ -1867,8 +1911,14 @@ mod tests {
     #[test]
     fn oom_heuristic() {
         assert!(looks_like_oom(Some(137), ""));
-        assert!(looks_like_oom(None, "cc1plus: fatal error: Killed signal terminated program cc1plus\nout of memory"));
-        assert!(looks_like_oom(None, "kernel: oom-kill: constraint=CONSTRAINT_NONE"));
+        assert!(looks_like_oom(
+            None,
+            "cc1plus: fatal error: Killed signal terminated program cc1plus\nout of memory"
+        ));
+        assert!(looks_like_oom(
+            None,
+            "kernel: oom-kill: constraint=CONSTRAINT_NONE"
+        ));
         assert!(!looks_like_oom(Some(1), "error: expected ';'"));
     }
 

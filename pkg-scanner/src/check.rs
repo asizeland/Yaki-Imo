@@ -304,7 +304,10 @@ mod tests {
         assert_eq!(classify(&info(&[], None), &host), None);
         // A binary linked against a non-glibc libc is likewise outside
         // this check's scope (NSS-style non-coverage, v11 §8).
-        assert_eq!(classify(&info(&["libc.musl-x86_64.so.1"], None), &host), None);
+        assert_eq!(
+            classify(&info(&["libc.musl-x86_64.so.1"], None), &host),
+            None
+        );
     }
 
     #[test]
@@ -335,10 +338,7 @@ mod tests {
         let host: Version = "2.39".parse().unwrap();
         let findings = check_system(&pkgs, &host).unwrap();
         assert_eq!(findings.len(), 1);
-        assert!(matches!(
-            findings[0],
-            CheckFinding::MissingStoreDir { .. }
-        ));
+        assert!(matches!(findings[0], CheckFinding::MissingStoreDir { .. }));
         assert_eq!(findings[0].package(), "ghost-1.0");
     }
 }

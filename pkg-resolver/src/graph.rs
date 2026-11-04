@@ -97,7 +97,10 @@ impl PackageGraph {
     ) {
         let name = name.into();
         for virt in provides {
-            self.providers.entry(virt.clone()).or_default().insert(name.clone());
+            self.providers
+                .entry(virt.clone())
+                .or_default()
+                .insert(name.clone());
         }
         self.packages.push(PackageEntry {
             name,
@@ -123,8 +126,14 @@ impl PackageGraph {
     /// would otherwise only discover indirectly, as an opaque "no
     /// solution" deep inside a derivation tree, when the graph itself
     /// already has enough information to name the real problem directly.
-    pub fn finalize(self, preferred_providers: &BTreeMap<String, String>) -> PkgResult<ResolvedGraph> {
-        let PackageGraph { packages, providers } = self;
+    pub fn finalize(
+        self,
+        preferred_providers: &BTreeMap<String, String>,
+    ) -> PkgResult<ResolvedGraph> {
+        let PackageGraph {
+            packages,
+            providers,
+        } = self;
         let mut catalog = Catalog::new();
         let mut materializer = Materializer {
             providers: &providers,
@@ -270,8 +279,11 @@ impl<'a> Materializer<'a> {
             let synthetic_version: Version = format!("0.0.{i}")
                 .parse()
                 .expect("synthetic version string is always valid");
-            self.synthetic_registrations
-                .push((synthetic_name.clone(), synthetic_version, vec![alternative]));
+            self.synthetic_registrations.push((
+                synthetic_name.clone(),
+                synthetic_version,
+                vec![alternative],
+            ));
         }
 
         synthetic_name
@@ -401,7 +413,12 @@ mod tests {
     #[test]
     fn plain_dependency_is_unaffected_by_graph_machinery() {
         let mut graph = PackageGraph::new();
-        graph.add_package("root", v("1.0.0"), &[], vec![Dependency::any_version("openssl")]);
+        graph.add_package(
+            "root",
+            v("1.0.0"),
+            &[],
+            vec![Dependency::any_version("openssl")],
+        );
         graph.add_package("openssl", v("3.0.13"), &[], vec![]);
 
         let resolved = graph.finalize(&BTreeMap::new()).unwrap();
@@ -479,7 +496,10 @@ mod tests {
 
         let has_cronie = solution.contains_key("cronie");
         let has_fcron = solution.contains_key("fcron");
-        assert!(has_cronie ^ has_fcron, "exactly one alternative should be chosen");
+        assert!(
+            has_cronie ^ has_fcron,
+            "exactly one alternative should be chosen"
+        );
     }
 
     #[test]
@@ -533,7 +553,11 @@ mod tests {
             .into_iter()
             .filter(|name| solution.contains_key(*name))
             .collect();
-        assert_eq!(chosen.len(), 1, "exactly one leaf should be chosen, got {chosen:?}");
+        assert_eq!(
+            chosen.len(),
+            1,
+            "exactly one leaf should be chosen, got {chosen:?}"
+        );
         assert!(
             solution.keys().all(|k| !k.starts_with('$')),
             "no synthetic package should be visible: {solution:?}"
@@ -578,10 +602,7 @@ mod tests {
         );
 
         let mut preferred = BTreeMap::new();
-        preferred.insert(
-            "virtual/kernel".to_string(),
-            "linux-hardened".to_string(),
-        );
+        preferred.insert("virtual/kernel".to_string(), "linux-hardened".to_string());
 
         let resolved = graph.finalize(&preferred).unwrap();
         let solution = resolve(&resolved, "root", v("1.0.0")).unwrap();
@@ -657,10 +678,7 @@ mod tests {
         );
 
         let mut preferred = BTreeMap::new();
-        preferred.insert(
-            "virtual/kernel".to_string(),
-            "linux-hardened".to_string(),
-        );
+        preferred.insert("virtual/kernel".to_string(), "linux-hardened".to_string());
 
         let resolved = graph.finalize(&preferred).unwrap();
         let solution = resolve(&resolved, "root", v("1.0.0")).unwrap();
@@ -730,7 +748,13 @@ mod tests {
         constraints.insert("mesa".to_string(), VersionConstraint::Exact(v("24.0")));
 
         let solution = resolved
-            .resolve_with_constraints("root", v("1.0.0"), &PinSet::new(), &constraints, &HashMap::new())
+            .resolve_with_constraints(
+                "root",
+                v("1.0.0"),
+                &PinSet::new(),
+                &constraints,
+                &HashMap::new(),
+            )
             .unwrap();
         assert_eq!(solution.get("mesa"), Some(&v("24.0")));
     }

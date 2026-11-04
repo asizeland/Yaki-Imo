@@ -1,0 +1,4 @@
+tar xzf bc-1.08.2.tar.gz
+cd bc-1.08.2
+./configure --prefix=/usr --without-readline --without-libedit
+make MAKEINFO=true

@@ -1,6 +1,8 @@
 /target
 old/
-docs/
+docs/*
+!docs/technical-manual.md
+!docs/developers-manual.md
 target/
 live/
 sandbox/

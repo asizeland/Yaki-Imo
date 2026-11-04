@@ -110,7 +110,10 @@ pub enum PkgError {
     ///
     /// Added in error-v3; closes the TODO left in queries-v3.rs, which
     /// used `PkgError::Resolution` as an interim carrier.
-    GlibcPending { required: String, pending_target: String },
+    GlibcPending {
+        required: String,
+        pending_target: String,
+    },
 }
 
 impl PkgError {

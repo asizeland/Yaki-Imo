@@ -89,7 +89,8 @@ use serde::{Deserialize, Serialize};
 // SPEC-defined `OptTag(pub String)` newtype); this file computes the
 // 8-hex truncated SHA-256 that fills it.
 use crate::{
-    AbiTag, Arch, Dependency, OptTag, PackageId, PkgError, PkgResult, VersionConstraint, VirtualName,
+    AbiTag, Arch, Dependency, OptTag, PackageId, PkgError, PkgResult, VersionConstraint,
+    VirtualName,
 };
 
 // ---------------------------------------------------------------------
@@ -352,8 +353,18 @@ impl PackageManifest {
             .link
             .iter()
             .map(|e| (e, DependencyKind::Link))
-            .chain(raw.dependencies.runtime.iter().map(|e| (e, DependencyKind::Runtime)))
-            .chain(raw.dependencies.build.iter().map(|e| (e, DependencyKind::Build)))
+            .chain(
+                raw.dependencies
+                    .runtime
+                    .iter()
+                    .map(|e| (e, DependencyKind::Runtime)),
+            )
+            .chain(
+                raw.dependencies
+                    .build
+                    .iter()
+                    .map(|e| (e, DependencyKind::Build)),
+            )
         {
             let (dep, kind) = parse_dep_entry(entry, implied)?;
             match kind {
@@ -475,10 +486,7 @@ impl PackageManifest {
     /// protection stays at the transaction level: the caller checks
     /// the full selection against the UNION of all selected packages'
     /// declared options before filtering per manifest.
-    pub fn filter_selection(
-        &self,
-        selection: &BTreeMap<String, bool>,
-    ) -> BTreeMap<String, bool> {
+    pub fn filter_selection(&self, selection: &BTreeMap<String, bool>) -> BTreeMap<String, bool> {
         selection
             .iter()
             .filter(|(k, _)| self.options.contains_key(*k))
@@ -990,10 +998,13 @@ mod tests {
                 Dependency::any_version("ca-certificates"),
             ]
         );
-        assert_eq!(m.build_deps, vec![
-            Dependency::any_version("perl"),
-            Dependency::any_version("make"),
-        ]);
+        assert_eq!(
+            m.build_deps,
+            vec![
+                Dependency::any_version("perl"),
+                Dependency::any_version("make"),
+            ]
+        );
     }
 
     #[test]
@@ -1206,17 +1217,23 @@ mod tests {
         // The explicit `kind` on an inline-table entry wins over the
         // array it appears in; "wget" is a v2 string entry and keeps the
         // runtime array's implied kind.
-        assert_eq!(m.runtime_deps, vec![
-            Dependency::any_version("ca-certificates"),
-            Dependency::any_version("wget"),
-        ]);
+        assert_eq!(
+            m.runtime_deps,
+            vec![
+                Dependency::any_version("ca-certificates"),
+                Dependency::any_version("wget"),
+            ]
+        );
         // { dep = "libz" } has no explicit kind: the build array's
         // implied kind applies.
-        assert_eq!(m.build_deps, vec![
-            Dependency::any_version("perl"),
-            Dependency::any_version("make"),
-            Dependency::any_version("libz"),
-        ]);
+        assert_eq!(
+            m.build_deps,
+            vec![
+                Dependency::any_version("perl"),
+                Dependency::any_version("make"),
+                Dependency::any_version("libz"),
+            ]
+        );
     }
 
     #[test]
@@ -1294,13 +1311,19 @@ mod tests {
         assert_eq!(weak.description, "Enable legacy TLS versions");
         assert!(!weak.default);
         assert!(weak.abi_affecting, "abi_affecting defaults to true");
-        assert_eq!(weak.add_deps, vec![Dependency::any_version("openssl-legacy")]);
+        assert_eq!(
+            weak.add_deps,
+            vec![Dependency::any_version("openssl-legacy")]
+        );
         assert!(weak.add_build_deps.is_empty());
 
         let docs = &m.options["docs"];
         assert!(docs.default);
         assert!(!docs.abi_affecting);
-        assert_eq!(docs.add_build_deps, vec![Dependency::any_version("doxygen")]);
+        assert_eq!(
+            docs.add_build_deps,
+            vec![Dependency::any_version("doxygen")]
+        );
     }
 
     #[test]
@@ -1381,10 +1404,13 @@ mod tests {
     fn dep_set_is_base_deps_when_options_sit_at_defaults() {
         let m = PackageManifest::from_toml_str(OPTIONS_TOML).unwrap();
         let deps = m.dep_set(&BTreeMap::new()).unwrap();
-        assert_eq!(deps, vec![
-            Dependency::at_least("zlib", "1.3".parse().unwrap()),
-            Dependency::any_version("ca-certificates"),
-        ]);
+        assert_eq!(
+            deps,
+            vec![
+                Dependency::at_least("zlib", "1.3".parse().unwrap()),
+                Dependency::any_version("ca-certificates"),
+            ]
+        );
     }
 
     #[test]
@@ -1404,10 +1430,13 @@ mod tests {
         let m = PackageManifest::from_toml_str(OPTIONS_TOML).unwrap();
         // docs defaults to true → doxygen present at default selection.
         let base = m.build_dep_set(&BTreeMap::new()).unwrap();
-        assert_eq!(base, vec![
-            Dependency::any_version("perl"),
-            Dependency::any_version("doxygen"),
-        ]);
+        assert_eq!(
+            base,
+            vec![
+                Dependency::any_version("perl"),
+                Dependency::any_version("doxygen"),
+            ]
+        );
         let without = m.build_dep_set(&selection(&[("docs", false)])).unwrap();
         assert_eq!(without, vec![Dependency::any_version("perl")]);
     }
@@ -1443,7 +1472,8 @@ mod tests {
         assert_eq!(m.opt_tag(&BTreeMap::new()).unwrap(), OptTag(String::new()));
         // Explicitly restating the defaults is still all-default.
         assert_eq!(
-            m.opt_tag(&selection(&[("ssl-weak", false), ("docs", true)])).unwrap(),
+            m.opt_tag(&selection(&[("ssl-weak", false), ("docs", true)]))
+                .unwrap(),
             OptTag(String::new())
         );
     }
@@ -1478,7 +1508,10 @@ mod tests {
         assert_eq!(on, on_again);
         assert_ne!(on, off);
         assert_eq!(on.0.len(), 8);
-        assert!(on.0.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(on
+            .0
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
     #[test]
@@ -1497,15 +1530,23 @@ mod tests {
         let m = PackageManifest::from_toml_str(OPTIONS_TOML).unwrap();
         // Empty selection → defaults; name uppercased, '-' → '_'.
         let env = m.options_export_env(&BTreeMap::new()).unwrap();
-        assert_eq!(env, vec![
-            ("PKG_OPT_DOCS".to_string(), "1".to_string()),
-            ("PKG_OPT_SSL_WEAK".to_string(), "0".to_string()),
-        ]);
+        assert_eq!(
+            env,
+            vec![
+                ("PKG_OPT_DOCS".to_string(), "1".to_string()),
+                ("PKG_OPT_SSL_WEAK".to_string(), "0".to_string()),
+            ]
+        );
         // Overrides apply.
-        let env = m.options_export_env(&selection(&[("ssl-weak", true), ("docs", false)])).unwrap();
-        assert_eq!(env, vec![
-            ("PKG_OPT_DOCS".to_string(), "0".to_string()),
-            ("PKG_OPT_SSL_WEAK".to_string(), "1".to_string()),
-        ]);
+        let env = m
+            .options_export_env(&selection(&[("ssl-weak", true), ("docs", false)]))
+            .unwrap();
+        assert_eq!(
+            env,
+            vec![
+                ("PKG_OPT_DOCS".to_string(), "0".to_string()),
+                ("PKG_OPT_SSL_WEAK".to_string(), "1".to_string()),
+            ]
+        );
     }
 }

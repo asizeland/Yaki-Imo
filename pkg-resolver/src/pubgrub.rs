@@ -60,7 +60,9 @@ use pkg_core::{PkgError, PkgResult, Version, VersionConstraint};
 // named `pubgrub` (this file), and a crate-root module shadows the
 // extern prelude in Rust 2018 uniform paths. `::pubgrub` is
 // unambiguous in every edition.
-use ::pubgrub::{DefaultStringReporter, DerivationTree, OfflineDependencyProvider, Ranges, Reporter};
+use ::pubgrub::{
+    DefaultStringReporter, DerivationTree, OfflineDependencyProvider, Ranges, Reporter,
+};
 
 use crate::PinSet;
 
@@ -366,9 +368,7 @@ mod tests {
         catalog.add_package_version(
             "root",
             v("1.0.0"),
-            [
-                ("menu".to_string(), VersionConstraint::Any),
-            ],
+            [("menu".to_string(), VersionConstraint::Any)],
         );
         catalog.add_package_version(
             "menu",
@@ -407,11 +407,7 @@ mod tests {
             v("1.0.0"),
             [("c".to_string(), VersionConstraint::AtLeast(v("2.0.0")))],
         );
-        catalog.add_package_version(
-            "b",
-            v("1.0.0"),
-            [("c".to_string(), VersionConstraint::Any)],
-        );
+        catalog.add_package_version("b", v("1.0.0"), [("c".to_string(), VersionConstraint::Any)]);
         catalog.add_package_version("c", v("1.0.0"), []);
         catalog.add_package_version("c", v("2.0.0"), []);
 
@@ -455,10 +451,13 @@ mod tests {
         catalog.add_package_version(
             "root",
             v("1.0.0"),
-            [("lib".to_string(), VersionConstraint::Range {
-                min: v("2.0.0"),
-                max: Some(v("2.5.0")),
-            })],
+            [(
+                "lib".to_string(),
+                VersionConstraint::Range {
+                    min: v("2.0.0"),
+                    max: Some(v("2.5.0")),
+                },
+            )],
         );
         catalog.add_package_version("lib", v("1.9.0"), []); // below the floor
         catalog.add_package_version("lib", v("2.4.0"), []);
@@ -532,7 +531,10 @@ mod tests {
         catalog.add_package_version(
             "root",
             v("1.0.0"),
-            [("glibc".to_string(), VersionConstraint::AtLeast(v("2.39-r1")))],
+            [(
+                "glibc".to_string(),
+                VersionConstraint::AtLeast(v("2.39-r1")),
+            )],
         );
         catalog.add_package_version("glibc", v("2.39"), []);
         catalog.add_package_version("glibc", v("2.39-r1"), []);

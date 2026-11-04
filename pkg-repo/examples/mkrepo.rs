@@ -48,7 +48,10 @@ fn delegation_of(keys: &[&SigningKey], threshold: u32) -> RoleDelegation {
         let vk = k.verifying_key();
         map.insert(key_fingerprint(&vk), hex_encode(vk.as_bytes()));
     }
-    RoleDelegation { threshold, keys: map }
+    RoleDelegation {
+        threshold,
+        keys: map,
+    }
 }
 
 fn sign_doc(payload: serde_json::Value, signers: &[&SigningKey]) -> Vec<u8> {
@@ -63,7 +66,11 @@ fn sign_doc(payload: serde_json::Value, signers: &[&SigningKey]) -> Vec<u8> {
             }
         })
         .collect();
-    serde_json::to_vec(&SignedDocument { signed: payload, signatures }).unwrap()
+    serde_json::to_vec(&SignedDocument {
+        signed: payload,
+        signatures,
+    })
+    .unwrap()
 }
 
 struct PkgSpec {
@@ -247,9 +254,15 @@ fn main() {
             1,
         ),
     };
-    let root_doc = sign_doc(serde_json::to_value(&root).unwrap(), &[&root_keys[0], &root_keys[1]]);
+    let root_doc = sign_doc(
+        serde_json::to_value(&root).unwrap(),
+        &[&root_keys[0], &root_keys[1]],
+    );
     std::fs::write(repo_dir.join("root.json"), &root_doc).unwrap();
 
     println!("repo written to {}", repo_dir.display());
-    println!("root fingerprint: {}", key_fingerprint(&root_keys[0].verifying_key()));
+    println!(
+        "root fingerprint: {}",
+        key_fingerprint(&root_keys[0].verifying_key())
+    );
 }

@@ -41,6 +41,7 @@ pub const DEFAULT_CAP_BYTES: u64 = 30 * 1024 * 1024 * 1024;
 /// Manifest verification on reuse is what makes a tampered or
 /// corrupted entry degrade into a miss instead of a bad install.
 pub const MANIFEST_NAME: &str = ".pkg-store-manifest";
+pub const RECIPE_MANIFEST_NAME: &str = ".pkg-recipe-manifest.toml";
 
 // ---------------------------------------------------------------------
 // CacheKey
@@ -454,9 +455,8 @@ pub fn verify_manifest(dir: &Path) -> PkgResult<()> {
             ))
         })?;
         let path = dir.join(rel);
-        let actual = sha256_file(&path).map_err(|e| {
-            PkgError::Build(format!("manifest-listed file {rel} unreadable: {e}"))
-        })?;
+        let actual = sha256_file(&path)
+            .map_err(|e| PkgError::Build(format!("manifest-listed file {rel} unreadable: {e}")))?;
         if actual != hash {
             return Err(PkgError::Build(format!(
                 "manifest mismatch on {rel}: expected {hash}, got {actual}"
@@ -614,10 +614,7 @@ mod tests {
     #[test]
     fn cache_key_file_name_format() {
         // Spec: cache/<name>/<version>-<abi_tag>-<opt>-<recipe_commit>.pkg.tar.zst
-        assert_eq!(
-            key("").file_name(),
-            "3.0.14-ab1---a1b2c3d4e5f6.pkg.tar.zst"
-        );
+        assert_eq!(key("").file_name(), "3.0.14-ab1---a1b2c3d4e5f6.pkg.tar.zst");
         assert_eq!(
             key("9f2c1d00").file_name(),
             "3.0.14-ab1-9f2c1d00-a1b2c3d4e5f6.pkg.tar.zst"
@@ -703,8 +700,7 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         fs::create_dir_all(src.path().join("usr/lib")).unwrap();
         fs::write(src.path().join("usr/lib/libfoo.so"), b"elf").unwrap();
-        std::os::unix::fs::symlink("libfoo.so", src.path().join("usr/lib/libfoo.so.1"))
-            .unwrap();
+        std::os::unix::fs::symlink("libfoo.so", src.path().join("usr/lib/libfoo.so.1")).unwrap();
         write_manifest(src.path()).unwrap();
 
         // The artifact must live OUTSIDE the dir being packed —

@@ -1,0 +1,9 @@
+name = "linux"
+version = "6.19.14"
+category = "sys-kernel"
+provides = ["virtual/kernel"]
+
+[dependencies]
+link = ["glibc", "openssl", "elfutils", "binutils"]
+runtime = ["glibc", "openssl", "elfutils", "binutils", "kmod"]
+build = ["gcc", "make", "binutils", "linux-headers", "bc", "bison", "flex", "openssl", "elfutils"]

@@ -116,8 +116,8 @@ pub fn find_plugin_references(config_text: &str) -> Vec<String> {
             continue;
         }
         for token in line.split_whitespace() {
-            let cleaned =
-                token.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '-' && c != '_');
+            let cleaned = token
+                .trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '-' && c != '_');
             if looks_like_soname(cleaned) {
                 found.insert(cleaned.to_string());
             }
@@ -297,6 +297,9 @@ mod tests {
 
         let found = find_plugin_references(config);
         assert_eq!(found, vec!["pam_unix.so".to_string()]);
-        assert!(!found.contains(&"pam_fake.so".to_string()), "commented-out lines should be skipped");
+        assert!(
+            !found.contains(&"pam_fake.so".to_string()),
+            "commented-out lines should be skipped"
+        );
     }
 }

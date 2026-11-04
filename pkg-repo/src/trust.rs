@@ -208,7 +208,10 @@ pub struct RoleDelegation {
 /// *zero* signatures satisfy the role.)
 impl Default for RoleDelegation {
     fn default() -> Self {
-        RoleDelegation { threshold: 1, keys: BTreeMap::new() }
+        RoleDelegation {
+            threshold: 1,
+            keys: BTreeMap::new(),
+        }
     }
 }
 
@@ -417,7 +420,10 @@ impl fmt::Display for TrustError {
                 write!(f, "invalid signature from key {fingerprint}")
             }
             TrustError::InsufficientSignatures { have, need } => {
-                write!(f, "insufficient valid signatures ({have} of {need} required)")
+                write!(
+                    f,
+                    "insufficient valid signatures ({have} of {need} required)"
+                )
             }
             TrustError::Rollback {
                 what,
@@ -594,9 +600,18 @@ impl TrustStore {
                 created_at: 0,
                 expires_at: u64::MAX, // embedded anchor never expires
                 root: embedded_root.clone(),
-                repository: RoleDelegation { threshold: 1, keys: BTreeMap::new() },
-                timestamp: RoleDelegation { threshold: 1, keys: BTreeMap::new() },
-                reviewer: RoleDelegation { threshold: 1, keys: BTreeMap::new() },
+                repository: RoleDelegation {
+                    threshold: 1,
+                    keys: BTreeMap::new(),
+                },
+                timestamp: RoleDelegation {
+                    threshold: 1,
+                    keys: BTreeMap::new(),
+                },
+                reviewer: RoleDelegation {
+                    threshold: 1,
+                    keys: BTreeMap::new(),
+                },
             };
             return Ok(TrustStore {
                 dir: Some(dir.to_path_buf()),
@@ -611,10 +626,17 @@ impl TrustStore {
         let payload_bytes = canonical_bytes(&env.signed)?;
         // Verify against the persisted signer set if one exists
         // (rotations chain); otherwise against the embedded anchor.
-        let signers = state.root_signers.clone().unwrap_or_else(|| embedded_root.clone());
+        let signers = state
+            .root_signers
+            .clone()
+            .unwrap_or_else(|| embedded_root.clone());
         signers
             .verify_threshold(&payload_bytes, &env.signatures)
-            .map_err(|e| TrustError::Malformed(format!("root.json does not verify against the trusted root keys: {e}")))?;
+            .map_err(|e| {
+                TrustError::Malformed(format!(
+                    "root.json does not verify against the trusted root keys: {e}"
+                ))
+            })?;
         let manifest: RootManifest = serde_json::from_value(env.signed.clone())
             .map_err(|e| TrustError::Malformed(format!("root.json payload: {e}")))?;
         if manifest.version < state.root_version {
@@ -663,7 +685,12 @@ impl TrustStore {
     /// Look up a reviewer-role key by fingerprint (v14 §4), honoring
     /// local revocations. Used by attestation verification.
     pub fn reviewer_key(&self, fingerprint: &str) -> Option<VerifyingKey> {
-        if self.state.local_revocations.iter().any(|r| r == fingerprint) {
+        if self
+            .state
+            .local_revocations
+            .iter()
+            .any(|r| r == fingerprint)
+        {
             return None;
         }
         self.root.reviewer.verifying_key(fingerprint)
@@ -867,8 +894,14 @@ impl TrustStore {
         let report = RootRotationReport {
             old_version: self.root.version,
             new_version: manifest.version,
-            added_keys: new_fps.difference(&old_fps).map(|s| s.to_string()).collect(),
-            removed_keys: old_fps.difference(&new_fps).map(|s| s.to_string()).collect(),
+            added_keys: new_fps
+                .difference(&old_fps)
+                .map(|s| s.to_string())
+                .collect(),
+            removed_keys: old_fps
+                .difference(&new_fps)
+                .map(|s| s.to_string())
+                .collect(),
         };
 
         self.root_signers = manifest.root.clone();
@@ -894,7 +927,12 @@ impl TrustStore {
     /// status.
     pub fn list_keys(&self) -> Vec<KeyInfo> {
         let mut out = Vec::new();
-        for role in [Role::Root, Role::Repository, Role::Timestamp, Role::Reviewer] {
+        for role in [
+            Role::Root,
+            Role::Repository,
+            Role::Timestamp,
+            Role::Reviewer,
+        ] {
             let src = match role {
                 Role::Root => &self.root.root,
                 Role::Repository => &self.root.repository,
@@ -924,8 +962,17 @@ impl TrustStore {
             self.root.root.keys.len()
         ));
         for info in self.list_keys() {
-            let mark = if info.revoked { " [locally revoked]" } else { "" };
-            s.push_str(&format!("  {:10} {}{}\n", info.role.as_str(), info.fingerprint, mark));
+            let mark = if info.revoked {
+                " [locally revoked]"
+            } else {
+                ""
+            };
+            s.push_str(&format!(
+                "  {:10} {}{}\n",
+                info.role.as_str(),
+                info.fingerprint,
+                mark
+            ));
         }
         s.push_str(&format!(
             "last accepted index_version: {}\n",
@@ -959,9 +1006,7 @@ impl TrustStore {
         }
         // Would repository fall below threshold?
         let repo = self.effective_delegation(Role::Repository);
-        if repo.keys.contains_key(fingerprint)
-            && (repo.keys.len() as u32) <= repo.threshold
-        {
+        if repo.keys.contains_key(fingerprint) && (repo.keys.len() as u32) <= repo.threshold {
             return Err(TrustError::ThresholdViolation(format!(
                 "revoking {fingerprint} would drop the repository role below its \
                  threshold of {}",
@@ -977,7 +1022,12 @@ impl TrustStore {
             )
             .into());
         }
-        if !self.state.local_revocations.iter().any(|r| r == fingerprint) {
+        if !self
+            .state
+            .local_revocations
+            .iter()
+            .any(|r| r == fingerprint)
+        {
             self.state.local_revocations.push(fingerprint.to_string());
         }
         self.persist_state()
@@ -1059,7 +1109,10 @@ mod tests {
             let vk = k.verifying_key();
             map.insert(key_fingerprint(&vk), hex_encode(vk.as_bytes()));
         }
-        RoleDelegation { threshold, keys: map }
+        RoleDelegation {
+            threshold,
+            keys: map,
+        }
     }
 
     /// Sign a payload value with the given keys, producing the JSON
@@ -1077,7 +1130,11 @@ mod tests {
                 }
             })
             .collect();
-        serde_json::to_vec(&SignedDocument { signed: payload, signatures }).unwrap()
+        serde_json::to_vec(&SignedDocument {
+            signed: payload,
+            signatures,
+        })
+        .unwrap()
     }
 
     #[allow(dead_code)] // committer_key is part of the fixture's reviewer set; some tests don't read it
@@ -1107,7 +1164,14 @@ mod tests {
         };
         let signers = delegation_of(&[&root_keys[0], &root_keys[1], &root_keys[2]], 2);
         let store = TrustStore::in_memory(root, signers);
-        Fixture { root_keys, repo_key, ts_key, reviewer_key, committer_key, store }
+        Fixture {
+            root_keys,
+            repo_key,
+            ts_key,
+            reviewer_key,
+            committer_key,
+            store,
+        }
     }
 
     fn index_bundle(
@@ -1150,7 +1214,10 @@ mod tests {
     fn happy_path_verifies() {
         let f = fixture(NOW);
         let bundle = index_bundle(&f, 7, NOW + 3600, &[&f.ts_key]);
-        let vi = f.store.verify_index_at(&bundle, NOW, VerifyPolicy::default()).unwrap();
+        let vi = f
+            .store
+            .verify_index_at(&bundle, NOW, VerifyPolicy::default())
+            .unwrap();
         assert_eq!(vi.index_version, 7);
         assert_eq!(vi.packages.len(), 1);
         assert!(vi.packages[0].critical);
@@ -1177,8 +1244,14 @@ mod tests {
             "index": index_env, "timestamp": ts_env
         }))
         .unwrap();
-        let err = f.store.verify_index_at(&bundle, NOW, VerifyPolicy::default()).unwrap_err();
-        assert!(err.to_string().contains("insufficient valid signatures"), "{err}");
+        let err = f
+            .store
+            .verify_index_at(&bundle, NOW, VerifyPolicy::default())
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("insufficient valid signatures"),
+            "{err}"
+        );
     }
 
     /// Cloneable snapshot of the fixture's current root manifest as a
@@ -1198,7 +1271,10 @@ mod tests {
         let doc = sign_doc(new_root, &[&f.root_keys[0]]);
         let mut store = f.store;
         let err = store.apply_root_manifest(&doc).unwrap_err();
-        assert!(err.to_string().contains("insufficient valid signatures"), "{err}");
+        assert!(
+            err.to_string().contains("insufficient valid signatures"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1206,13 +1282,19 @@ mod tests {
         let mut f_store = fixture(NOW).store;
         let f = fixture(NOW);
         let bundle = index_bundle(&f, 7, NOW + 3600, &[&f.ts_key]);
-        f_store.verify_index_at(&bundle, NOW, VerifyPolicy::default()).unwrap();
+        f_store
+            .verify_index_at(&bundle, NOW, VerifyPolicy::default())
+            .unwrap();
         f_store.record_index_version(7).unwrap();
         // Same version again is fine (idempotent re-sync).
-        f_store.verify_index_at(&bundle, NOW, VerifyPolicy::default()).unwrap();
+        f_store
+            .verify_index_at(&bundle, NOW, VerifyPolicy::default())
+            .unwrap();
         // Older is a rollback.
         let old = index_bundle(&f, 6, NOW + 3600, &[&f.ts_key]);
-        let err = f_store.verify_index_at(&old, NOW, VerifyPolicy::default()).unwrap_err();
+        let err = f_store
+            .verify_index_at(&old, NOW, VerifyPolicy::default())
+            .unwrap_err();
         assert!(err.to_string().contains("rollback refused"), "{err}");
     }
 
@@ -1229,12 +1311,17 @@ mod tests {
             .unwrap();
         assert!(matches!(
             vi.warnings.as_slice(),
-            [TrustWarning::TimestampStaleGrace { expired_secs_ago: 3600 }]
+            [TrustWarning::TimestampStaleGrace {
+                expired_secs_ago: 3600
+            }]
         ));
 
         // Past grace: hard failure.
         let past = NOW + TIMESTAMP_GRACE_SECS + 1;
-        let err = f.store.verify_index_at(&bundle, past, VerifyPolicy::default()).unwrap_err();
+        let err = f
+            .store
+            .verify_index_at(&bundle, past, VerifyPolicy::default())
+            .unwrap_err();
         assert!(err.to_string().contains("timestamp expired"), "{err}");
 
         // --ignore-stale overrides, with a louder warning recorded.
@@ -1268,7 +1355,10 @@ mod tests {
             "index": index_env, "timestamp": ts_env
         }))
         .unwrap();
-        let err = f.store.verify_index_at(&bundle, NOW, VerifyPolicy::default()).unwrap_err();
+        let err = f
+            .store
+            .verify_index_at(&bundle, NOW, VerifyPolicy::default())
+            .unwrap_err();
         assert!(err.to_string().contains("does not match"), "{err}");
     }
 
@@ -1309,8 +1399,10 @@ mod tests {
         let report = store.apply_root_manifest(&rotation_doc).unwrap();
         assert_eq!(report.added_keys.len(), 1);
         assert_eq!(report.removed_keys.len(), 1); // old repo key gone
-        // Old repo key no longer verifies an index.
-        assert!(store.verify_index_at(&bundle, NOW, VerifyPolicy::default()).is_err());
+                                                  // Old repo key no longer verifies an index.
+        assert!(store
+            .verify_index_at(&bundle, NOW, VerifyPolicy::default())
+            .is_err());
     }
 
     #[test]
@@ -1348,7 +1440,10 @@ mod tests {
         parsed["index"]["signatures"][0]["sig"] =
             serde_json::Value::String(hex_encode(&[0xAB; 64]));
         bundle = serde_json::to_vec(&parsed).unwrap();
-        let err = f.store.verify_index_at(&bundle, NOW, VerifyPolicy::default()).unwrap_err();
+        let err = f
+            .store
+            .verify_index_at(&bundle, NOW, VerifyPolicy::default())
+            .unwrap_err();
         assert!(err.to_string().contains("invalid signature"), "{err}");
     }
 

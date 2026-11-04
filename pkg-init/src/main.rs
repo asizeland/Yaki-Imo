@@ -190,9 +190,7 @@ fn run_apply() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Err(e) => {
-            eprintln!(
-                "glibc-apply: WARNING: staged tree unusable ({e}); booting old glibc"
-            );
+            eprintln!("glibc-apply: WARNING: staged tree unusable ({e}); booting old glibc");
             clear_flag();
             return ExitCode::SUCCESS;
         }
@@ -346,18 +344,25 @@ fn parse_flag(path: &str) -> Result<PendingFlag, String> {
             "target" => target = Some(value.to_string()),
             "manifest_sha256" => {
                 manifest_sha256 = Some(hex64(value).ok_or_else(|| {
-                    format!("line {}: bad manifest_sha256 (want 64 hex chars)", lineno + 1)
+                    format!(
+                        "line {}: bad manifest_sha256 (want 64 hex chars)",
+                        lineno + 1
+                    )
                 })?)
             }
             "glibc_apply_sha256" => {
                 glibc_apply_sha256 = Some(hex64(value).ok_or_else(|| {
-                    format!("line {}: bad glibc_apply_sha256 (want 64 hex chars)", lineno + 1)
+                    format!(
+                        "line {}: bad glibc_apply_sha256 (want 64 hex chars)",
+                        lineno + 1
+                    )
                 })?)
             }
             "created" => {
-                created = Some(parse_rfc3339(value).ok_or_else(|| {
-                    format!("line {}: bad created (want RFC 3339)", lineno + 1)
-                })?)
+                created =
+                    Some(parse_rfc3339(value).ok_or_else(|| {
+                        format!("line {}: bad created (want RFC 3339)", lineno + 1)
+                    })?)
             }
             other => {
                 return Err(format!(
@@ -395,20 +400,22 @@ fn parse_rfc3339(value: &str) -> Option<String> {
     let digits = |from: usize, to: usize| b[from..to].iter().all(u8::is_ascii_digit);
     let num = |i: usize| (b[i] - b'0') as u32 * 10 + (b[i + 1] - b'0') as u32;
     if !(digits(0, 4)
-        && b[4] == b'-' && digits(5, 7)
-        && b[7] == b'-' && digits(8, 10)
-        && b[10] == b'T' && digits(11, 13)
-        && b[13] == b':' && digits(14, 16)
-        && b[16] == b':' && digits(17, 19))
+        && b[4] == b'-'
+        && digits(5, 7)
+        && b[7] == b'-'
+        && digits(8, 10)
+        && b[10] == b'T'
+        && digits(11, 13)
+        && b[13] == b':'
+        && digits(14, 16)
+        && b[16] == b':'
+        && digits(17, 19))
     {
         return None;
     }
     let (month, day, hour, min, sec) = (num(5), num(8), num(11), num(14), num(17));
-    if !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || hour > 23
-        || min > 59
-        || sec > 60 // 60: leap second
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 60
+    // 60: leap second
     {
         return None;
     }
@@ -464,11 +471,7 @@ fn manifest_sha256(root: &Path) -> Result<String, String> {
     Ok(hex_lower(&m.finalize()))
 }
 
-fn collect_tree(
-    root: &Path,
-    dir: &Path,
-    out: &mut Vec<(String, String)>,
-) -> Result<(), String> {
+fn collect_tree(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) -> Result<(), String> {
     let rd = fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
     for entry in rd {
         let entry = entry.map_err(|e| format!("read_dir entry: {e}"))?;
@@ -511,8 +514,8 @@ fn sha256_file(path: &Path) -> Result<String, String> {
 
 /// SHA-256 of our own binary via /proc/self/exe (drift check, v13 §3).
 fn self_sha256() -> Result<String, String> {
-    let me: PathBuf = fs::read_link("/proc/self/exe")
-        .map_err(|e| format!("readlink /proc/self/exe: {e}"))?;
+    let me: PathBuf =
+        fs::read_link("/proc/self/exe").map_err(|e| format!("readlink /proc/self/exe: {e}"))?;
     sha256_file(&me)
 }
 
@@ -535,7 +538,15 @@ fn hex_lower(digest: &[u8; 32]) -> String {
 fn exchange(a: &str, b: &str) -> Result<(), String> {
     let a_c = CString::new(a).map_err(|_| "anchor path contains NUL".to_string())?;
     let b_c = CString::new(b).map_err(|_| "staged path contains NUL".to_string())?;
-    let ret = unsafe { sys_renameat2(AT_FDCWD, a_c.as_ptr().cast(), AT_FDCWD, b_c.as_ptr().cast(), RENAME_EXCHANGE) };
+    let ret = unsafe {
+        sys_renameat2(
+            AT_FDCWD,
+            a_c.as_ptr().cast(),
+            AT_FDCWD,
+            b_c.as_ptr().cast(),
+            RENAME_EXCHANGE,
+        )
+    };
     if ret == 0 {
         Ok(())
     } else {
@@ -551,7 +562,13 @@ fn exchange(a: &str, b: &str) -> Result<(), String> {
 /// fall back to the `syscall(2)` wrapper exported by the C library,
 /// which std links against anyway (works musl-static).
 #[cfg(target_arch = "x86_64")]
-unsafe fn sys_renameat2(olddirfd: i64, oldpath: *const u8, newdirfd: i64, newpath: *const u8, flags: u32) -> i64 {
+unsafe fn sys_renameat2(
+    olddirfd: i64,
+    oldpath: *const u8,
+    newdirfd: i64,
+    newpath: *const u8,
+    flags: u32,
+) -> i64 {
     let ret: i64;
     unsafe {
         core::arch::asm!(
@@ -571,14 +588,29 @@ unsafe fn sys_renameat2(olddirfd: i64, oldpath: *const u8, newdirfd: i64, newpat
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-unsafe fn sys_renameat2(olddirfd: i64, oldpath: *const u8, newdirfd: i64, newpath: *const u8, flags: u32) -> i64 {
+unsafe fn sys_renameat2(
+    olddirfd: i64,
+    oldpath: *const u8,
+    newdirfd: i64,
+    newpath: *const u8,
+    flags: u32,
+) -> i64 {
     // Fallback: the libc `syscall` function (linked via std). The
     // per-arch renameat2 number must be supplied here when porting.
     extern "C" {
         fn syscall(num: i64, ...) -> i64;
     }
     const SYS_RENAMEAT2_FALLBACK: i64 = 316; // ADJUST PER ARCH (i686: 353)
-    unsafe { syscall(SYS_RENAMEAT2_FALLBACK, olddirfd, oldpath, newdirfd, newpath, flags) }
+    unsafe {
+        syscall(
+            SYS_RENAMEAT2_FALLBACK,
+            olddirfd,
+            oldpath,
+            newdirfd,
+            newpath,
+            flags,
+        )
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -626,8 +658,8 @@ impl Sha256 {
     fn new() -> Self {
         Self {
             state: [
-                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-                0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+                0x5be0cd19,
             ],
             buf: [0u8; 64],
             buf_len: 0,
@@ -683,7 +715,12 @@ impl Sha256 {
     fn compress(&mut self, block: &[u8; 64]) {
         let mut w = [0u32; 64];
         for i in 0..16 {
-            w[i] = u32::from_be_bytes([block[i * 4], block[i * 4 + 1], block[i * 4 + 2], block[i * 4 + 3]]);
+            w[i] = u32::from_be_bytes([
+                block[i * 4],
+                block[i * 4 + 1],
+                block[i * 4 + 2],
+                block[i * 4 + 3],
+            ]);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
@@ -705,9 +742,13 @@ impl Sha256 {
             let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
             let maj = (a & b) ^ (a & c) ^ (b & c);
             let t2 = s0.wrapping_add(maj);
-            h = g; g = f; f = e;
+            h = g;
+            g = f;
+            f = e;
             e = d.wrapping_add(t1);
-            d = c; c = b; b = a;
+            d = c;
+            c = b;
+            b = a;
             a = t1.wrapping_add(t2);
         }
         self.state[0] = self.state[0].wrapping_add(a);
@@ -819,7 +860,10 @@ mod tests {
         assert_eq!(f.target, "2.40");
         assert_eq!(f.manifest_sha256, "ab".repeat(32)); // hex lowered
         assert_eq!(f.created, "2024-07-03T09:46:40Z");
-        assert_eq!(f.glibc_apply_sha256.as_deref(), Some("cd".repeat(32).as_str()));
+        assert_eq!(
+            f.glibc_apply_sha256.as_deref(),
+            Some("cd".repeat(32).as_str())
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -898,7 +942,7 @@ mod tests {
             "2024-07-03 09:46:40Z",
             "2024-13-03T09:46:40Z", // month 13
             "2024-07-03T25:46:40Z", // hour 25
-            "2024-07-03T09:46:40", // missing offset
+            "2024-07-03T09:46:40",  // missing offset
         ] {
             assert_eq!(parse_rfc3339(bad), None, "accepted: {bad}");
         }

@@ -16,7 +16,7 @@ set -eu
 
 if [ -z "${E2E_INNER:-}" ]; then
     exec nix shell \
-        nixpkgs#gcc nixpkgs#perl nixpkgs#bubblewrap nixpkgs#python3 \
+        nixpkgs#gcc nixpkgs#cargo nixpkgs#rustc nixpkgs#perl nixpkgs#bubblewrap nixpkgs#python3 \
         nixpkgs#coreutils nixpkgs#gnutar nixpkgs#gzip nixpkgs#gnumake \
         nixpkgs#sqlite nixpkgs#binutils nixpkgs#gnused nixpkgs#gnugrep \
         nixpkgs#gawk nixpkgs#diffutils \

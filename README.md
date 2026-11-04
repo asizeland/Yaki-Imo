@@ -1,4 +1,4 @@
-# Yaki Imo (pkg)
+# Yakimo (pkg)
 
 In summary: never quite found a linux distribution which felt natural, ironically 
 FreeBSD achieved that for me, tooling feels coherent, intuitive and natural, but it also
@@ -15,13 +15,22 @@ Anyways, so I am no programmer, but I had an idea and decided to do anything to 
 my own PM. Largely AI slop at the moment, as my life allows me I will replace this with
 100% human, organic, unadulterated slop. 
 
-Yaki Imo is a source-build-only Linux package manager (see SPEC.md for the
+Yakimo is a source-build-only Linux package manager (see SPEC.md for the
 binding interface contracts; the user-facing distribution spec is
-pkg-spec-v14-consolidated.md). The workspace crates and CLI keep their
+pkg-spec-v15-consolidated.md). The workspace crates and CLI keep their
 `pkg-*` / `pkg` names. Crates: pkg-core (types), pkg-resolver (pubgrub),
 pkg-db (SQLite), pkg-sandbox (bwrap), pkg-scanner (ELF/heuristics),
 pkg-repo (signed index/fetch), pkg-build (orchestration), pkg-audit
 (security/supply-chain), pkg-init (musl-static glibc-apply), pkg-cli (clap).
+
+## Documentation
+
+- [User guide](user-guide.md): setup, everyday commands, configuration,
+  packaging, testing, and troubleshooting.
+- [Technical manual](docs/technical-manual.md): the mechanics behind package
+  operations, security, transactions, and maintenance tools.
+- [Developer's manual](docs/developers-manual.md): workspace architecture,
+  important modules, and the contribution workflow.
 
 Build the musl-static release binaries (pkg / pkg-init):
 
@@ -46,7 +55,7 @@ sandboxed reproducible builds with provenance, atomic store-and-symlink
 activation, generations and undo, dependency-directed provider hints for
 packagers — and it has been proven on real upstream software from glibc to 
 bash, plus repackaged binary blobs like Discord, Steam ... The first bootstrap 
-stage is done: Yaki Imo builds real glibc 2.42 from source on 
+stage is done: Yakimo builds real glibc 2.42 from source on
 top of kernel headers and more, installed correctly and working. 
 I am currently progressing in this area, packaging more software 
 to create a live system. 
@@ -60,11 +69,11 @@ of the store, not a new subsystem; what is missing is
 the index, the signatures, and the trust policy around them. 
 **Reproducibility verification tiers** (multi-builder cross-checking) 
 are deferred in favor of a local double-build of the critical set. 
-**DKMS integration** for out-of-tree kernel modules is specified 
-(a canonical `[dkms]` recipe table) but unimplemented. 
+**DKMS integration** now rebuilds out-of-tree modules when a driver or
+kernel is installed. Module signing and removal/undo cleanup remain deferred.
 
 The number of packages should be fairly easy to increase and in the 
-future maintain due to how Yaki Imo assists with with finding undeclared
+future maintain due to how Yakimo assists with with finding undeclared
 dependencies in a recepie and how it helps maintain a recepie by
 updating them to newer versions of a program. This should also mean 
 offering and retaining multiple version binaries in repos is possible,
@@ -106,9 +115,8 @@ a deliberately un-ergonomic `--defer-security=I-understand` guard when
 an advisory is open; the spec's config-side `[defer]` lists are
 written down but not wired up yet), reproducibility assurance
 is a local double-build of the critical set rather than full
-multi-builder verification tiers, and DKMS for out-of-tree kernel
-modules is designed but not implemented — so today, kernel module
-building is on you.
+multi-builder verification tiers. DKMS now handles kernel-triggered module
+rebuilds, but module signing and removal/undo cleanup are still on you.
 
 ## The honest downsides
 
@@ -140,7 +148,7 @@ knobs, and learned build-time estimates so you at least know the price
 before you pay it.
 
 **How is it different from apt, dnf, or pacman?** What options was
-this built with is the distributor's business. Yaki Imo builds on your
+this built with is the distributor's business. Yakimo builds on your
 machine (and in the future, binaries will adapt to your configuration), 
 so options can be customized for your purpose and every transaction
 is an atomic store swap with a recorded generation, there is no

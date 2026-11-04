@@ -416,7 +416,8 @@ pub fn audit_supply_chain(
                 severity: FindingSeverity::Warning,
                 kind: FindingKind::ReproUnknown,
                 detail: "critical-set package without a recorded double-build result \
-                         (built with --no-repro-check or pre-v14)".into(),
+                         (built with --no-repro-check or pre-v14)"
+                    .into(),
             }),
             _ => {}
         }
@@ -480,7 +481,11 @@ const ACK_DDL: &str = "CREATE TABLE IF NOT EXISTS supply_chain_acknowledgements 
 /// the number of findings acknowledged. Refuses (NotFound) if the
 /// package has no current hard findings — an ack that matches nothing
 /// would be a silent no-op that *looks* like it unblocked something.
-pub fn acknowledge(conn: &Connection, report: &SupplyChainReport, package: &str) -> PkgResult<usize> {
+pub fn acknowledge(
+    conn: &Connection,
+    report: &SupplyChainReport,
+    package: &str,
+) -> PkgResult<usize> {
     conn.execute_batch(ACK_DDL)
         .map_err(|e| PkgError::Db(e.to_string()))?;
     let now = unix_now() as i64;
@@ -634,15 +639,19 @@ mod tests {
         let mut r = SupplyChainReport::default();
         assert_eq!(r.exit_code(), 0);
         r.findings.push(SupplyChainFinding {
-            package: "a".into(), version: "1".into(),
+            package: "a".into(),
+            version: "1".into(),
             severity: FindingSeverity::Warning,
-            kind: FindingKind::MissingProvenance, detail: String::new(),
+            kind: FindingKind::MissingProvenance,
+            detail: String::new(),
         });
         assert_eq!(r.exit_code(), 1);
         r.findings.push(SupplyChainFinding {
-            package: "b".into(), version: "1".into(),
+            package: "b".into(),
+            version: "1".into(),
             severity: FindingSeverity::Hard,
-            kind: FindingKind::ReproMismatch, detail: String::new(),
+            kind: FindingKind::ReproMismatch,
+            detail: String::new(),
         });
         assert_eq!(r.exit_code(), 2);
     }
@@ -718,7 +727,10 @@ mod tests {
         let m = manifest_with(true);
         let report = audit_supply_chain(&conn, Some(&m), &no_quarantine(), false).unwrap();
         assert_eq!(report.exit_code(), 1);
-        assert!(report.findings.iter().any(|f| f.kind == FindingKind::ReproUnknown));
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.kind == FindingKind::ReproUnknown));
     }
 
     #[test]
@@ -735,7 +747,10 @@ mod tests {
         );
         let m = manifest_with(true);
         let report = audit_supply_chain(&conn, Some(&m), &no_quarantine(), false).unwrap();
-        assert!(report.findings.iter().any(|f| f.kind == FindingKind::FetchOriginDrift));
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.kind == FindingKind::FetchOriginDrift));
         // Same URL but the manifest now pins a different hash: repin.
         conn.execute("DELETE FROM provenance", []).unwrap();
         insert_prov(
@@ -746,11 +761,9 @@ mod tests {
             r#"[{"url":"https://upstream.example/xz.tar.xz","sha256":"bb"}]"#,
         );
         let report = audit_supply_chain(&conn, Some(&m), &no_quarantine(), false).unwrap();
-        assert!(report
-            .findings
-            .iter()
-            .any(|f| f.kind == FindingKind::FetchOriginDrift
-                && f.severity == FindingSeverity::Hard));
+        assert!(report.findings.iter().any(
+            |f| f.kind == FindingKind::FetchOriginDrift && f.severity == FindingSeverity::Hard
+        ));
     }
 
     #[test]
@@ -773,7 +786,9 @@ mod tests {
         // Ack xz: blocked set empties.
         let n = acknowledge(&conn, &report, "xz").unwrap();
         assert_eq!(n, 1);
-        assert!(unacknowledged_hard_findings(&conn, &report).unwrap().is_empty());
+        assert!(unacknowledged_hard_findings(&conn, &report)
+            .unwrap()
+            .is_empty());
 
         // A NEW version's same finding is not covered by the old ack.
         // provenance references packages(id) — delete it first.

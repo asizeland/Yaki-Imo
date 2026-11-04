@@ -77,10 +77,7 @@ pub struct Profile {
 /// of a pinned package get registered as candidates at all, via the
 /// fixed `Pin::allows` (with a `None` candidate ABI tag — pre-build,
 /// the build orchestrator re-verifies the tag post-build).
-pub fn effective_constraints(
-    profile: &Profile,
-    pins: &PinSet,
-) -> EffectiveConstraints {
+pub fn effective_constraints(profile: &Profile, pins: &PinSet) -> EffectiveConstraints {
     profile
         .constraints
         .iter()
@@ -337,7 +334,11 @@ mod tests {
         pins.insert(pin("openssl", "3.0.13", PinMode::Exact)); // not in the profile at all
 
         let effective = effective_constraints(profile, &pins);
-        assert_eq!(effective.len(), 3, "an unrelated pin shouldn't remove anything");
+        assert_eq!(
+            effective.len(),
+            3,
+            "an unrelated pin shouldn't remove anything"
+        );
     }
 
     #[test]

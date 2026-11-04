@@ -1,0 +1,6 @@
+name = "intel-microcode"
+version = "20260925"
+category = "sys-firmware"
+
+[dependencies]
+runtime = ["linux"]

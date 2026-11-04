@@ -1,0 +1,8 @@
+name = "elfutils"
+version = "0.193"
+category = "dev-libs"
+
+[dependencies]
+link = ["glibc", "gcc", "zlib"]
+runtime = ["glibc", "gcc", "zlib"]
+build = ["gcc", "make", "linux-headers", "pkgconf"]

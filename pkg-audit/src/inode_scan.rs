@@ -77,7 +77,11 @@ pub fn parse_maps_line(line: &str) -> Option<MapsEntry> {
         Some(p) => (p.to_string(), true),
         None => (raw_path.to_string(), false),
     };
-    Some(MapsEntry { inode, path, deleted })
+    Some(MapsEntry {
+        inode,
+        path,
+        deleted,
+    })
 }
 
 /// Return the remainder of `line` after skipping `n` whitespace-
@@ -109,16 +113,23 @@ pub struct AffectedProcess {
 /// `store_root`. Unreadable processes (permitted for non-root callers,
 /// or processes that exited mid-scan) are skipped — the audit reports
 /// what it can see; run as root for completeness.
-pub fn scan_deleted_mappings(proc_root: &Path, store_root: &Path) -> PkgResult<Vec<AffectedProcess>> {
+pub fn scan_deleted_mappings(
+    proc_root: &Path,
+    store_root: &Path,
+) -> PkgResult<Vec<AffectedProcess>> {
     let mut out = Vec::new();
     let entries = std::fs::read_dir(proc_root)?;
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Ok(pid) = name.parse::<u32>() else { continue };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
         let maps_path = entry.path().join("maps");
-        let Ok(maps) = std::fs::read_to_string(&maps_path) else { continue };
+        let Ok(maps) = std::fs::read_to_string(&maps_path) else {
+            continue;
+        };
         let mut deleted: Vec<String> = maps
             .lines()
             .filter_map(parse_maps_line)
@@ -135,7 +146,11 @@ pub fn scan_deleted_mappings(proc_root: &Path, store_root: &Path) -> PkgResult<V
         let comm = std::fs::read_to_string(entry.path().join("comm"))
             .map(|s| s.trim().to_string())
             .unwrap_or_else(|_| "?".to_string());
-        out.push(AffectedProcess { pid, comm, deleted_paths: deleted });
+        out.push(AffectedProcess {
+            pid,
+            comm,
+            deleted_paths: deleted,
+        });
     }
     out.sort_by_key(|p| p.pid);
     Ok(out)
@@ -346,7 +361,10 @@ mod tests {
         );
         // Unmapped: root, slices, scopes.
         assert_eq!(service_from_cgroup_path("/"), None);
-        assert_eq!(service_from_cgroup_path("/user.slice/user-1000.slice/session-3.scope"), None);
+        assert_eq!(
+            service_from_cgroup_path("/user.slice/user-1000.slice/session-3.scope"),
+            None
+        );
         assert_eq!(service_from_cgroup_path("/init.scope"), None);
     }
 
@@ -370,16 +388,22 @@ mod tests {
         // test uses a nonexistent root so every PID is unmapped — the
         // grouping logic for mapped services is covered by injecting a
         // fabricated map below instead.
-        let procs = vec![
-            AffectedProcess { pid: 4001, comm: "bash".into(), deleted_paths: vec!["/x".into()] },
-        ];
+        let procs = vec![AffectedProcess {
+            pid: 4001,
+            comm: "bash".into(),
+            deleted_paths: vec!["/x".into()],
+        }];
         let report = report_from_scan(Path::new("/nonexistent"), procs);
         assert!(report.services.is_empty());
         assert_eq!(report.unmapped.len(), 1);
 
         // Service grouping, via the pure path mapping directly.
         let mut by_service: BTreeMap<String, Vec<u32>> = BTreeMap::new();
-        for (pid, cg) in [(100u32, "/openrc/sshd"), (101, "/openrc/sshd"), (102, "/openrc/dbus")] {
+        for (pid, cg) in [
+            (100u32, "/openrc/sshd"),
+            (101, "/openrc/sshd"),
+            (102, "/openrc/dbus"),
+        ] {
             if let Some(name) = service_from_cgroup_path(cg) {
                 by_service.entry(name).or_default().push(pid);
             }
@@ -402,7 +426,10 @@ mod tests {
         assert_eq!(services[1].pids, vec![100, 101]);
 
         // Render includes the exact restart commands (v13 §7).
-        let full = RestartReport { services, unmapped: vec![] };
+        let full = RestartReport {
+            services,
+            unmapped: vec![],
+        };
         let text = full.render();
         assert!(text.contains("rc-service dbus restart"));
         assert!(text.contains("rc-service sshd restart"));

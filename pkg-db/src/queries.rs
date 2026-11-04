@@ -392,11 +392,7 @@ pub fn list_installed_packages(conn: &Connection) -> PkgResult<Vec<PackageRow>> 
 ///
 /// Lock precondition (§9.4): mutating; the caller must hold the
 /// exclusive `/var/lib/pkg/lock` for the enclosing critical section.
-pub fn set_installed_explicitly(
-    conn: &Connection,
-    row_id: i64,
-    explicitly: bool,
-) -> PkgResult<()> {
+pub fn set_installed_explicitly(conn: &Connection, row_id: i64, explicitly: bool) -> PkgResult<()> {
     let affected = conn
         .execute(
             "UPDATE packages SET installed_explicitly = ?1 WHERE id = ?2",
@@ -761,8 +757,7 @@ pub fn check_glibc_gate(conn: &Connection, required_floor: &Version) -> Result<(
         return Ok(());
     };
     let target = &pending.target_version;
-    let reaches_pending =
-        required_floor.same_release_core(target) || required_floor > target;
+    let reaches_pending = required_floor.same_release_core(target) || required_floor > target;
     if reaches_pending {
         return Err(PkgError::GlibcPending {
             required: required_floor.to_string(),
@@ -883,11 +878,7 @@ pub fn delete_package_options(conn: &Connection, package_id: i64) -> PkgResult<(
 fn map_generation_row(row: &Row) -> rusqlite::Result<GenerationRow> {
     let kind: String = row.get("kind")?;
     let kind = kind.parse::<GenerationKind>().map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(
-            0,
-            rusqlite::types::Type::Text,
-            Box::new(e),
-        )
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
     })?;
     Ok(GenerationRow {
         id: row.get("id")?,
@@ -1001,7 +992,13 @@ pub fn record_undo_generation(
     undoes: i64,
     cascade_id: Option<&str>,
 ) -> PkgResult<i64> {
-    record_generation_impl(conn, command, GenerationKind::Undo, Some(undoes), cascade_id)
+    record_generation_impl(
+        conn,
+        command,
+        GenerationKind::Undo,
+        Some(undoes),
+        cascade_id,
+    )
 }
 
 /// Looks up a generation by id.
@@ -1579,7 +1576,10 @@ mod tests {
             abi_tag: AbiTag(2),
             ..test_id("openssl")
         };
-        assert_eq!(find_package_by_identity(&conn, &different_abi).unwrap(), None);
+        assert_eq!(
+            find_package_by_identity(&conn, &different_abi).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -1606,9 +1606,19 @@ mod tests {
         let conn = fresh_db();
         let row_id = insert_package(&conn, &test_id("openssl"), Track::Binary, 0, false).unwrap();
 
-        assert!(!get_package_by_id(&conn, row_id).unwrap().unwrap().installed_explicitly);
+        assert!(
+            !get_package_by_id(&conn, row_id)
+                .unwrap()
+                .unwrap()
+                .installed_explicitly
+        );
         set_installed_explicitly(&conn, row_id, true).unwrap();
-        assert!(get_package_by_id(&conn, row_id).unwrap().unwrap().installed_explicitly);
+        assert!(
+            get_package_by_id(&conn, row_id)
+                .unwrap()
+                .unwrap()
+                .installed_explicitly
+        );
     }
 
     #[test]
@@ -1625,11 +1635,11 @@ mod tests {
     fn reverse_dependents_finds_direct_dependents() {
         let conn = fresh_db();
         let curl_id = insert_package(&conn, &test_id("curl"), Track::Binary, 0, true).unwrap();
-        let openssl_id = insert_package(&conn, &test_id("openssl"), Track::Binary, 0, false).unwrap();
+        let openssl_id =
+            insert_package(&conn, &test_id("openssl"), Track::Binary, 0, false).unwrap();
         insert_dependency(&conn, curl_id, openssl_id, DependencyKind::Runtime).unwrap();
 
-        let dependents =
-            reverse_dependents(&conn, openssl_id, &[DependencyKind::Runtime]).unwrap();
+        let dependents = reverse_dependents(&conn, openssl_id, &[DependencyKind::Runtime]).unwrap();
         assert_eq!(dependents.len(), 1);
         assert_eq!(dependents[0].name, "curl");
     }
@@ -1662,7 +1672,8 @@ mod tests {
         let curl_id = insert_package(&conn, &test_id("curl"), Track::Binary, 0, true).unwrap();
         let wget_id = insert_package(&conn, &test_id("wget"), Track::Binary, 0, true).unwrap();
         let app_id = insert_package(&conn, &test_id("app"), Track::Binary, 0, true).unwrap();
-        let openssl_id = insert_package(&conn, &test_id("openssl"), Track::Binary, 0, false).unwrap();
+        let openssl_id =
+            insert_package(&conn, &test_id("openssl"), Track::Binary, 0, false).unwrap();
         insert_dependency(&conn, curl_id, openssl_id, DependencyKind::Link).unwrap();
         insert_dependency(&conn, wget_id, openssl_id, DependencyKind::Runtime).unwrap();
         insert_dependency(&conn, app_id, openssl_id, DependencyKind::Build).unwrap();
@@ -1700,8 +1711,7 @@ mod tests {
         insert_dependency(&conn, py_id, zlib_id, DependencyKind::Link).unwrap();
         insert_dependency(&conn, py_id, ssl_id, DependencyKind::Runtime).unwrap();
 
-        let closure =
-            forward_dependencies(&conn, py_id, REMOVAL_BLOCKING_KINDS).unwrap();
+        let closure = forward_dependencies(&conn, py_id, REMOVAL_BLOCKING_KINDS).unwrap();
         let names: Vec<&str> = closure.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, vec!["openssl", "zlib"]);
 
@@ -1729,8 +1739,14 @@ mod tests {
             .collect();
 
         assert_eq!(names, vec!["old-lib".to_string()]);
-        assert!(!names.contains(&"curl".to_string()), "explicit installs are never candidates");
-        assert!(!names.contains(&"openssl".to_string()), "still has a reverse dependent");
+        assert!(
+            !names.contains(&"curl".to_string()),
+            "explicit installs are never candidates"
+        );
+        assert!(
+            !names.contains(&"openssl".to_string()),
+            "still has a reverse dependent"
+        );
     }
 
     // ---- glibc_pending (v3) ----
@@ -1885,12 +1901,17 @@ mod tests {
             insert_package_with_opt_tag(&conn, &id, "a1b2c3d4", Track::Source, 1, true).unwrap();
 
         let default_row = get_package_by_id(&conn, default_id).unwrap().unwrap();
-        assert_eq!(default_row.opt_tag, "", "insert_package defaults to the all-default tag");
+        assert_eq!(
+            default_row.opt_tag, "",
+            "insert_package defaults to the all-default tag"
+        );
         let custom_row = get_package_by_id(&conn, custom_id).unwrap().unwrap();
         assert_eq!(custom_row.opt_tag, "a1b2c3d4");
 
         // Same tag again is a duplicate under the widened UNIQUE key.
-        assert!(insert_package_with_opt_tag(&conn, &id, "a1b2c3d4", Track::Source, 2, true).is_err());
+        assert!(
+            insert_package_with_opt_tag(&conn, &id, "a1b2c3d4", Track::Source, 2, true).is_err()
+        );
     }
 
     #[test]
@@ -1899,8 +1920,13 @@ mod tests {
         let id = test_id("ffmpeg");
         insert_package_with_opt_tag(&conn, &id, "a1b2c3d4", Track::Source, 0, true).unwrap();
 
-        assert!(find_package_by_identity_opt(&conn, &id, "a1b2c3d4").unwrap().is_some());
-        assert_eq!(find_package_by_identity_opt(&conn, &id, "ffffffff").unwrap(), None);
+        assert!(find_package_by_identity_opt(&conn, &id, "a1b2c3d4")
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            find_package_by_identity_opt(&conn, &id, "ffffffff").unwrap(),
+            None
+        );
         assert_eq!(find_package_by_identity_opt(&conn, &id, "").unwrap(), None);
     }
 
@@ -1933,12 +1959,19 @@ mod tests {
     fn record_generation_snapshots_installed_set() {
         let conn = fresh_db();
         let curl = insert_package(&conn, &test_id("curl"), Track::Source, 0, true).unwrap();
-        insert_package_with_opt_tag(&conn, &test_id("ffmpeg"), "a1b2c3d4", Track::Source, 0, false)
-            .unwrap();
+        insert_package_with_opt_tag(
+            &conn,
+            &test_id("ffmpeg"),
+            "a1b2c3d4",
+            Track::Source,
+            0,
+            false,
+        )
+        .unwrap();
         set_installed_explicitly(&conn, curl, true).unwrap();
 
-        let gen = record_generation(&conn, "pkg install curl", GenerationKind::Install, None)
-            .unwrap();
+        let gen =
+            record_generation(&conn, "pkg install curl", GenerationKind::Install, None).unwrap();
         assert!(gen > 0);
 
         let row = get_generation(&conn, gen).unwrap().unwrap();
@@ -1967,8 +2000,8 @@ mod tests {
     fn record_undo_generation_links_the_generation_it_reverts() {
         let conn = fresh_db();
         insert_package(&conn, &test_id("curl"), Track::Source, 0, true).unwrap();
-        let gen1 = record_generation(&conn, "pkg install curl", GenerationKind::Install, None)
-            .unwrap();
+        let gen1 =
+            record_generation(&conn, "pkg install curl", GenerationKind::Install, None).unwrap();
         let gen2 = record_undo_generation(&conn, "pkg undo 1", gen1, None).unwrap();
 
         let undo = get_generation(&conn, gen2).unwrap().unwrap();
@@ -1984,10 +2017,20 @@ mod tests {
     #[test]
     fn record_generation_groups_cascade_id() {
         let conn = fresh_db();
-        let g1 = record_generation(&conn, "pkg upgrade", GenerationKind::Upgrade, Some("cascade-1"))
-            .unwrap();
-        let g2 = record_generation(&conn, "pkg upgrade", GenerationKind::Upgrade, Some("cascade-1"))
-            .unwrap();
+        let g1 = record_generation(
+            &conn,
+            "pkg upgrade",
+            GenerationKind::Upgrade,
+            Some("cascade-1"),
+        )
+        .unwrap();
+        let g2 = record_generation(
+            &conn,
+            "pkg upgrade",
+            GenerationKind::Upgrade,
+            Some("cascade-1"),
+        )
+        .unwrap();
         record_generation(&conn, "pkg install other", GenerationKind::Install, None).unwrap();
 
         let gens = generations_in_cascade(&conn, "cascade-1").unwrap();
@@ -1999,10 +2042,22 @@ mod tests {
     fn restorable_checks_every_store_dir_exists() {
         let conn = fresh_db();
         insert_package(&conn, &test_id("curl"), Track::Source, 0, true).unwrap();
-        insert_package_with_opt_tag(&conn, &test_id("ffmpeg"), "a1b2c3d4", Track::Source, 0, false)
-            .unwrap();
-        let gen = record_generation(&conn, "pkg install curl ffmpeg", GenerationKind::Install, None)
-            .unwrap();
+        insert_package_with_opt_tag(
+            &conn,
+            &test_id("ffmpeg"),
+            "a1b2c3d4",
+            Track::Source,
+            0,
+            false,
+        )
+        .unwrap();
+        let gen = record_generation(
+            &conn,
+            "pkg install curl ffmpeg",
+            GenerationKind::Install,
+            None,
+        )
+        .unwrap();
 
         let store = tempfile::tempdir().unwrap();
         // Nothing on disk yet: not restorable.
@@ -2056,7 +2111,10 @@ mod tests {
 
         let row = test_provenance(pkg);
         insert_provenance(&conn, &row).unwrap();
-        assert_eq!(provenance_for_package(&conn, pkg).unwrap(), Some(row.clone()));
+        assert_eq!(
+            provenance_for_package(&conn, pkg).unwrap(),
+            Some(row.clone())
+        );
 
         // Rebuild-in-place: a second insert for the same package
         // replaces the provenance row (a rebuilt package gets fresh
@@ -2222,7 +2280,11 @@ mod tests {
 
         let rows = link_interfaces_for_package(&conn, pkg).unwrap();
         let sonames: Vec<&str> = rows.iter().map(|r| r.soname.as_str()).collect();
-        assert_eq!(sonames, vec!["libcrypto.so.3", "libssl.so.3"], "ordered by soname");
+        assert_eq!(
+            sonames,
+            vec!["libcrypto.so.3", "libssl.so.3"],
+            "ordered by soname"
+        );
     }
 
     #[test]
@@ -2243,12 +2305,21 @@ mod tests {
     fn packages_in_cascade_unions_generation_sets() {
         let conn = fresh_db();
         insert_package(&conn, &test_id("openssl"), Track::Source, 0, false).unwrap();
-        let g1 =
-            record_generation(&conn, "pkg upgrade openssl", GenerationKind::Upgrade, Some("c-7"))
-                .unwrap();
+        let g1 = record_generation(
+            &conn,
+            "pkg upgrade openssl",
+            GenerationKind::Upgrade,
+            Some("c-7"),
+        )
+        .unwrap();
         insert_package(&conn, &test_id("curl"), Track::Source, 0, true).unwrap();
-        let g2 = record_generation(&conn, "pkg upgrade curl", GenerationKind::Upgrade, Some("c-7"))
-            .unwrap();
+        let g2 = record_generation(
+            &conn,
+            "pkg upgrade curl",
+            GenerationKind::Upgrade,
+            Some("c-7"),
+        )
+        .unwrap();
         // An unrelated standalone generation must not leak in.
         record_generation(&conn, "pkg install vim", GenerationKind::Install, None).unwrap();
 
@@ -2256,7 +2327,11 @@ mod tests {
         let gens: Vec<i64> = cascade.iter().map(|p| p.generation_id).collect();
         // Each generation's row set is the full package set at that
         // point: g1 = {openssl}, g2 = {curl, openssl}.
-        assert_eq!(gens, vec![g1, g2, g2], "union of both generations' snapshots, ordered");
+        assert_eq!(
+            gens,
+            vec![g1, g2, g2],
+            "union of both generations' snapshots, ordered"
+        );
         let names: Vec<&str> = cascade.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, vec!["openssl", "curl", "openssl"]);
     }

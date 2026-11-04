@@ -76,11 +76,9 @@ fn parse_option_config_named(text: &str, source: &str) -> PkgResult<(OptionConfi
     let bool_map = |t: &toml::value::Table, where_: &str| -> PkgResult<BTreeMap<String, bool>> {
         t.iter()
             .map(|(k, v)| {
-                v.as_bool()
-                    .map(|b| (k.clone(), b))
-                    .ok_or_else(|| {
-                        PkgError::Parse(format!("{source}: {where_}.{k} must be true or false"))
-                    })
+                v.as_bool().map(|b| (k.clone(), b)).ok_or_else(|| {
+                    PkgError::Parse(format!("{source}: {where_}.{k} must be true or false"))
+                })
             })
             .collect()
     };
@@ -157,8 +155,8 @@ pub fn parse_option_config(text: &str) -> PkgResult<OptionConfig> {
 fn load_include(dir: &Path, name: &str, main: &str) -> PkgResult<OptionConfig> {
     let rel = Path::new(name);
     let mut components = rel.components();
-    let plain_name = matches!(components.next(), Some(Component::Normal(_)))
-        && components.next().is_none();
+    let plain_name =
+        matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
     if rel.is_absolute() || !plain_name {
         return Err(PkgError::Parse(format!(
             "{main}: include entry '{name}' must be a plain file name \
@@ -167,7 +165,10 @@ fn load_include(dir: &Path, name: &str, main: &str) -> PkgResult<OptionConfig> {
     }
     let path = dir.join(rel);
     let text = std::fs::read_to_string(&path).map_err(|e| {
-        PkgError::Parse(format!("{main}: cannot read included file {}: {e}", path.display()))
+        PkgError::Parse(format!(
+            "{main}: cannot read included file {}: {e}",
+            path.display()
+        ))
     })?;
     let (cfg, nested) = parse_option_config_named(&text, name)?;
     if !nested.is_empty() {
@@ -260,7 +261,9 @@ pub fn split_opt_bracket(spec: &str) -> PkgResult<(String, Vec<(String, bool)>)>
     let mut reqs = Vec::new();
     for pair in inner.split(',') {
         let (key, val) = pair.split_once('=').ok_or_else(|| {
-            PkgError::Parse(format!("option bracket in {spec:?}: expected key=val, got {pair:?}"))
+            PkgError::Parse(format!(
+                "option bracket in {spec:?}: expected key=val, got {pair:?}"
+            ))
         })?;
         if key.is_empty() {
             return Err(PkgError::Parse(format!(
@@ -328,14 +331,15 @@ pub fn effective_selections(
     // --opt flags are equally strong requests, so two assigning the
     // same package+key differently is a genuine conflict.
     let mut seen: HashMap<(String, String), (bool, String)> = HashMap::new();
-    let all_requests = requests.iter().cloned().chain(cli_opts.iter().map(|(k, v)| {
-        OptionRequest {
+    let all_requests = requests
+        .iter()
+        .cloned()
+        .chain(cli_opts.iter().map(|(k, v)| OptionRequest {
             package: None,
             key: k.clone(),
             value: *v,
             requester: "--opt".to_string(),
-        }
-    }));
+        }));
     for req in all_requests {
         for target in match &req.package {
             Some(p) => vec![p.clone()],
@@ -346,14 +350,7 @@ pub fn effective_selections(
                 Some((v, who)) if *v != req.value => {
                     return Err(PkgError::Resolution(format!(
                         "option conflict on {}.{}: {} requests {}={}, but {} requests {}={}",
-                        id.0,
-                        id.1,
-                        who,
-                        id.1,
-                        v,
-                        req.requester,
-                        id.1,
-                        req.value,
+                        id.0, id.1, who, id.1, v, req.requester, id.1, req.value,
                     )));
                 }
                 _ => {
@@ -365,7 +362,9 @@ pub fn effective_selections(
 
     let mut out = HashMap::new();
     for name in selected {
-        let Some(manifest) = manifest_of(name) else { continue };
+        let Some(manifest) = manifest_of(name) else {
+            continue;
+        };
         let mut eff = BTreeMap::new();
         // Weakest first: [defaults], then [package.<name>], then the
         // per-command tier (spec brackets for this package, then the
@@ -394,9 +393,9 @@ pub fn effective_selections(
     // Typo protection for the transaction-wide tier: an --opt key no
     // selected package declares can only be a mistake.
     for key in cli_opts.keys() {
-        let declared = selected.iter().any(|name| {
-            manifest_of(name).is_some_and(|m| m.options.contains_key(key))
-        });
+        let declared = selected
+            .iter()
+            .any(|name| manifest_of(name).is_some_and(|m| m.options.contains_key(key)));
         if !declared {
             return Err(PkgError::Parse(format!(
                 "unknown option in selection: '{key}' (no package in this transaction declares it)"
@@ -436,8 +435,7 @@ mod tests {
     "#;
 
     fn manifest_of(name: &str) -> Option<PackageManifest> {
-        (name == "greeter")
-            .then(|| PackageManifest::from_toml_str(GREETER_TOML).unwrap())
+        (name == "greeter").then(|| PackageManifest::from_toml_str(GREETER_TOML).unwrap())
     }
 
     fn selected() -> Vec<String> {
@@ -446,10 +444,8 @@ mod tests {
 
     #[test]
     fn config_parses_defaults_and_packages() {
-        let cfg = parse_option_config(
-            "[defaults]\nnls = false\n[package.greeter]\nloud = true\n",
-        )
-        .unwrap();
+        let cfg = parse_option_config("[defaults]\nnls = false\n[package.greeter]\nloud = true\n")
+            .unwrap();
         assert_eq!(cfg.defaults.get("nls"), Some(&false));
         assert_eq!(cfg.packages["greeter"].get("loud"), Some(&true));
     }
@@ -465,12 +461,15 @@ mod tests {
     fn bracket_splits_and_validates() {
         assert_eq!(
             split_opt_bracket("greeter@2[opt:loud=1,docs=off]").unwrap(),
-            ("greeter@2".to_string(), vec![
-                ("loud".to_string(), true),
-                ("docs".to_string(), false)
-            ])
+            (
+                "greeter@2".to_string(),
+                vec![("loud".to_string(), true), ("docs".to_string(), false)]
+            )
         );
-        assert_eq!(split_opt_bracket("greeter").unwrap(), ("greeter".to_string(), vec![]));
+        assert_eq!(
+            split_opt_bracket("greeter").unwrap(),
+            ("greeter".to_string(), vec![])
+        );
         assert!(split_opt_bracket("greeter[opt:]").is_err());
         assert!(split_opt_bracket("greeter[opt:loud]").is_err());
         assert!(split_opt_bracket("greeter[opt:loud=maybe]").is_err());
@@ -487,30 +486,41 @@ mod tests {
         let eff = effective_selections(&selected(), &manifest_of, &cfg, &cli, &[]).unwrap();
         let g = &eff["greeter"];
         assert_eq!(g.get("loud"), Some(&true), "--opt beats config");
-        assert_eq!(g.get("docs"), Some(&false), "[defaults] applies to declared keys");
+        assert_eq!(
+            g.get("docs"),
+            Some(&false),
+            "[defaults] applies to declared keys"
+        );
     }
 
     #[test]
     fn config_keys_not_declared_by_a_package_do_not_leak() {
         // [defaults] keys only apply to packages declaring them.
         let cfg = parse_option_config("[defaults]\nwayland = true\n").unwrap();
-        let eff = effective_selections(&selected(), &manifest_of, &cfg, &BTreeMap::new(), &[])
-            .unwrap();
+        let eff =
+            effective_selections(&selected(), &manifest_of, &cfg, &BTreeMap::new(), &[]).unwrap();
         assert!(!eff["greeter"].contains_key("wayland"));
     }
 
     #[test]
     fn config_undeclared_option_on_known_package_is_a_hard_error() {
         let cfg = parse_option_config("[package.greeter]\nwayland = true\n").unwrap();
-        assert!(effective_selections(&selected(), &manifest_of, &cfg, &BTreeMap::new(), &[])
-            .is_err());
+        assert!(
+            effective_selections(&selected(), &manifest_of, &cfg, &BTreeMap::new(), &[]).is_err()
+        );
     }
 
     #[test]
     fn cli_key_declared_by_nobody_is_a_hard_error() {
         let cli = BTreeMap::from([("wayland".to_string(), true)]);
-        assert!(effective_selections(&selected(), &manifest_of, &OptionConfig::default(), &cli, &[])
-            .is_err());
+        assert!(effective_selections(
+            &selected(),
+            &manifest_of,
+            &OptionConfig::default(),
+            &cli,
+            &[]
+        )
+        .is_err());
     }
 
     #[test]
@@ -522,9 +532,14 @@ mod tests {
             value: true,
             requester: "greeter[opt:loud=1]".to_string(),
         }];
-        let err =
-            effective_selections(&selected(), &manifest_of, &OptionConfig::default(), &cli, &reqs)
-                .unwrap_err();
+        let err = effective_selections(
+            &selected(),
+            &manifest_of,
+            &OptionConfig::default(),
+            &cli,
+            &reqs,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("greeter.loud"), "{msg}");
         assert!(msg.contains("--opt"), "{msg}");
@@ -564,7 +579,8 @@ mod tests {
     /// A unique temp dir per test (pkg-cli has no tempfile dev-dep;
     /// same pattern as pkg-scanner's gate tests).
     fn test_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("pkg-options-test-{}-{tag}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("pkg-options-test-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -573,8 +589,14 @@ mod tests {
     #[test]
     fn include_merges_siblings_in_order_and_main_wins() {
         let dir = test_dir("merge");
-        fs_write(&dir.join("a.toml"), "[defaults]\nnls = false\ndocs = false\n");
-        fs_write(&dir.join("b.toml"), "[defaults]\ndocs = true\n[package.greeter]\nloud = true\n");
+        fs_write(
+            &dir.join("a.toml"),
+            "[defaults]\nnls = false\ndocs = false\n",
+        );
+        fs_write(
+            &dir.join("b.toml"),
+            "[defaults]\ndocs = true\n[package.greeter]\nloud = true\n",
+        );
         fs_write(
             &dir.join("options.toml"),
             "include = [\"a.toml\", \"b.toml\"]\n[package.greeter]\nloud = false\n",
@@ -582,7 +604,11 @@ mod tests {
         let cfg = option_config_from(&dir.join("options.toml")).unwrap();
         assert_eq!(cfg.defaults.get("nls"), Some(&false), "only a sets it");
         assert_eq!(cfg.defaults.get("docs"), Some(&true), "b later than a");
-        assert_eq!(cfg.packages["greeter"].get("loud"), Some(&false), "main file wins");
+        assert_eq!(
+            cfg.packages["greeter"].get("loud"),
+            Some(&false),
+            "main file wins"
+        );
         // Origins follow the winning write.
         assert_eq!(cfg.origins["defaults.docs"], "b.toml");
         assert_eq!(cfg.origins["package.greeter.loud"], "options.toml");

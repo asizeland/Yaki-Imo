@@ -1,0 +1,7 @@
+name = "dkms"
+version = "3.3.0"
+category = "sys-devel"
+
+[dependencies]
+runtime = ["bash", "coreutils", "gawk", "grep", "sed", "findutils", "kmod", "gcc", "make"]
+build = ["make"]

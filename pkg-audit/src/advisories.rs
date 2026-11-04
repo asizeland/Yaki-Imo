@@ -164,7 +164,8 @@ pub fn parse_advisories(bytes: &[u8]) -> PkgResult<AdvisoryIndex> {
     } else {
         value
     };
-    serde_json::from_value(payload).map_err(|e| PkgError::Parse(format!("security.json payload: {e}")))
+    serde_json::from_value(payload)
+        .map_err(|e| PkgError::Parse(format!("security.json payload: {e}")))
 }
 
 /// Version-constraint matching, pure. `affected` is a comma-separated
@@ -234,10 +235,7 @@ pub struct AdvisoryMatch {
 /// `list_installed_packages`). Malformed `affected` constraints are
 /// reported as errors, not skipped: a broken advisory that silently
 /// matched nothing would hide a vulnerability.
-pub fn match_advisories(
-    conn: &Connection,
-    index: &AdvisoryIndex,
-) -> PkgResult<Vec<AdvisoryMatch>> {
+pub fn match_advisories(conn: &Connection, index: &AdvisoryIndex) -> PkgResult<Vec<AdvisoryMatch>> {
     let installed = list_installed_packages(conn)?;
     let mut out = Vec::new();
     for pkg in &installed {
@@ -318,6 +316,9 @@ mod tests {
         assert_eq!(idx.advisories[0].class.as_str(), "moon-phase");
 
         let nocls = br#"{"advisories": [{ "id": "X", "severity": "low", "package": "p" }]}"#;
-        assert_eq!(parse_advisories(nocls).unwrap().advisories[0].class, AdvisoryClass::Cve);
+        assert_eq!(
+            parse_advisories(nocls).unwrap().advisories[0].class,
+            AdvisoryClass::Cve
+        );
     }
 }

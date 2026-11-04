@@ -424,7 +424,10 @@ mod tests {
 
         assert!(result.is_err());
         assert!(elapsed >= Duration::from_millis(400));
-        assert!(elapsed < Duration::from_secs(2), "shouldn't overshoot the timeout by much");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "shouldn't overshoot the timeout by much"
+        );
     }
 
     #[test]
@@ -437,7 +440,10 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert!(result.is_err());
-        assert!(elapsed < POLL_INTERVAL, "NoWait shouldn't poll at all, took {elapsed:?}");
+        assert!(
+            elapsed < POLL_INTERVAL,
+            "NoWait shouldn't poll at all, took {elapsed:?}"
+        );
     }
 
     #[test]

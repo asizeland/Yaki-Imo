@@ -3,15 +3,15 @@
 //! - Initial implementation (SPEC: pkg-sandbox; design doc Issue 3.4,
 //!   v14 §4 "Sandbox: no network, mandatory vendoring").
 
-//! Sandbox profiles: the hardcoded `Build`/`Fetch`/`Hook` profiles plus
-//! data-driven profiles loaded from `/usr/lib/pkg/sandbox/*.profile`.
+//! Sandbox profiles: hardcoded `Build`/`Fetch`/`Hook`/`KernelModule`
+//! profiles plus data-driven profiles from `/usr/lib/pkg/sandbox/*.profile`.
 //!
 //! Issue 3.4 makes the build sandbox profile an *explicit, auditable,
 //! versioned* artifact rather than a pile of flags buried in code. Two
 //! mechanisms cooperate here:
 //!
-//! - The three built-in profiles ([`SandboxProfile::Build`],
-//!   `Fetch`, `Hook`) are hardcoded — they are security policy, and the
+//! - The built-in profiles ([`SandboxProfile::Build`], `Fetch`, `Hook`,
+//!   `KernelModule`) are hardcoded — they are security policy, and the
 //!   *absence* of a profile file must never silently weaken the build
 //!   sandbox. `Build`'s defaults are the SPEC contract: no network, RW
 //!   only scratch + `$PKGDIR`, RO toolchain/dep tree, no `/etc` write.
@@ -80,6 +80,9 @@ pub struct ProfileData {
     /// `run_sandboxed` — `PKG_OPT_*`, `SOURCE_DATE_EPOCH`, …) is always
     /// set; this list only gates *inherited* host variables.
     pub env_allow: Vec<String>,
+    /// UID (and GID) inside the user namespace. DKMS requires its root
+    /// check to pass; the other profiles retain the unprivileged default.
+    pub uid: u32,
 }
 
 /// Version stamp carried by the hardcoded built-in profiles. Bumped
@@ -88,8 +91,8 @@ pub struct ProfileData {
 /// `/usr/lib/pkg/sandbox/build.profile` ships as a data file.
 pub const BUILTIN_PROFILE_VERSION: &str = "1";
 
-/// A sandbox profile: one of the three hardcoded built-ins, or a
-/// data-driven profile loaded from a `*.profile` file.
+/// A sandbox profile: a hardcoded built-in or a data-driven profile
+/// loaded from a `*.profile` file.
 ///
 /// The built-ins are enum variants (not files that happen to be
 /// pre-installed) because the build sandbox is part of the supply-chain
@@ -117,6 +120,11 @@ pub enum SandboxProfile {
     /// no network, no home, RW limited to system config/state the hook
     /// legitimately maintains.
     Hook,
+    /// Out-of-tree module build for one installed kernel (§7.8.3).
+    KernelModule {
+        root: PathBuf,
+        kernel_release: String,
+    },
     /// A data-driven profile loaded from
     /// `/usr/lib/pkg/sandbox/<name>.profile`.
     Custom(ProfileData),
@@ -165,6 +173,10 @@ impl SandboxProfile {
             SandboxProfile::Build => build_profile(scratch_dir, pkgdir),
             SandboxProfile::Fetch => fetch_profile(),
             SandboxProfile::Hook => hook_profile(),
+            SandboxProfile::KernelModule {
+                root,
+                kernel_release,
+            } => kernel_module_profile(scratch_dir, root, kernel_release),
             SandboxProfile::Custom(data) => {
                 // Custom profiles declare their RW surface statically;
                 // the scratch dir is still bound RW so the caller has a
@@ -185,6 +197,7 @@ impl fmt::Display for SandboxProfile {
             SandboxProfile::Build => write!(f, "build"),
             SandboxProfile::Fetch => write!(f, "fetch"),
             SandboxProfile::Hook => write!(f, "hook"),
+            SandboxProfile::KernelModule { .. } => write!(f, "kernel-module"),
             SandboxProfile::Custom(data) => write!(f, "{}", data.name),
         }
     }
@@ -196,11 +209,10 @@ impl fmt::Display for SandboxProfile {
 ///   always. Fetching is a separate earlier stage; build-time fetchers
 ///   (cargo, npm, go) are handled by manifest-level vendoring, so no
 ///   legitimate build needs the network.
-/// - RO: the toolchain and system trees. Note `/etc` is *not* bound at
-///   all for builds (rather than bound RO): "no /etc write" is the
-///   floor, but nothing in a hermetic build should read host config
-///   either — omitting it makes host-config leakage visible as an
-///   immediate error instead of a silent impurity. (The toolchain's
+/// - RO: the toolchain and system trees. `/etc` is not bound for builds,
+///   except `/etc/alternatives` on hosts where Debian-style toolchain
+///   symlinks require it. "No /etc write" is the floor, but host config
+///   should not silently influence a hermetic build either. (The toolchain's
 ///   compiled-in paths under `/usr` and `/lib` remain available; config
 ///   files the build genuinely needs are materialized into the scratch
 ///   dir by pkg-build's recipe runner.)
@@ -242,6 +254,7 @@ fn build_profile(scratch_dir: &Path, pkgdir: Option<&Path>) -> ProfileData {
             .iter()
             .map(|s| s.to_string())
             .collect(),
+        uid: 65534,
     }
 }
 
@@ -266,6 +279,7 @@ fn fetch_profile() -> ProfileData {
             .iter()
             .map(|s| s.to_string())
             .collect(),
+        uid: 65534,
     }
 }
 
@@ -287,6 +301,36 @@ fn hook_profile() -> ProfileData {
             .iter()
             .map(|s| s.to_string())
             .collect(),
+        uid: 65534,
+    }
+}
+
+fn kernel_module_profile(scratch: &Path, root: &Path, kernel_release: &str) -> ProfileData {
+    let mut bind_ro: Vec<PathBuf> = ["/usr", "/bin", "/lib", "/lib64"]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    if root != Path::new("/") {
+        bind_ro.push(root.join("usr"));
+    }
+    if Path::new("/etc/alternatives").is_dir() {
+        bind_ro.push(PathBuf::from("/etc/alternatives"));
+    }
+    ProfileData {
+        name: "kernel-module".to_string(),
+        version: Some(BUILTIN_PROFILE_VERSION.to_string()),
+        bind_ro,
+        bind_rw: vec![
+            scratch.to_path_buf(),
+            root.join("var/lib/dkms"),
+            root.join("usr/lib/modules").join(kernel_release),
+        ],
+        net: false,
+        env_allow: ["PATH", "LANG", "LC_ALL", "TZ"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        uid: 0,
     }
 }
 
@@ -298,9 +342,17 @@ impl ProfileData {
     /// (Issue 3.4's "versioned data file … report which profile version
     /// built any given package").
     pub fn canonical(&self) -> String {
-        let mut ro: Vec<&str> = self.bind_ro.iter().map(|p| p.to_str().unwrap_or("")).collect();
+        let mut ro: Vec<&str> = self
+            .bind_ro
+            .iter()
+            .map(|p| p.to_str().unwrap_or(""))
+            .collect();
         ro.sort_unstable();
-        let mut rw: Vec<&str> = self.bind_rw.iter().map(|p| p.to_str().unwrap_or("")).collect();
+        let mut rw: Vec<&str> = self
+            .bind_rw
+            .iter()
+            .map(|p| p.to_str().unwrap_or(""))
+            .collect();
         rw.sort_unstable();
         let mut env: Vec<&str> = self.env_allow.iter().map(String::as_str).collect();
         env.sort_unstable();
@@ -313,6 +365,7 @@ impl ProfileData {
         out.push_str(self.version.as_deref().unwrap_or(""));
         out.push('\n');
         out.push_str(&format!("net:{}\n", self.net));
+        out.push_str(&format!("uid:{}\n", self.uid));
         for p in ro {
             out.push_str("bind_ro:");
             out.push_str(p);
@@ -360,6 +413,7 @@ pub fn parse_profile(name: &str, text: &str) -> PkgResult<ProfileData> {
         bind_rw: Vec::new(),
         net: false,
         env_allow: Vec::new(),
+        uid: 65534,
     };
 
     for (lineno, raw_line) in text.lines().enumerate() {
@@ -435,10 +489,7 @@ fn strip_comment(line: &str) -> &str {
 /// accepted grammar obvious.
 fn parse_string(value: &str) -> Result<String, String> {
     let value = value.trim();
-    let Some(inner) = value
-        .strip_prefix('"')
-        .and_then(|v| v.strip_suffix('"'))
-    else {
+    let Some(inner) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) else {
         return Err(format!("expected a double-quoted string, got '{value}'"));
     };
     let mut out = String::with_capacity(inner.len());
@@ -448,12 +499,7 @@ fn parse_string(value: &str) -> Result<String, String> {
             match chars.next() {
                 Some('"') => out.push('"'),
                 Some('\\') => out.push('\\'),
-                other => {
-                    return Err(format!(
-                        "unsupported escape '\\{}'",
-                        other.unwrap_or('\0')
-                    ))
-                }
+                other => return Err(format!("unsupported escape '\\{}'", other.unwrap_or('\0'))),
             }
         } else {
             out.push(c);
@@ -467,11 +513,10 @@ fn parse_string(value: &str) -> Result<String, String> {
 /// short and auditable, and the restriction keeps the parser trivial.
 fn parse_string_array(value: &str) -> Result<Vec<String>, String> {
     let value = value.trim();
-    let Some(inner) = value
-        .strip_prefix('[')
-        .and_then(|v| v.strip_suffix(']'))
-    else {
-        return Err(format!("expected a string array like [\"a\", \"b\"], got '{value}'"));
+    let Some(inner) = value.strip_prefix('[').and_then(|v| v.strip_suffix(']')) else {
+        return Err(format!(
+            "expected a string array like [\"a\", \"b\"], got '{value}'"
+        ));
     };
     let inner = inner.trim();
     if inner.is_empty() {
@@ -524,8 +569,14 @@ mod tests {
     #[test]
     fn builtin_names_resolve_without_touching_the_filesystem() {
         // These must not require /usr/lib/pkg/sandbox to exist.
-        assert_eq!(SandboxProfile::load("build").unwrap(), SandboxProfile::Build);
-        assert_eq!(SandboxProfile::load("fetch").unwrap(), SandboxProfile::Fetch);
+        assert_eq!(
+            SandboxProfile::load("build").unwrap(),
+            SandboxProfile::Build
+        );
+        assert_eq!(
+            SandboxProfile::load("fetch").unwrap(),
+            SandboxProfile::Fetch
+        );
         assert_eq!(SandboxProfile::load("hook").unwrap(), SandboxProfile::Hook);
     }
 
@@ -548,12 +599,10 @@ mod tests {
         // and no host-config leakage) — with exactly one carve-out:
         // /etc/alternatives on hosts that have it (Debian toolchain
         // symlinks resolve through it; see build_profile).
-        assert!(
-            !data
-                .bind_ro
-                .iter()
-                .any(|p| p.starts_with("/etc") && p != Path::new("/etc/alternatives"))
-        );
+        assert!(!data
+            .bind_ro
+            .iter()
+            .any(|p| p.starts_with("/etc") && p != Path::new("/etc/alternatives")));
         assert!(!data.bind_rw.iter().any(|p| p.starts_with("/etc")));
     }
 
@@ -631,6 +680,7 @@ mod tests {
             bind_rw: vec![PathBuf::from("/b"), PathBuf::from("/a")],
             net: false,
             env_allow: vec!["Z".into(), "A".into()],
+            uid: 65534,
         };
         let mut b = a.clone();
         b.bind_ro.reverse();
@@ -639,7 +689,7 @@ mod tests {
         assert_eq!(a.canonical(), b.canonical());
         assert_eq!(
             a.canonical(),
-            "name:x\nversion:1\nnet:false\nbind_ro:/bin\nbind_ro:/usr\n\
+            "name:x\nversion:1\nnet:false\nuid:65534\nbind_ro:/bin\nbind_ro:/usr\n\
              bind_rw:/a\nbind_rw:/b\nenv_allow:A\nenv_allow:Z\n"
         );
     }
@@ -654,8 +704,32 @@ mod tests {
             bind_rw: vec![PathBuf::from("/var/cache/x")],
             net: false,
             env_allow: vec![],
+            uid: 65534,
         });
         let data = custom.resolve(scratch, None);
         assert!(data.bind_rw.contains(&scratch.to_path_buf()));
+    }
+
+    #[test]
+    fn kernel_module_profile_limits_writes_and_uses_root_for_dkms() {
+        let scratch = Path::new("/tmp/pkg-dkms-test");
+        let root = Path::new("/tmp/pkg-root");
+        let data = SandboxProfile::KernelModule {
+            root: root.to_path_buf(),
+            kernel_release: "6.19.14-yakimo".into(),
+        }
+        .resolve(scratch, None);
+        assert!(!data.net);
+        assert_eq!(data.uid, 0);
+        assert_eq!(
+            data.bind_rw,
+            vec![
+                scratch.to_path_buf(),
+                root.join("var/lib/dkms"),
+                root.join("usr/lib/modules/6.19.14-yakimo"),
+            ]
+        );
+        assert!(data.bind_ro.contains(&root.join("usr")));
+        assert!(!data.bind_rw.iter().any(|p| p.starts_with("/etc")));
     }
 }

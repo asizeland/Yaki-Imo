@@ -1,1 +1,21 @@
 DESTDIR="$PKGDIR" ninja -C nm-build install
+
+mkdir -p "$PKGDIR/etc/init.d"
+cat > "$PKGDIR/etc/init.d/NetworkManager" <<'EOF'
+#!/sbin/openrc-run
+
+supervisor=supervise-daemon
+description="NetworkManager daemon"
+command="/usr/sbin/NetworkManager"
+command_args_foreground="--no-daemon"
+
+depend() {
+	need dbus
+	provide net
+}
+
+start_pre() {
+	checkpath -q -d -m 0755 /run/NetworkManager
+}
+EOF
+chmod 0755 "$PKGDIR/etc/init.d/NetworkManager"

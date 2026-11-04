@@ -58,7 +58,11 @@ pub enum FetchError {
     /// T7: caller asked for a URL the manifest entry doesn't declare.
     NotInManifest { url: String },
     /// The downloaded (or cached) bytes don't match the pinned SHA-256.
-    HashMismatch { url: String, expected: String, got: String },
+    HashMismatch {
+        url: String,
+        expected: String,
+        got: String,
+    },
 }
 
 impl std::fmt::Display for FetchError {
@@ -108,16 +112,15 @@ pub fn fetch_sources(entry: &RecipeManifestEntry, cache_dir: &Path) -> PkgResult
 /// `entry.sources` (exact string match) or the request is refused (T7).
 /// This is the entry point the fetch sandbox profile's network policy
 /// is derived from.
-pub fn fetch_url(
-    entry: &RecipeManifestEntry,
-    url: &str,
-    cache_dir: &Path,
-) -> PkgResult<PathBuf> {
-    let source = entry
-        .sources
-        .iter()
-        .find(|s| s.url == url)
-        .ok_or_else(|| FetchError::NotInManifest { url: url.to_string() })?;
+pub fn fetch_url(entry: &RecipeManifestEntry, url: &str, cache_dir: &Path) -> PkgResult<PathBuf> {
+    let source =
+        entry
+            .sources
+            .iter()
+            .find(|s| s.url == url)
+            .ok_or_else(|| FetchError::NotInManifest {
+                url: url.to_string(),
+            })?;
     fetch_one(source, cache_dir)
 }
 
@@ -129,7 +132,11 @@ pub fn cache_file_name(source: &Source) -> String {
         .url
         .rsplit('/')
         .next()
-        .filter(|b| !b.is_empty() && b.chars().all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c)))
+        .filter(|b| {
+            !b.is_empty()
+                && b.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._+-".contains(c))
+        })
         .unwrap_or("source");
     format!("{}-{}", source.sha256, base)
 }
@@ -174,7 +181,10 @@ fn fetch_one(source: &Source, cache_dir: &Path) -> PkgResult<PathBuf> {
         }
     }
 
-    let part = cache_dir.join(format!("{}.part", dest.file_name().unwrap().to_string_lossy()));
+    let part = cache_dir.join(format!(
+        "{}.part",
+        dest.file_name().unwrap().to_string_lossy()
+    ));
     download_to_part(&source.url, &part)?;
     let got = sha256_file(&part)?;
     if got != source.sha256 {
@@ -226,10 +236,9 @@ fn download_to_part(url: &str, part: &Path) -> PkgResult<()> {
         total += n as u64;
         if total > MAX_SOURCE_BYTES {
             let _ = std::fs::remove_file(part);
-            return Err(FetchError::Http(format!(
-                "{url}: exceeds {MAX_SOURCE_BYTES} byte limit"
-            ))
-            .into());
+            return Err(
+                FetchError::Http(format!("{url}: exceeds {MAX_SOURCE_BYTES} byte limit")).into(),
+            );
         }
         out.write_all(&buf[..n])?;
     }
@@ -252,7 +261,10 @@ mod tests {
             committer_fingerprint: None,
             sources: urls
                 .iter()
-                .map(|u| Source { url: u.to_string(), sha256: "ab".repeat(32) })
+                .map(|u| Source {
+                    url: u.to_string(),
+                    sha256: "ab".repeat(32),
+                })
                 .collect(),
             attestations: vec![],
             critical: false,
@@ -266,7 +278,11 @@ mod tests {
         let e = entry_with(&["https://example.com/foo-1.0.tar.gz"]);
         let dir = std::env::temp_dir();
         let err = fetch_url(&e, "https://attacker.example/foo-1.0.tar.gz", &dir).unwrap_err();
-        assert!(err.to_string().contains("not declared in the recipe manifest"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("not declared in the recipe manifest"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -274,18 +290,30 @@ mod tests {
         let e = entry_with(&["file:///etc/passwd"]);
         let dir = std::env::temp_dir();
         let err = fetch_url(&e, "file:///etc/passwd", &dir).unwrap_err();
-        assert!(err.to_string().contains("only http:// and https://"), "{err}");
+        assert!(
+            err.to_string().contains("only http:// and https://"),
+            "{err}"
+        );
     }
 
     #[test]
     fn cache_names_are_hash_keyed_and_collision_free() {
-        let a = Source { url: "https://a.example/x.tar.gz".into(), sha256: "11".into() };
-        let b = Source { url: "https://b.example/x.tar.gz".into(), sha256: "22".into() };
+        let a = Source {
+            url: "https://a.example/x.tar.gz".into(),
+            sha256: "11".into(),
+        };
+        let b = Source {
+            url: "https://b.example/x.tar.gz".into(),
+            sha256: "22".into(),
+        };
         assert_ne!(cache_file_name(&a), cache_file_name(&b));
         assert!(cache_file_name(&a).starts_with("11-"));
         assert!(cache_file_name(&a).ends_with("x.tar.gz"));
         // Weird basenames fall back to a safe name.
-        let c = Source { url: "https://a.example/".into(), sha256: "33".into() };
+        let c = Source {
+            url: "https://a.example/".into(),
+            sha256: "33".into(),
+        };
         assert_eq!(cache_file_name(&c), "33-source");
     }
 

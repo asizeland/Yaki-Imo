@@ -1,0 +1,35 @@
+tar xJf linux-6.19.14.tar.xz
+cd linux-6.19.14
+export PATH="/pkg/deps/gcc/usr/bin:/pkg/deps/binutils/usr/bin:/pkg/deps/make/usr/bin:/pkg/deps/bc/usr/bin:/pkg/deps/bison/usr/bin:/pkg/deps/flex/usr/bin:/pkg/deps/openssl/usr/bin:$PATH"
+export KBUILD_BUILD_USER=builder KBUILD_BUILD_HOST=yakimo
+export BISON_PKGDATADIR=/pkg/deps/bison/usr/share/bison
+
+make x86_64_defconfig
+scripts/config --set-str LOCALVERSION "-yakimo" --disable LOCALVERSION_AUTO \
+    --enable MODULES --enable MODULE_UNLOAD \
+    --enable BLK_DEV_INITRD --enable DEVTMPFS --enable DEVTMPFS_MOUNT \
+    --enable TMPFS --enable PROC_FS --enable SYSFS \
+    --enable EXT4_FS --enable SCSI --enable BLK_DEV_SD \
+    --enable ATA --enable SATA_AHCI --enable ATA_PIIX \
+    --enable NVME_CORE --enable BLK_DEV_NVME \
+    --enable PCI --enable PCIEPORTBUS \
+    --enable FW_LOADER --enable MICROCODE \
+    --enable EFI --enable EFI_STUB \
+    --enable SERIAL_8250 --enable SERIAL_8250_CONSOLE \
+    --enable VIRTIO --enable VIRTIO_PCI --enable VIRTIO_BLK \
+    --enable VIRTIO_NET --enable VIRTIO_CONSOLE \
+    --enable DRM --enable DRM_FBDEV_EMULATION \
+    --enable UNWINDER_FRAME_POINTER --disable UNWINDER_ORC \
+    --disable X86_KERNEL_IBT --disable DEBUG_INFO --disable DEBUG_INFO_BTF \
+    --disable MODULE_SIG --disable MODULE_SIG_FORCE --disable MODULE_SIG_ALL \
+    --disable WERROR
+make olddefconfig
+
+for option in MODULES DEVTMPFS DEVTMPFS_MOUNT EXT4_FS BLK_DEV_NVME \
+              SATA_AHCI MICROCODE VIRTIO_BLK SERIAL_8250_CONSOLE DRM; do
+    grep -q "^CONFIG_${option}=y$" .config || {
+        echo "required kernel option CONFIG_${option}=y is missing" >&2
+        exit 1
+    }
+done
+make bzImage modules

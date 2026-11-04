@@ -42,9 +42,7 @@ use std::time::Duration;
 use pkg_build::cache::ArtifactCache;
 use pkg_build::cascade::{self, BumpedPackage};
 use pkg_build::glibc::InlinePatchFile;
-use pkg_build::orchestrator::{
-    self, BuildPlan, PlanNode, SchedConfig,
-};
+use pkg_build::orchestrator::{self, BuildPlan, PlanNode, SchedConfig};
 use pkg_build::{recipe::Recipe, staging};
 use pkg_core::manifest::PackageManifest;
 use pkg_core::paths::at;
@@ -65,8 +63,8 @@ use crate::cli::{
     AlternativesAction, Cli, Command, DbAction, EnvAction, KeyAction, ProfileAction,
     TransactionFlags,
 };
-use crate::preview::{format_dry_run_preview, DryRunPlan};
 use crate::options;
+use crate::preview::{format_dry_run_preview, DryRunPlan};
 
 // ---------------------------------------------------------------------
 // Paths & small helpers
@@ -96,10 +94,7 @@ pub const GLIBC_APPLY_BIN: &str = "/usr/lib/pkg/glibc-apply";
 pub const REPO_CACHE_TTL: Duration = Duration::from_secs(24 * 3600);
 
 pub fn store_roots() -> Vec<PathBuf> {
-    vec![
-        at("/usr/lib/pkg/.store"),
-        at("/usr/lib32/pkg/.store"),
-    ]
+    vec![at("/usr/lib/pkg/.store"), at("/usr/lib32/pkg/.store")]
 }
 
 /// Opens (and migrates) the package DB.
@@ -218,9 +213,9 @@ pub fn confirm(prompt: &str, assume_yes: bool) -> bool {
 pub fn parse_opts(raw: &[String]) -> PkgResult<BTreeMap<String, bool>> {
     let mut out = BTreeMap::new();
     for flag in raw {
-        let (name, value) = flag.split_once('=').ok_or_else(|| {
-            PkgError::Parse(format!("--opt expects name=val, got {flag:?}"))
-        })?;
+        let (name, value) = flag
+            .split_once('=')
+            .ok_or_else(|| PkgError::Parse(format!("--opt expects name=val, got {flag:?}")))?;
         let parsed = match value {
             "1" | "true" | "on" => true,
             "0" | "false" | "off" => false,
@@ -358,13 +353,19 @@ pub fn graph_from_recipes(
                 })
             })
             .map_err(PkgError::from)?;
-        graph.add_package(manifest.name.clone(), manifest.version.clone(), &manifest.provides, deps);
+        graph.add_package(
+            manifest.name.clone(),
+            manifest.version.clone(),
+            &manifest.provides,
+            deps,
+        );
     }
     graph.finalize(preferred_providers)
 }
 
 /// Loads a package's recipe from the recipe repo.
-pub fn load_recipe(name: &str) -> PkgResult<Recipe> {    let dir = at(RECIPES_DIR).join(name);
+pub fn load_recipe(name: &str) -> PkgResult<Recipe> {
+    let dir = at(RECIPES_DIR).join(name);
     if !dir.is_dir() {
         return Err(PkgError::NotFound(format!("no recipe for {name}")));
     }
@@ -391,7 +392,9 @@ fn effective_jobs(cli_jobs: Option<u32>) -> PkgResult<u32> {
         return Err(PkgError::Parse("--jobs must be ≥ 1".into()));
     }
     let par = orchestrator::build_parallelism_from_config(&at(orchestrator::CONFIG_PATH))?;
-    Ok(cli_jobs.or(par.jobs).unwrap_or_else(orchestrator::host_parallelism))
+    Ok(cli_jobs
+        .or(par.jobs)
+        .unwrap_or_else(orchestrator::host_parallelism))
 }
 
 /// Applies config-file and command-line parallelism limits to a
@@ -478,12 +481,13 @@ pub fn compute_abi_tag(
         // glibc's base case above is exempt — its recipe pins its own
         // flags, so the profile cannot change its bits and must not
         // change its tag either.
-        let opt_level =
-            orchestrator::opt_level_from_config(&at(orchestrator::CONFIG_PATH))?;
+        let opt_level = orchestrator::opt_level_from_config(&at(orchestrator::CONFIG_PATH))?;
         hasher.update(opt_level.as_identity_str().as_bytes());
     }
     let digest = hasher.finalize();
-    Ok(AbiTag(u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]])))
+    Ok(AbiTag(u32::from_be_bytes([
+        digest[0], digest[1], digest[2], digest[3],
+    ])))
 }
 
 /// `2.39-r2` → `2.39` (v13 §8's release_core).
@@ -502,44 +506,73 @@ pub fn dispatch(cli: Cli) -> PkgResult<()> {
     match cli.command {
         Command::Install { specs, flags } => cmd_install(specs, flags),
         Command::Upgrade { specs, all, flags } => cmd_upgrade(specs, all, flags),
-        Command::Remove { name, recursive, force, assume_yes } => {
-            cmd_remove(&name, recursive, force, assume_yes)
-        }
+        Command::Remove {
+            name,
+            recursive,
+            force,
+            assume_yes,
+        } => cmd_remove(&name, recursive, force, assume_yes),
         Command::Sync { force, status } => cmd_sync(force, status),
         Command::Search { query } => cmd_search(&query),
         Command::Info { name } => cmd_info(&name),
         Command::Why { name } => cmd_why(&name),
         Command::Explain { constraint } => cmd_explain(&constraint),
-        Command::Pin { package, version, mode } => cmd_pin(&package, version, mode),
+        Command::Pin {
+            package,
+            version,
+            mode,
+        } => cmd_pin(&package, version, mode),
         Command::Unpin { package } => cmd_unpin(&package),
         Command::Alternatives { action } => cmd_alternatives(action),
         Command::Profile { action } => cmd_profile(action),
-        Command::Rebuild { affected, assume_yes } => cmd_rebuild(affected, assume_yes),
-        Command::Check { target, verbose, depth, nss, suggest } => {
-            cmd_check(target, verbose, depth, nss, suggest)
-        }
+        Command::Rebuild {
+            affected,
+            assume_yes,
+        } => cmd_rebuild(affected, assume_yes),
+        Command::Check {
+            target,
+            verbose,
+            depth,
+            nss,
+            suggest,
+        } => cmd_check(target, verbose, depth, nss, suggest),
         Command::Options { name } => cmd_options(name.as_deref()),
         Command::Autoremove { assume_yes } => cmd_autoremove(assume_yes),
         Command::Clean { garbage, cache } => cmd_clean(garbage, cache),
         Command::History { generation, json } => cmd_history(generation, json),
-        Command::Undo { n, package, rebuild_missing, assume_yes } => {
-            cmd_undo(n, package, rebuild_missing, assume_yes)
-        }
+        Command::Undo {
+            n,
+            package,
+            rebuild_missing,
+            assume_yes,
+        } => cmd_undo(n, package, rebuild_missing, assume_yes),
         Command::Env { action } => cmd_env(action),
         Command::BuildEnv { name, resolve } => cmd_build_env(&name, resolve),
-        Command::Audit { json, glibc, supply_chain, critical, acknowledge, env } => {
-            cmd_audit(json, glibc, supply_chain, critical, acknowledge, env)
-        }
+        Command::Audit {
+            json,
+            glibc,
+            supply_chain,
+            critical,
+            acknowledge,
+            env,
+        } => cmd_audit(json, glibc, supply_chain, critical, acknowledge, env),
         Command::Isolate { path, args } => cmd_isolate(&path, args),
         Command::Fetch { name } => cmd_fetch(&name),
-        Command::Build { name, opts, jobs, no_cache } => cmd_build(&name, opts, jobs, no_cache),
+        Command::Build {
+            name,
+            opts,
+            jobs,
+            no_cache,
+        } => cmd_build(&name, opts, jobs, no_cache),
         Command::Key { action } => cmd_key(action),
         Command::Db { action } => cmd_db(action),
         Command::Bootstrap { verify_layout } => cmd_bootstrap(verify_layout),
         Command::ApplyPendingRestarts { assume_yes } => cmd_apply_pending_restarts(assume_yes),
-        Command::Cascade { at, execute_pending, ignore_power } => {
-            cmd_cascade(at, execute_pending, ignore_power)
-        }
+        Command::Cascade {
+            at,
+            execute_pending,
+            ignore_power,
+        } => cmd_cascade(at, execute_pending, ignore_power),
     }
 }
 
@@ -653,12 +686,18 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
         )?;
         let mut added: BTreeMap<String, pkg_core::VersionConstraint> = BTreeMap::new();
         for name in &selected_names {
-            let Some(manifest) = manifest_lookup(name) else { continue };
+            let Some(manifest) = manifest_lookup(name) else {
+                continue;
+            };
             for dep in manifest
                 .dep_set(options::selection_of(&selections, name))
                 .map_err(PkgError::from)?
             {
-                if let Dependency::Package { name: dn, constraint } = dep {
+                if let Dependency::Package {
+                    name: dn,
+                    constraint,
+                } = dep
+                {
                     if !selected.contains_key(&dn) {
                         added.insert(dn, constraint);
                     }
@@ -705,8 +744,7 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
     // -- which selected packages are actually new/changed? -----------
     let mut bumped = Vec::new();
     let mut direct = Vec::new();
-    let requested: BTreeSet<String> =
-        specs.iter().map(|s| parse_spec(s).0).collect();
+    let requested: BTreeSet<String> = specs.iter().map(|s| parse_spec(s).0).collect();
     // Installed identities at (name, version, opt_tag) granularity: the
     // same version under a different effective option selection is a
     // DIFFERENT build (§4.3 identity), not an "already installed" no-op.
@@ -801,7 +839,9 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
                 .map(|(n, v)| (n.clone(), v.to_string()))
                 .collect(),
             rebuild_count: cascade_plan.len().saturating_sub(direct.len()),
-            cascade_root: bumped.first().map(|b| (b.name.clone(), b.new_version.to_string())),
+            cascade_root: bumped
+                .first()
+                .map(|b| (b.name.clone(), b.new_version.to_string())),
             pruned_count: cascade_plan.pruned.len(),
             wall,
             compile,
@@ -838,7 +878,10 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
         // generation exactly as if freshly installed (Issue 4.4.2) —
         // recorded as state for `pkg clean` / `pkg cascade`.
         record_pending_deferral(&cascade_names)?;
-        retain_requested(build_plan(&conn, &cascade_plan, &direct, &selections)?, &requested)
+        retain_requested(
+            build_plan(&conn, &cascade_plan, &direct, &selections)?,
+            &requested,
+        )
     } else {
         build_plan(&conn, &cascade_plan, &direct, &selections)?
     };
@@ -891,7 +934,13 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
     if effective_plan.nodes.contains_key("glibc") {
         if let (Some(old), Some(new)) = (installed.get("glibc"), selected.get("glibc")) {
             if old != new {
-                handle_glibc_update(&conn, options::selection_of(&selections, "glibc"), old, new, flags.assume_yes)?;
+                handle_glibc_update(
+                    &conn,
+                    options::selection_of(&selections, "glibc"),
+                    old,
+                    new,
+                    flags.assume_yes,
+                )?;
             }
         }
     }
@@ -1146,9 +1195,7 @@ fn enforce_supply_chain_gate(conn: &Connection) -> PkgResult<()> {
             f.detail
         ));
     }
-    msg.push_str(
-        "acknowledge a finding with: pkg audit --supply-chain --acknowledge <package>",
-    );
+    msg.push_str("acknowledge a finding with: pkg audit --supply-chain --acknowledge <package>");
     Err(PkgError::Gate(msg))
 }
 
@@ -1166,10 +1213,14 @@ fn build_plan(
     let mut plan = BuildPlan::default();
     let mut all: BTreeMap<String, (Version, BTreeSet<String>)> = BTreeMap::new();
     for (name, node) in &cascade_plan.nodes {
-        all.insert(name.clone(), (node.version.clone(), node.deps_in_cascade.clone()));
+        all.insert(
+            name.clone(),
+            (node.version.clone(), node.deps_in_cascade.clone()),
+        );
     }
     for (name, version) in direct {
-        all.entry(name.clone()).or_insert_with(|| (version.clone(), BTreeSet::new()));
+        all.entry(name.clone())
+            .or_insert_with(|| (version.clone(), BTreeSet::new()));
     }
     let requested: BTreeSet<String> = direct.iter().map(|(n, _)| n.clone()).collect();
     // Post-build pruning compares a rebuilt node's freshly measured
@@ -1194,7 +1245,12 @@ fn build_plan(
         // (linux-headers for glibc) must likewise be built and
         // activated before the dependent's sandbox binds it.
         let mut declared = recipe.manifest.dep_set(&filtered).map_err(PkgError::from)?;
-        declared.extend(recipe.manifest.build_dep_set(&filtered).map_err(PkgError::from)?);
+        declared.extend(
+            recipe
+                .manifest
+                .build_dep_set(&filtered)
+                .map_err(PkgError::from)?,
+        );
         for d in declared {
             if let Dependency::Package { name: dn, .. } = d {
                 if dn != name && plan_names.contains(&dn) {
@@ -1206,7 +1262,9 @@ fn build_plan(
             .iter()
             .find(|r| r.name == name && r.arch == Arch::Amd64)
             .and_then(|r| {
-                queries::link_interface_hash(conn, &r.name, &r.version).ok().flatten()
+                queries::link_interface_hash(conn, &r.name, &r.version)
+                    .ok()
+                    .flatten()
             });
         plan.nodes.insert(
             name.clone(),
@@ -1286,7 +1344,10 @@ fn new_cascade_id() -> String {
 /// The running glibc version, parsed from `ldd --version` — used for
 /// the post-build gate and the `pkg clean` recovery guard (v13 §6).
 pub fn running_glibc_version() -> Option<Version> {
-    let out = std::process::Command::new("ldd").arg("--version").output().ok()?;
+    let out = std::process::Command::new("ldd")
+        .arg("--version")
+        .output()
+        .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     // "ldd (GNU libc) 2.39" — last whitespace-separated token of line 1.
     let first = text.lines().next()?;
@@ -1342,7 +1403,9 @@ fn cmd_remove(name: &str, recursive: bool, force: bool, assume_yes: bool) -> Pkg
             // Transitive closure over removal-blocking edges.
             let mut queue: Vec<i64> = blockers.iter().map(|p| p.id).collect();
             while let Some(id) = queue.pop() {
-                let Some(pkg) = queries::get_package_by_id(&conn, id)? else { continue };
+                let Some(pkg) = queries::get_package_by_id(&conn, id)? else {
+                    continue;
+                };
                 if to_remove.insert(pkg.name.clone()) {
                     queue.extend(
                         queries::removal_blockers(&conn, pkg.id)?
@@ -1356,7 +1419,11 @@ fn cmd_remove(name: &str, recursive: bool, force: bool, assume_yes: bool) -> Pkg
 
     let listing: Vec<String> = to_remove.iter().cloned().collect();
     if !confirm(
-        &format!("Remove {} package(s)?\n  {}", listing.len(), listing.join(", ")),
+        &format!(
+            "Remove {} package(s)?\n  {}",
+            listing.len(),
+            listing.join(", ")
+        ),
         assume_yes,
     ) {
         return Ok(());
@@ -1366,12 +1433,20 @@ fn cmd_remove(name: &str, recursive: bool, force: bool, assume_yes: bool) -> Pkg
     // minus the removed set; DB commit last, generation recorded.
     let mut target = staging::ActivationSet::current(&conn)?;
     target.members.retain(|(n, _), _| !to_remove.contains(n));
-    let command = format!("pkg remove {}", to_remove.iter().cloned().collect::<Vec<_>>().join(" "));
+    let command = format!(
+        "pkg remove {}",
+        to_remove.iter().cloned().collect::<Vec<_>>().join(" ")
+    );
     // `command` is borrowed by activate_identities AND consumed by the
     // generation closure — give the closure its own clone.
     let cmd_for_gen = command.clone();
     staging::activate_identities(&conn, &target, &store_roots(), move |c| {
-        queries::record_generation(c, &cmd_for_gen, pkg_db::schema::GenerationKind::Remove, None)
+        queries::record_generation(
+            c,
+            &cmd_for_gen,
+            pkg_db::schema::GenerationKind::Remove,
+            None,
+        )
     })?;
     println!("removed {}", listing.join(", "));
     Ok(())
@@ -1411,7 +1486,11 @@ fn cmd_autoremove(assume_yes: bool) -> PkgResult<()> {
         return Ok(());
     }
     if !confirm(
-        &format!("Autoremove {} package(s)?\n  {}", doomed.len(), doomed.iter().cloned().collect::<Vec<_>>().join(", ")),
+        &format!(
+            "Autoremove {} package(s)?\n  {}",
+            doomed.len(),
+            doomed.iter().cloned().collect::<Vec<_>>().join(", ")
+        ),
         assume_yes,
     ) {
         return Ok(());
@@ -1421,7 +1500,12 @@ fn cmd_autoremove(assume_yes: bool) -> PkgResult<()> {
     let command = "pkg autoremove".to_string();
     let cmd_for_gen = command.clone();
     staging::activate_identities(&conn, &target, &store_roots(), move |c| {
-        queries::record_generation(c, &cmd_for_gen, pkg_db::schema::GenerationKind::Remove, None)
+        queries::record_generation(
+            c,
+            &cmd_for_gen,
+            pkg_db::schema::GenerationKind::Remove,
+            None,
+        )
     })?;
     Ok(())
 }
@@ -1529,11 +1613,11 @@ fn cmd_undo(
     // gone keeps no edges rather than failing the completed undo.
     if let Ok(rows) = queries::list_installed_packages(&conn) {
         for row in &rows {
-            let Ok(recipe) = load_recipe(&row.name) else { continue };
+            let Ok(recipe) = load_recipe(&row.name) else {
+                continue;
+            };
             let edges = recipe.manifest.dependency_edges();
-            if let Err(e) =
-                queries::record_dependency_edges(&conn, &row.name, row.arch, &edges)
-            {
+            if let Err(e) = queries::record_dependency_edges(&conn, &row.name, row.arch, &edges) {
                 eprintln!(
                     "pkg: warning: could not restore dependency edges for {}: {e}",
                     row.name
@@ -1613,11 +1697,18 @@ fn cmd_history(generation: Option<i64>, json: bool) -> PkgResult<()> {
                 .iter()
                 .map(|p| format!("{}-{}+{}", p.name, p.version, p.abi_tag))
                 .collect();
-            println!("generation {}: {} ({})", g.id, g.command, time_string(g.created_at));
-            println!("  +{} packages, -{} packages vs generation {}",
+            println!(
+                "generation {}: {} ({})",
+                g.id,
+                g.command,
+                time_string(g.created_at)
+            );
+            println!(
+                "  +{} packages, -{} packages vs generation {}",
                 cur.difference(&prev).count(),
                 prev.difference(&cur).count(),
-                id - 1);
+                id - 1
+            );
             for added in cur.difference(&prev) {
                 println!("  + {added}");
             }
@@ -1662,7 +1753,11 @@ fn cmd_sync(force: bool, status: bool) -> PkgResult<()> {
         match (st.fetched_at, st.age_secs, st.index_version) {
             (Some(fetched), Some(age), Some(version)) => {
                 println!("index version: {version}");
-                println!("last sync: {} ({} ago)", time_string(fetched as i64), format_age(age));
+                println!(
+                    "last sync: {} ({} ago)",
+                    time_string(fetched as i64),
+                    format_age(age)
+                );
                 println!(
                     "cache: {} (TTL {}h)",
                     if st.fresh { "fresh" } else { "STALE" },
@@ -1683,7 +1778,11 @@ fn cmd_sync(force: bool, status: bool) -> PkgResult<()> {
     let mirrors = configured_mirrors();
     let mut trust = pkg_repo::TrustStore::load(&at(pkg_repo::TRUST_DIR), &embedded_root())
         .map_err(|e| PkgError::Parse(format!("sync failed: {e}")))?;
-    let ttl = if force { Duration::ZERO } else { REPO_CACHE_TTL };
+    let ttl = if force {
+        Duration::ZERO
+    } else {
+        REPO_CACHE_TTL
+    };
     let index = pkg_repo::sync_index(&mut trust, &mirrors, &at(INDEX_CACHE), ttl)
         .map_err(|e| PkgError::Parse(format!("sync failed: {e}")))?;
     for warning in &index.trust_warnings {
@@ -1699,7 +1798,11 @@ fn cmd_sync(force: bool, status: bool) -> PkgResult<()> {
             index.index_version
         );
     } else {
-        println!("synced repository index v{} into {}", index.index_version, at(INDEX_CACHE).display());
+        println!(
+            "synced repository index v{} into {}",
+            index.index_version,
+            at(INDEX_CACHE).display()
+        );
     }
     Ok(())
 }
@@ -1804,7 +1907,10 @@ fn cmd_info(name: &str) -> PkgResult<()> {
             line.push_str(&format!("+p{}", row.opt_tag));
         }
         println!("{line}");
-        println!("  arch: {}, track: {}, explicit: {}", row.arch, row.track, row.installed_explicitly);
+        println!(
+            "  arch: {}, track: {}, explicit: {}",
+            row.arch, row.track, row.installed_explicitly
+        );
 
         // Option deltas from recipe default (Issue 1 §5 format).
         let options = queries::package_options(&conn, row.id).unwrap_or_default();
@@ -1816,7 +1922,11 @@ fn cmd_info(name: &str) -> PkgResult<()> {
             for opt in &options {
                 if let Some(decl) = defaults.get(&opt.name) {
                     if opt.value != decl.default {
-                        let abi = if decl.abi_affecting { "  [abi-affecting]" } else { "" };
+                        let abi = if decl.abi_affecting {
+                            "  [abi-affecting]"
+                        } else {
+                            ""
+                        };
                         println!(
                             "    {} = {}   (default: {}){abi}",
                             opt.name, opt.value, decl.default
@@ -1849,13 +1959,19 @@ fn cmd_options(name: Option<&str>) -> PkgResult<()> {
     match name {
         None => {
             if config.defaults.is_empty() && config.packages.is_empty() {
-                println!("no standing option configuration ({})", at(options::OPTIONS_PATH).display());
+                println!(
+                    "no standing option configuration ({})",
+                    at(options::OPTIONS_PATH).display()
+                );
                 return Ok(());
             }
             if !config.defaults.is_empty() {
                 println!("[defaults] (every package declaring the key):");
                 for (k, v) in &config.defaults {
-                    println!("  {k} = {v}   ({})", origin_of(&config, &format!("defaults.{k}")));
+                    println!(
+                        "  {k} = {v}   ({})",
+                        origin_of(&config, &format!("defaults.{k}"))
+                    );
                 }
             }
             for (pkg, entries) in &config.packages {
@@ -1899,7 +2015,11 @@ fn cmd_options(name: Option<&str>) -> PkgResult<()> {
                     .and_then(|t| t.get(key))
                     .or_else(|| config.defaults.get(key));
                 let effective = configured.copied().unwrap_or(opt.default);
-                let abi = if opt.abi_affecting { ", abi-affecting" } else { "" };
+                let abi = if opt.abi_affecting {
+                    ", abi-affecting"
+                } else {
+                    ""
+                };
                 println!("  {key} = {effective}   (default: {}{abi})", opt.default);
                 println!("      {}", opt.description);
                 if let Some(v) = configured {
@@ -1939,12 +2059,12 @@ fn cmd_why(name: &str) -> PkgResult<()> {
     let mut is_explicit: HashMap<String, bool> = HashMap::new();
     for row in &installed {
         is_explicit.insert(row.name.clone(), row.installed_explicitly);
-        let rdeps = queries::reverse_dependents(
-            &conn,
-            row.id,
-            pkg_db::queries::REMOVAL_BLOCKING_KINDS,
-        )?;
-        reverse_deps.insert(row.name.clone(), rdeps.into_iter().map(|p| p.name).collect());
+        let rdeps =
+            queries::reverse_dependents(&conn, row.id, pkg_db::queries::REMOVAL_BLOCKING_KINDS)?;
+        reverse_deps.insert(
+            row.name.clone(),
+            rdeps.into_iter().map(|p| p.name).collect(),
+        );
     }
     let chains = pkg_resolver::explain_why_installed(name, &reverse_deps, &is_explicit);
     let text = pkg_resolver::format_chains(&chains, &is_explicit);
@@ -1961,7 +2081,9 @@ fn cmd_explain(constraint: &str) -> PkgResult<()> {
     let catalog = catalog_from_recipes(&at(RECIPES_DIR))?;
     let recipe = load_recipe(&name)?;
     let version: Version = match version {
-        Some(v) => v.parse().map_err(|_| PkgError::Parse(format!("bad version in {constraint:?}")))?,
+        Some(v) => v
+            .parse()
+            .map_err(|_| PkgError::Parse(format!("bad version in {constraint:?}")))?,
         None => recipe.manifest.version.clone(),
     };
     match pkg_resolver::explain_resolution_failure(&catalog, &name, version) {
@@ -2050,8 +2172,12 @@ fn cmd_alternatives(action: AlternativesAction) -> PkgResult<()> {
                 for entry in fs::read_dir(&dir).map_err(PkgError::Io)? {
                     let entry = entry.map_err(PkgError::Io)?;
                     let meta = entry.path().join("pkg-meta.toml");
-                    let Ok(text) = fs::read_to_string(&meta) else { continue };
-                    let Ok(manifest) = PackageManifest::from_toml_str(&text) else { continue };
+                    let Ok(text) = fs::read_to_string(&meta) else {
+                        continue;
+                    };
+                    let Ok(manifest) = PackageManifest::from_toml_str(&text) else {
+                        continue;
+                    };
                     for virt in &manifest.provides {
                         providers
                             .entry(virt.to_string())
@@ -2081,7 +2207,10 @@ fn cmd_alternatives(action: AlternativesAction) -> PkgResult<()> {
             }
             Ok(())
         }
-        AlternativesAction::Set { virtual_name, provider } => {
+        AlternativesAction::Set {
+            virtual_name,
+            provider,
+        } => {
             let _lock = lock_exclusive()?;
             let conn = open_db()?;
             // Accept both `virtual/foo` and the bare short name `foo`.
@@ -2127,7 +2256,11 @@ fn cmd_profile(action: ProfileAction) -> PkgResult<()> {
             }
             for name in names {
                 let profile = set.get(name).expect("names() only yields present profiles");
-                let marker = if active.as_deref() == Some(name) { " (active)" } else { "" };
+                let marker = if active.as_deref() == Some(name) {
+                    " (active)"
+                } else {
+                    ""
+                };
                 println!("{name}{marker}:");
                 for (package, constraint) in &profile.constraints {
                     println!("  {package} {constraint}");
@@ -2183,10 +2316,16 @@ fn cmd_rebuild(affected: bool, assume_yes: bool) -> PkgResult<()> {
     for row in &rows {
         // A package whose recipe is gone from the repo can't be
         // re-resolved, so it can't be judged affected either.
-        let Ok(recipe) = load_recipe(&row.name) else { continue };
-        let Ok(deps) = recipe.manifest.dep_set(&BTreeMap::new()) else { continue };
+        let Ok(recipe) = load_recipe(&row.name) else {
+            continue;
+        };
+        let Ok(deps) = recipe.manifest.dep_set(&BTreeMap::new()) else {
+            continue;
+        };
         for dep in &deps {
-            let Dependency::Virtual(virt) = dep else { continue };
+            let Dependency::Virtual(virt) = dep else {
+                continue;
+            };
             let pref = prefs
                 .get(&virt.to_string())
                 .or_else(|| prefs.get(virt.short_name()));
@@ -2208,7 +2347,11 @@ fn cmd_rebuild(affected: bool, assume_yes: bool) -> PkgResult<()> {
     }
     let listing: Vec<String> = affected_names.iter().cloned().collect();
     if !confirm(
-        &format!("Rebuild {} package(s) against the switched providers?\n  {}", listing.len(), listing.join(", ")),
+        &format!(
+            "Rebuild {} package(s) against the switched providers?\n  {}",
+            listing.len(),
+            listing.join(", ")
+        ),
         assume_yes,
     ) {
         return Ok(());
@@ -2223,7 +2366,13 @@ fn cmd_rebuild(affected: bool, assume_yes: bool) -> PkgResult<()> {
     let mut selected: HashMap<String, Version> = HashMap::new();
     for name in &affected_names {
         let version = installed_map[name].clone();
-        match graph.resolve_with_constraints(name, version, &pins, &profile_constraints, &installed_map) {
+        match graph.resolve_with_constraints(
+            name,
+            version,
+            &pins,
+            &profile_constraints,
+            &installed_map,
+        ) {
             Ok(solution) => selected.extend(solution),
             Err(ResolveError::NoSolution(tree)) => return Err(explain_from_tree(&tree)),
             Err(other) => return Err(PkgError::Resolution(other.to_string())),
@@ -2249,11 +2398,13 @@ fn cmd_rebuild(affected: bool, assume_yes: bool) -> PkgResult<()> {
         let selection = options::selection_of(&selections, name);
         let abi_tag = compute_abi_tag(&conn, &recipe.manifest, selection)?;
         let opt_tag = recipe.manifest.opt_tag(selection).map_err(PkgError::from)?;
-        let mut declared = recipe
-            .manifest
-            .dep_set(selection)
-            .map_err(PkgError::from)?;
-        declared.extend(recipe.manifest.build_dep_set(selection).map_err(PkgError::from)?);
+        let mut declared = recipe.manifest.dep_set(selection).map_err(PkgError::from)?;
+        declared.extend(
+            recipe
+                .manifest
+                .build_dep_set(selection)
+                .map_err(PkgError::from)?,
+        );
         let deps_in_cascade = declared
             .into_iter()
             .filter_map(|d| match d {
@@ -2339,9 +2490,8 @@ fn cmd_check(
     match target {
         // §16.1: single binary diagnostics.
         Some(t) => {
-            let path = which(&t).ok_or_else(|| {
-                PkgError::NotFound(format!("no binary or path {t:?}"))
-            })?;
+            let path =
+                which(&t).ok_or_else(|| PkgError::NotFound(format!("no binary or path {t:?}")))?;
             let bytes = fs::read(&path).map_err(PkgError::Io)?;
             let info = pkg_scanner::parse_elf(&bytes)?;
             println!("{}:", path.display());
@@ -2350,7 +2500,10 @@ fn cmd_check(
                 println!("  glibc floor: {floor}");
                 if let Some(host) = running_glibc_version() {
                     let ok = pkg_scanner::glibc_compatible(Some(floor), &host);
-                    println!("  host glibc: {host} — {}", if ok { "compatible" } else { "INCOMPATIBLE" });
+                    println!(
+                        "  host glibc: {host} — {}",
+                        if ok { "compatible" } else { "INCOMPATIBLE" }
+                    );
                     if !ok {
                         return Err(PkgError::Gate(format!(
                             "{} requires glibc >= {floor}, host has {host}",
@@ -2364,7 +2517,10 @@ fn cmd_check(
                 if candidates.is_empty() {
                     println!("  dlopen candidates: none");
                 } else {
-                    println!("  dlopen candidates (heuristic, §8.3): {}", candidates.join(", "));
+                    println!(
+                        "  dlopen candidates (heuristic, §8.3): {}",
+                        candidates.join(", ")
+                    );
                 }
             }
             if suggest {
@@ -2412,7 +2568,8 @@ fn cmd_check(
                 .ok_or_else(|| {
                     PkgError::Parse(
                         "could not determine a glibc ceiling (no glibc installed, and \
-                         ldd --version gave nothing); cannot check floors".into(),
+                         ldd --version gave nothing); cannot check floors"
+                            .into(),
                     )
                 })?;
             let mut deep_notes = Vec::new();
@@ -2450,9 +2607,10 @@ fn installed_from_db(conn: &Connection) -> PkgResult<Vec<pkg_scanner::InstalledP
             name: row.name.clone(),
             version: row.version.clone(),
             abi_tag: row.abi_tag,
-            opt_tag: row.opt_tag.parse().map_err(|e| {
-                PkgError::Parse(format!("bad opt_tag in packages row: {e}"))
-            })?,
+            opt_tag: row
+                .opt_tag
+                .parse()
+                .map_err(|e| PkgError::Parse(format!("bad opt_tag in packages row: {e}")))?,
             arch: row.arch,
         };
         let root = staging::store_root_for(row.arch, &roots)?;
@@ -2484,7 +2642,9 @@ fn installed_from_store() -> PkgResult<Vec<pkg_scanner::InstalledPackage>> {
             }
             // A dir that doesn't parse as an identity isn't a package
             // store dir (e.g. leftover staging); skip it.
-            let Ok(id) = Identity::parse_store_dir_name(&name, arch) else { continue };
+            let Ok(id) = Identity::parse_store_dir_name(&name, arch) else {
+                continue;
+            };
             out.push(pkg_scanner::InstalledPackage {
                 name: id.name,
                 version: id.version.to_string(),
@@ -2605,7 +2765,9 @@ fn store_dirs_providing(soname: &str) -> Vec<String> {
         if !root.is_dir() {
             continue;
         }
-        let Ok(entries) = fs::read_dir(&root) else { continue };
+        let Ok(entries) = fs::read_dir(&root) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let dir = entry.path();
             if !dir.is_dir() {
@@ -2623,10 +2785,14 @@ fn store_dirs_providing(soname: &str) -> Vec<String> {
 fn tree_contains_file(dir: &Path, name: &str) -> bool {
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&d) else { continue };
+        let Ok(entries) = fs::read_dir(&d) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
-            let Ok(ftype) = entry.file_type() else { continue };
+            let Ok(ftype) = entry.file_type() else {
+                continue;
+            };
             if ftype.is_dir() {
                 stack.push(path);
             } else if entry.file_name().to_string_lossy() == name {
@@ -2654,7 +2820,9 @@ fn check_nss() -> PkgResult<()> {
     let mut missing = Vec::new();
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
-        let Some((db, services)) = line.split_once(':') else { continue };
+        let Some((db, services)) = line.split_once(':') else {
+            continue;
+        };
         for token in services.split_whitespace() {
             // An action clause (`[NOTFOUND=return]`) ends the service list.
             if token.starts_with('[') {
@@ -2673,7 +2841,9 @@ fn check_nss() -> PkgResult<()> {
         println!("nss: every service in /etc/nsswitch.conf has a module");
     } else {
         for m in &missing {
-            println!("nss: MISSING module for {m} (no libnss_<service>.so[.2] on the library path)");
+            println!(
+                "nss: MISSING module for {m} (no libnss_<service>.so[.2] on the library path)"
+            );
         }
     }
     Ok(())
@@ -2699,7 +2869,10 @@ fn cmd_clean(garbage: bool, cache_only: bool) -> PkgResult<()> {
     if cache_only {
         let cache = ArtifactCache::default_root();
         let reclaimed = cache.clear()?;
-        println!("artifact cache: reclaimed {:.1} GiB", reclaimed as f64 / (1u64 << 30) as f64);
+        println!(
+            "artifact cache: reclaimed {:.1} GiB",
+            reclaimed as f64 / (1u64 << 30) as f64
+        );
         return Ok(());
     }
 
@@ -2767,7 +2940,8 @@ fn cmd_clean(garbage: bool, cache_only: bool) -> PkgResult<()> {
         for entry in fs::read_dir(&root).map_err(PkgError::Io)? {
             let entry = entry.map_err(PkgError::Io)?;
             let name = entry.file_name().to_string_lossy().to_string();
-            if name == staging::STAGE_DIR_NAME || !entry.file_type().map_err(PkgError::Io)?.is_dir() {
+            if name == staging::STAGE_DIR_NAME || !entry.file_type().map_err(PkgError::Io)?.is_dir()
+            {
                 continue;
             }
             if !keep.contains(&name) {
@@ -2911,8 +3085,11 @@ fn env_create(name: &str, from: Option<&str>) -> PkgResult<()> {
     if let Some(src) = from {
         fs::copy(src, root.join("manifest.toml")).map_err(PkgError::Io)?;
     } else if !root.join("manifest.toml").exists() {
-        fs::write(root.join("manifest.toml"), format!("name = \"{name}\"\npackages = []\n"))
-            .map_err(PkgError::Io)?;
+        fs::write(
+            root.join("manifest.toml"),
+            format!("name = \"{name}\"\npackages = []\n"),
+        )
+        .map_err(PkgError::Io)?;
     }
 
     let manifest_text = fs::read_to_string(root.join("manifest.toml")).map_err(PkgError::Io)?;
@@ -2939,9 +3116,7 @@ fn env_create(name: &str, from: Option<&str>) -> PkgResult<()> {
                     .into_iter()
                     .map(|r| r.join(&dir_name))
                     .find(|p| p.is_dir())
-                    .ok_or_else(|| {
-                        PkgError::NotFound(format!("store dir {dir_name} missing"))
-                    })?;
+                    .ok_or_else(|| PkgError::NotFound(format!("store dir {dir_name} missing")))?;
                 ops.extend(staging::plan_activation_ops(&store_dir, &root)?);
                 lock_lines.push(dir_name);
             }
@@ -2959,7 +3134,11 @@ fn env_create(name: &str, from: Option<&str>) -> PkgResult<()> {
     staging::with_old_targets(&mut ops);
     staging::apply_symlink_ops(&ops)?;
     fs::write(root.join("lock.txt"), lock_lines.join("\n") + "\n").map_err(PkgError::Io)?;
-    println!("env {name}: materialized {} links for {} packages", ops.len(), lock_lines.len());
+    println!(
+        "env {name}: materialized {} links for {} packages",
+        ops.len(),
+        lock_lines.len()
+    );
     Ok(())
 }
 
@@ -3201,7 +3380,9 @@ fn cmd_audit_env(env_name: &str, json: bool) -> PkgResult<()> {
             .iter()
             .find_map(|a| Identity::parse_store_dir_name(line, *a).ok())
             .ok_or_else(|| {
-                PkgError::Parse(format!("env {env_name} lock line not a store identity: {line}"))
+                PkgError::Parse(format!(
+                    "env {env_name} lock line not a store identity: {line}"
+                ))
             })?;
         checked += 1;
         for adv in &index.advisories {
@@ -3253,12 +3434,8 @@ fn cmd_isolate(path: &str, args: Vec<String>) -> PkgResult<()> {
     let mut cmd = vec![path.to_string()];
     cmd.extend(args);
     let env = vec![("LD_LIBRARY_PATH".to_string(), String::new())];
-    let outcome = pkg_sandbox::run_sandboxed(
-        &pkg_sandbox::SandboxProfile::Hook,
-        &cmd,
-        scratch,
-        &env,
-    )?;
+    let outcome =
+        pkg_sandbox::run_sandboxed(&pkg_sandbox::SandboxProfile::Hook, &cmd, scratch, &env)?;
     if !outcome.success() {
         return Err(PkgError::Build(format!(
             "isolated run failed ({}): {}",
@@ -3309,7 +3486,10 @@ fn cmd_build(name: &str, opts: Vec<String>, jobs: Option<u32>, no_cache: bool) -
     )?;
     let selection = options::selection_of(&selections, name).clone();
     let abi_tag = compute_abi_tag(&conn, &recipe.manifest, &selection)?;
-    let opt_tag = recipe.manifest.opt_tag(&selection).map_err(PkgError::from)?;
+    let opt_tag = recipe
+        .manifest
+        .opt_tag(&selection)
+        .map_err(PkgError::from)?;
 
     let mut plan = BuildPlan::default();
     plan.nodes.insert(
@@ -3377,7 +3557,11 @@ fn cmd_key(action: KeyAction) -> PkgResult<()> {
                     "{:10} {}{}",
                     info.role.as_str(),
                     info.fingerprint,
-                    if info.revoked { " [locally revoked]" } else { "" }
+                    if info.revoked {
+                        " [locally revoked]"
+                    } else {
+                        ""
+                    }
                 );
             }
             Ok(())
@@ -3434,7 +3618,10 @@ fn cmd_db(action: DbAction) -> PkgResult<()> {
             let _lock = lock_shared()?;
             let conn = open_db()?;
             let report = pkg_db::integrity::integrity_check(&conn)?;
-            println!("sqlite integrity: {}", if report.sqlite_ok { "ok" } else { "FAILED" });
+            println!(
+                "sqlite integrity: {}",
+                if report.sqlite_ok { "ok" } else { "FAILED" }
+            );
             for e in &report.sqlite_errors {
                 println!("  {e}");
             }
@@ -3448,8 +3635,7 @@ fn cmd_db(action: DbAction) -> PkgResult<()> {
                 if !root.is_dir() {
                     continue;
                 }
-                let discrepancies =
-                    pkg_db::integrity::scan_store(&conn, &root, arch)?;
+                let discrepancies = pkg_db::integrity::scan_store(&conn, &root, arch)?;
                 for d in &discrepancies {
                     println!("  store[{arch}]: {d:?}");
                 }
@@ -3555,7 +3741,10 @@ fn cmd_bootstrap(verify_layout: bool) -> PkgResult<()> {
                 s.dev()
             )));
         }
-        println!("layout check passed: anchor and stage share device {}", a.dev());
+        println!(
+            "layout check passed: anchor and stage share device {}",
+            a.dev()
+        );
         return Ok(());
     }
     println!("pkg bootstrap: nothing to do (use --verify-layout for the v13 §9 check)");
@@ -3581,13 +3770,24 @@ fn cmd_apply_pending_restarts(assume_yes: bool) -> PkgResult<()> {
     // restarted (v13 §7) — with their deleted paths, which render()
     // omits.
     for p in &report.unmapped {
-        println!("  unmapped pid {} ({}): {}", p.pid, p.comm, p.deleted_paths.join(", "));
+        println!(
+            "  unmapped pid {} ({}): {}",
+            p.pid,
+            p.comm,
+            p.deleted_paths.join(", ")
+        );
     }
     if report.services.is_empty() {
         println!("no restartable services (user session processes / PID 1 are not touched)");
         return Ok(());
     }
-    if !confirm(&format!("Restart {} service(s) in dependency order?", report.services.len()), assume_yes) {
+    if !confirm(
+        &format!(
+            "Restart {} service(s) in dependency order?",
+            report.services.len()
+        ),
+        assume_yes,
+    ) {
         return Ok(());
     }
     for service in &report.services {

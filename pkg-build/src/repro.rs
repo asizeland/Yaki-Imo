@@ -256,7 +256,9 @@ pub fn double_build(
     outcome.result.map_err(|e| {
         let _ = fs::remove_dir_all(&second_ctx.scratch_dir);
         let _ = fs::remove_dir_all(&second_ctx.pkgdir);
-        PkgError::Build(format!("{name} {version}: reproducibility re-build failed: {e}"))
+        PkgError::Build(format!(
+            "{name} {version}: reproducibility re-build failed: {e}"
+        ))
     })?;
 
     let first_entries = tree_entries(&first_ctx.pkgdir)?;
@@ -324,14 +326,28 @@ mod tests {
         let b = tempfile::tempdir().unwrap();
         // Same logical tree, created in a different order: readdir order
         // must not leak into the hash.
-        write_tree(a.path(), &[("usr/lib/libfoo.so", b"elf"), ("usr/bin/foo", b"bin")]);
-        write_tree(b.path(), &[("usr/bin/foo", b"bin"), ("usr/lib/libfoo.so", b"elf")]);
+        write_tree(
+            a.path(),
+            &[("usr/lib/libfoo.so", b"elf"), ("usr/bin/foo", b"bin")],
+        );
+        write_tree(
+            b.path(),
+            &[("usr/bin/foo", b"bin"), ("usr/lib/libfoo.so", b"elf")],
+        );
         std::os::unix::fs::symlink("libfoo.so", a.path().join("usr/lib/libfoo.so.1")).unwrap();
         std::os::unix::fs::symlink("libfoo.so", b.path().join("usr/lib/libfoo.so.1")).unwrap();
 
         let ha = tree_hash(a.path()).unwrap();
-        assert_eq!(ha, tree_hash(a.path()).unwrap(), "same tree hashes twice identically");
-        assert_eq!(ha, tree_hash(b.path()).unwrap(), "creation order must not matter");
+        assert_eq!(
+            ha,
+            tree_hash(a.path()).unwrap(),
+            "same tree hashes twice identically"
+        );
+        assert_eq!(
+            ha,
+            tree_hash(b.path()).unwrap(),
+            "creation order must not matter"
+        );
     }
 
     #[test]
@@ -378,7 +394,9 @@ mod tests {
         ]);
         let diff = diff_trees(&first, &second);
         assert_eq!(diff.len(), 3);
-        assert!(diff.iter().any(|l| l.starts_with("content differs: changed")));
+        assert!(diff
+            .iter()
+            .any(|l| l.starts_with("content differs: changed")));
         assert!(diff.iter().any(|l| l == "only in first build: gone"));
         assert!(diff.iter().any(|l| l == "only in second build: new"));
     }
@@ -393,8 +411,8 @@ mod tests {
         let quarantine = tmp.path().join("quarantine");
         let diff = vec!["content differs: usr/bin/x".to_string()];
 
-        let dir = quarantine_mismatch(&quarantine, "openssl", "3.0.14", &first, &second, &diff)
-            .unwrap();
+        let dir =
+            quarantine_mismatch(&quarantine, "openssl", "3.0.14", &first, &second, &diff).unwrap();
 
         // <quarantine>/<name>-<version>-<ts>/{first,second}/ + report.
         let dir_name = dir.file_name().unwrap().to_string_lossy().into_owned();

@@ -86,9 +86,8 @@ pub struct Recipe {
 impl Recipe {
     pub fn load(dir: &Path, recipe_commit: impl Into<String>) -> PkgResult<Self> {
         let meta = dir.join("pkg-meta.toml");
-        let text = fs::read_to_string(&meta).map_err(|e| {
-            PkgError::Parse(format!("reading {}: {e}", meta.display()))
-        })?;
+        let text = fs::read_to_string(&meta)
+            .map_err(|e| PkgError::Parse(format!("reading {}: {e}", meta.display())))?;
         let manifest = PackageManifest::from_toml_str(&text)?;
         Ok(Recipe {
             manifest,
@@ -419,8 +418,7 @@ fn run_recipe_phases_impl(
                 recipe.manifest.name, recipe.manifest.version
             ))
         })?;
-    let sources: Vec<PathBuf> =
-        pkg_repo::fetch_sources(manifest_entry, &ctx.source_cache)?;
+    let sources: Vec<PathBuf> = pkg_repo::fetch_sources(manifest_entry, &ctx.source_cache)?;
 
     // A build always starts from a pristine tree (design 4.3.2: no
     // incremental rebuilds — autotools caches and generated headers
@@ -442,12 +440,9 @@ fn run_recipe_phases_impl(
     // recipe scripts reference their sources by the URL's bare file
     // name, so the prefix is stripped here.
     for src in &sources {
-        let name = src
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| {
-                PkgError::Build(format!("source path {} has no file name", src.display()))
-            })?;
+        let name = src.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+            PkgError::Build(format!("source path {} has no file name", src.display()))
+        })?;
         let bare = match name.split_once('-') {
             Some((hash, rest))
                 if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) =>
@@ -512,16 +507,12 @@ fn run_recipe_phases_impl(
             "-e".to_string(),
             local_script.display().to_string(),
         ];
-        let outcome =
-            run_sandboxed_with_binds(&profile, &dep_binds, &cmd, &ctx.scratch_dir, &env)?;
+        let outcome = run_sandboxed_with_binds(&profile, &dep_binds, &cmd, &ctx.scratch_dir, &env)?;
         phase_logs.push((phase, outcome.stderr_tail.clone()));
         if !outcome.success() {
             return Err(PkgError::Build(format!(
                 "{} {}: `{}` phase failed ({})",
-                recipe.manifest.name,
-                recipe.manifest.version,
-                phase,
-                outcome.status
+                recipe.manifest.name, recipe.manifest.version, phase, outcome.status
             )));
         }
     }
@@ -560,12 +551,8 @@ fn run_recipe_phases_impl(
         } else {
             pkg_scanner::LinkagePolicy::Strict
         };
-        let report = pkg_scanner::verify_build_with_policy(
-            &ctx.pkgdir,
-            host,
-            &ctx.gate_deps,
-            policy,
-        )?;
+        let report =
+            pkg_scanner::verify_build_with_policy(&ctx.pkgdir, host, &ctx.gate_deps, policy)?;
         for warning in &report.warnings {
             eprintln!("pkg: gate warning: {warning}");
         }
@@ -640,10 +627,7 @@ fn fixup_pkgconfig_prefixes(pkgdir: &Path) -> PkgResult<()> {
                         .chars()
                         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
                     && var.chars().next().is_some_and(|c| c.is_ascii_alphabetic());
-                if is_var
-                    && var != "prefix"
-                    && (value == "/usr" || value.starts_with("/usr/"))
-                {
+                if is_var && var != "prefix" && (value == "/usr" || value.starts_with("/usr/")) {
                     out.push_str(&format!("{var}=${{prefix}}{}{nl}", &value[4..]));
                     changed = true;
                 } else {
@@ -798,10 +782,16 @@ mod tests {
         fixup_pkgconfig_prefixes(tmp.path()).unwrap();
 
         let fixed = fs::read_to_string(&pc).unwrap();
-        assert!(fixed.contains("prefix=${pcfiledir}/../..\n"), "got: {fixed}");
+        assert!(
+            fixed.contains("prefix=${pcfiledir}/../..\n"),
+            "got: {fixed}"
+        );
         assert!(fixed.contains("exec_prefix=${prefix}\n"), "got: {fixed}");
         assert!(fixed.contains("libdir=${prefix}/lib\n"), "got: {fixed}");
-        assert!(fixed.contains("includedir=${prefix}/include\n"), "got: {fixed}");
+        assert!(
+            fixed.contains("includedir=${prefix}/include\n"),
+            "got: {fixed}"
+        );
         assert!(
             fixed.contains("URL=https://tukaani.org/xz/\n"),
             "non-path values untouched: {fixed}"
@@ -955,7 +945,10 @@ default = false
         );
         // Link time stays dep-only: foreign libraries must never enter
         // link decisions.
-        assert_eq!(get("LIBRARY_PATH").as_deref(), Some("/pkg/deps/zlib/usr/lib"));
+        assert_eq!(
+            get("LIBRARY_PATH").as_deref(),
+            Some("/pkg/deps/zlib/usr/lib")
+        );
     }
 
     #[test]
