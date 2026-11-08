@@ -13,12 +13,14 @@ it against the packaged glibc is the stage-2 bootstrap.
 
 ```
 <category>/<name>/
-  pkg-meta.toml    # manifest: name, version, deps, [options], [build]
-  source.toml      # upstream source pins: [[source]] url + sha256
-  build            # build phase script (required)
-  install          # install phase script (required, fills $PKGDIR)
-  prepare / check  # optional phases
+  pkg-meta.toml    # metadata, [[source]] pins, [build], and optional [scripts]
+  watch.toml       # optional upstream-version policy
 ```
+
+A managed `build.system` (`autotools`, `meson`, `cmake`, or `make`) supplies the
+normal build/install phases and unpacks the source archive. Custom phases can be
+inline in `[scripts]`. Legacy `source.toml` and external phase files remain
+supported, but defining the same sources or phase in both forms is an error.
 
 ## The set
 
@@ -40,7 +42,7 @@ it against the packaged glibc is the stage-2 bootstrap.
 | app-shells/bash | shell | autotools | the chrootable set's `/bin/sh` equivalent |
 | sys-apps/coreutils | core tools | autotools | large configure+compile |
 | sys-apps/grep | text tool | autotools | `--disable-perl-regexp` keeps pcre2 out of the closure |
-| sys-apps/sed | text tool | autotools | |
+| sys-apps/sed | text tool | managed autotools | single-file `pkg-meta.toml` example |
 | sys-apps/gawk | text tool | autotools | |
 | sys-apps/tar | archiver | autotools | |
 | sys-apps/gzip | compressor | autotools | |
@@ -117,7 +119,26 @@ activation. A driver change rebuilds every installed kernel; a new kernel
 rebuilds every installed DKMS driver. Logs are kept under `/var/log/pkg/`.
 Module signing and removal/undo cleanup are not implemented yet.
 
+## Testing one recipe directly
+
+A new or changed recipe does not need a generated repository during development:
+
+```sh
+export PKG_ROOT=/tmp/yakimo-recipe-test
+pkg fetch ./ports/app-misc/my-package
+pkg build --no-cache ./ports/app-misc/my-package
+pkg install ./ports/app-misc/my-package
+```
+
+Relative source paths in `source.toml` are resolved from the recipe directory,
+and their SHA-256 is checked on every build. Dependencies come from the normal
+recipe checkout; pass several local recipe directories to `pkg install` when
+they depend on one another. Local recipes have no repository attestations, so
+Yakimo prints a warning while retaining the hash, sandbox, and linkage checks.
+
 ## Turning the tree into a repository
+
+Use this flow to test the complete tree or prepare repository contents:
 
 ```sh
 # 1. Download the pinned upstream sources.
@@ -140,13 +161,13 @@ pkg install lua less tty-solitaire
 > The generated repo uses deterministic **test keys** — it is for
 > localhost and pre-bootstrap testing, not distribution.
 
-Adding a package: copy the closest existing recipe, set the manifest,
-pin the source in `source.toml` (`sha256sum` the tarball), re-run the
-four steps above. Recipe rules to keep in mind: dependencies are
-additive-only, options are declared booleans exported as
-`PKG_OPT_<NAME>`, sources are fetched only if pinned in the repo
-manifest, and the scanner cross-checks soname linkage against declared
-`link` deps.
+Adding a package: copy the closest existing recipe, set the manifest, and pin
+the source in `source.toml` (`sha256sum` the tarball). Test it by directory path
+as above. Use the four repository steps when you need to test the complete tree
+or publish it. Recipe rules to keep in mind: dependencies are additive-only,
+options are declared booleans exported as `PKG_OPT_<NAME>`, every source needs a
+SHA-256 pin, and the scanner cross-checks soname linkage against declared `link`
+deps.
 
 ## Keeping versions current (watch.toml)
 

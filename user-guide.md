@@ -117,8 +117,9 @@ the root keys authorize the repository and timestamp keys.
 ```
 
 Sync downloads the signed package index and recipe manifest. The manifest
-lists the exact sources and checksums for each recipe. Builds use this synced,
-verified manifest rather than trusting an unreviewed local source file.
+lists the exact sources and checksums for each recipe. Repository builds use
+this synced manifest. Direct local recipe paths are the explicit exception for
+development; chapter 11 explains their checksum and trust rules.
 
 ---
 
@@ -623,26 +624,8 @@ cannot verify that your CPU accepted microcode or that the GPU initialized.
 
 ## 11. Making your own packages
 
-A source recipe normally has four required files and may have three optional
-files:
-
-```
-myrepo/app-misc/hello/
-  pkg-meta.toml    # package name, version, dependencies, and options
-  source.toml      # exact source download and SHA-256 checksum
-  build            # commands that compile the software
-  install          # commands that put the results in $PKGDIR
-  prepare          # optional patches or other source changes
-  check            # optional upstream tests; a failure stops the build
-  watch.toml       # optional instructions for finding newer releases
-```
-
-For a repackaged binary, `[build] binary = true` makes the `build` script
-optional. Some install-only recipes use an empty `build` script. Start by
-copying the recipe for a similar program in `ports/` rather than writing
-every file from scratch.
-
-### 11.1 pkg-meta.toml
+A recipe is a directory containing `pkg-meta.toml`. For common build systems,
+that one file is enough. Here is a complete source recipe:
 
 ```toml
 name = "hello"
@@ -650,24 +633,55 @@ version = "2.12"
 category = "app-misc"
 
 [dependencies]
+runtime = ["glibc"]
+
+[[source]]
+url = "https://ftp.gnu.org/gnu/hello/hello-2.12.tar.gz"
+sha256 = "31e066137a962676e89f69d1b65382de95a7ef7d914b8cb956f41ea72e0f516b"
+
+[build]
+system = "autotools"
+configure_args = ["--disable-nls"]
+```
+
+This tells Yakimo what to download, how to verify it, and how to build it. You
+do not need to write shell commands for this package. Start by copying the
+recipe for a similar program in `ports/`; `ports/sys-apps/sed/` is a single-file
+Autotools example.
+
+Older recipes may still use `source.toml` and external `prepare`, `build`,
+`check`, and `install` files. Do not define the same source list or phase in
+both forms: Yakimo reports the conflict instead of choosing one silently.
+`watch.toml` remains a separate optional file for upstream version tracking.
+
+### 11.1 Package details and dependencies
+
+The beginning of `pkg-meta.toml` gives the package name, exact version, and
+category. Dependencies are divided by when they are needed:
+
+```toml
+[dependencies]
 link = ["ncurses"]        # libraries this package links against
 runtime = ["glibc"]       # needed to run, but not linked
 build = ["perl"]          # needed only while building
+```
 
-# Options are declared, boolean, and additive-only.
+Entries accept version constraints (`zlib>=1.3`, `foo=2.0`), alternatives
+(`cronie|fcron`), and virtuals (`virtual/awk`). If your program links a library
+that you did not declare, the post-build check fails and can name the package
+that provides it.
+
+Options are declared booleans. They can add dependencies but cannot remove
+base dependencies:
+
+```toml
 [options.readline]
 default = false
 description = "Interactive line editing via readline"
-abi_affecting = true            # default; set false for docs/data knobs
-add_deps = ["readline"]         # extra deps when the option is on
-add_build_deps = ["help2man"]   # extra build-time deps when on
+abi_affecting = true            # default; false is suitable for docs/data
+add_deps = ["readline"]         # added when the option is enabled
+add_build_deps = ["help2man"]   # extra build-time dependency
 ```
-
-Dependency entries accept version constraints (`zlib>=1.3`, `foo=2.0`),
-OR-groups (`cronie|fcron`), and virtuals (`virtual/awk`). An entry in
-`link` or `runtime` is what the post-build gate checks against: if
-your binary links a library you did not declare, the build fails and
-the error tells you which installed package provides that library.
 
 For an out-of-tree kernel module, add a `[dkms]` table:
 
@@ -681,124 +695,163 @@ version = "1.0"
 ```
 
 The install phase must place the module source and its upstream-style
-`dkms.conf` in `$PKGDIR/usr/src/example-1.0/`. Do not compile the module in
-the normal build phase. After activation, Yakimo runs DKMS without network
-access. It builds a new or upgraded module for every installed kernel and
-builds an existing module when a new kernel appears. Kernel packages mark
-themselves with `provides = ["virtual/kernel"]` and install a usable
-`/usr/lib/modules/<release>/build` tree. DKMS build failures are warnings;
-the already-activated package remains installed and the log names the cause.
+`dkms.conf` in `$PKGDIR/usr/src/example-1.0/`. Do not compile the module in the
+normal build phase. After activation, Yakimo runs DKMS without network access.
+It builds a new or upgraded module for every installed kernel and builds an
+existing module when a new kernel appears. Kernel packages declare
+`provides = ["virtual/kernel"]` and install a usable
+`/usr/lib/modules/<release>/build` tree. DKMS failures are warnings; the package
+remains installed and the log names the cause.
 
-### 11.2 source.toml
+### 11.2 Sources and checksums
+
+Add one `[[source]]` table for each required file. SHA-256 is mandatory:
 
 ```toml
 [[source]]
 url = "https://ftp.gnu.org/gnu/hello/hello-2.12.tar.gz"
 sha256 = "31e066137a962676e89f69d1b65382de95a7ef7d914b8cb956f41ea72e0f516b"
-# filename = "..."   # optional: stage the distfile under a different
-                     # name (useful for ambiguous GitHub archive names)
+filename = "hello.tar.gz"  # optional name seen by the build
 ```
 
-The hash is required and always verified. Sources are fetched only
-through the signed recipe manifest — a recipe cannot pull from a URL
-the repository did not pin.
+Compute the checksum with `sha256sum <file>`. `filename` is useful when an
+upstream download has an ambiguous name.
 
-### 11.3 The phase scripts
+For a recipe supplied by directory path, `url` may be HTTP(S), a path relative
+to the recipe directory, an absolute path, or a `file://` URL:
 
-`prepare`, `build`, `check`, and `install` are plain `sh` scripts,
-run with `-e` (any failing command fails the phase), in order, inside
-the sandbox. A failed `check` fails the build — do not declare one you
-intend to ignore.
+```toml
+[[source]]
+url = "./hello-2.12.tar.gz"
+sha256 = "31e066137a962676e89f69d1b65382de95a7ef7d914b8cb956f41ea72e0f516b"
+```
 
-What a script sees:
+Local files are re-read and checked on every build, so changing a file without
+updating its hash is an error. HTTP(S) downloads use the same checksum rule.
+The build sandbox itself has no network access.
+
+Repository-installed packages accept only HTTP(S) sources from the signed
+recipe manifest. `file://` remains disabled on that path.
+
+### 11.3 Build systems and custom steps
+
+Set `[build] system` to one of these values:
+
+| Value | What Yakimo does |
+|---|---|
+| `autotools` | Runs `./configure --prefix=/usr`, `make`, and `make install`. |
+| `meson` | Creates `.pkg-build` with Meson, compiles it, and runs Meson install. |
+| `cmake` | Configures `.pkg-build` with CMake, compiles it, and runs CMake install. |
+| `make` | Runs `make` and `make install`. |
+| `none` | Does not generate a build or install phase; supply custom install steps. |
+| `custom` | Uses your phase scripts. This is the default for older recipes. |
+
+Managed systems unpack the first recognized tar archive automatically. Yakimo
+uses the single extracted directory as the working directory. If that is not
+unambiguous, set it explicitly:
+
+```toml
+[build]
+system = "meson"
+source_dir = "program-1.0"
+configure_args = ["-Ddocumentation=false"]
+```
+
+`configure_args` is available for Autotools, Meson, and CMake. Every generated
+install phase places files beneath `$PKGDIR`; Yakimo then checks and installs
+that output.
+
+When a stock build system does not fit, put custom steps in `[scripts]`:
+
+```toml
+[build]
+system = "custom"
+
+[scripts]
+prepare = '''
+# Apply patches or make other source changes here.
+'''
+
+build = '''
+make linux-readline
+'''
+
+check = '''
+make test
+'''
+
+install = '''
+make DESTDIR="$PKGDIR" install
+'''
+```
+
+All four keys are optional individually and override the corresponding generated
+phase. `custom` requires `build` unless this is a binary repackage, and always
+requires `install`. A failing `check` stops the build; omit it if you do not
+intend to run tests. Literal triple-quoted TOML strings preserve shell text.
+
+Scripts run with `/bin/sh -e`, in order, inside the sandbox. They receive:
 
 | Variable / path | Meaning |
 |---|---|
-| `$PKGDIR` | the output tree. Everything `install` puts here becomes the package. |
-| `PKG_OPT_<NAME>` | `0` or `1` for every declared option (e.g. `$PKG_OPT_READLINE`). |
-| `MAKEFLAGS` | already set to the granted `-jN`; just call `make`. |
-| `/pkg/deps/<name>` | each resolved dependency, at a stable path: headers in `/pkg/deps/foo/usr/include`, libraries in `/pkg/deps/foo/usr/lib`. |
-| `SOURCE_DATE_EPOCH` | pinned, for reproducible builds. |
-| `CC`, `CXX` | point at the compiler cache wrapper when enabled. |
+| `$PKGDIR` | Output tree; everything installed here becomes the package. |
+| `PKG_OPT_<NAME>` | `0` or `1` for each declared option. |
+| `MAKEFLAGS` | The granted parallelism, such as `-j4`. |
+| `/pkg/deps/<name>` | A dependency's headers, libraries, and tools. |
+| `SOURCE_DATE_EPOCH` | Fixed timestamp for reproducible builds. |
+| `CC`, `CXX` | Compiler commands, including a cache wrapper when enabled. |
 
-The sandbox has **no network**. Fetching happens earlier, from
-`source.toml`, verified against the hash. The only writable
-directories are the build scratch (your working directory) and
-`$PKGDIR`.
+The only writable locations are the build scratch and `$PKGDIR`. Sources are
+fetched and hash-checked before these scripts run.
 
-A typical pair:
-
-```sh
-# build
-tar xzf hello-2.12.tar.gz
-cd hello-2.12
-./configure --prefix=/usr
-make
-
-# install
-make -C hello-2.12 DESTDIR="$PKGDIR" install
-```
-
-A real option-aware example (lua in `ports/`):
-
-```sh
-if [ "$PKG_OPT_READLINE" = "1" ]; then
-    make linux-readline \
-        MYCFLAGS="-I/pkg/deps/readline/usr/include" \
-        MYLIBS="-L/pkg/deps/readline/usr/lib -lreadline ..."
-else
-    make linux
-fi
-```
-
-Binary redistributables (Discord, Steam) declare `[build] binary =
-true` in the manifest: the `build` script becomes optional, the
-`install` script unpacks the vendor tarball into `$PKGDIR`, and the
-gate relaxes its undeclared-library check to a warning (the blob
-legitimately links host libraries it does not ship).
+For a repackaged binary, set `[build] binary = true`. The build phase becomes
+optional; supply an install phase that unpacks and places the vendor files.
+The linkage check reports undeclared vendor-library references as warnings
+instead of errors.
 
 ### 11.4 Test and improve a recipe
 
-Work in a temporary root so a broken recipe cannot change your real system.
-From the Yakimo source checkout:
+Pass the recipe directory directly. You do not need to generate a repository,
+install a recipe checkout, configure trust, or run `pkg sync`:
 
 ```sh
-# Download the exact source and check it against source.toml.
-mkdir -p /tmp/dist
-curl -fsSL https://ftp.gnu.org/gnu/hello/hello-2.12.tar.gz \
-    -o /tmp/dist/hello-2.12.tar.gz
-printf '%s  %s\n' \
-    31e066137a962676e89f69d1b65382de95a7ef7d914b8cb956f41ea72e0f516b \
-    /tmp/dist/hello-2.12.tar.gz | sha256sum -c -
-
-# Make a local test repository from your recipe tree.
-cargo run --offline -p pkg-repo --example ports2repo -- \
-    /tmp/hello-repo http://127.0.0.1:8765 \
-    --distfiles /tmp/dist myrepo
-
-# Install its recipes into the temporary root and serve the repository.
 export PKG_ROOT=/tmp/hello-test
-sh ports/install.sh /tmp/hello-repo
-python3 -m http.server 8765 --directory /tmp/hello-repo \
-    >/tmp/hello-http.log 2>&1 &
 
-# Configure the temporary root, trust these test keys, and synchronize.
-mkdir -p "$PKG_ROOT/etc/pkg"
-printf 'mirrors = ["http://127.0.0.1:8765"]\n' \
-    >"$PKG_ROOT/etc/pkg/mirrors.toml"
-pkg key trust-root /tmp/hello-repo/root.json
-pkg sync
-pkg build hello
-pkg install hello
+# Fetch and check the sources without compiling.
+pkg fetch ./myrepo/app-misc/hello
+
+# Build the current files, bypassing previously cached package artifacts.
+pkg build --no-cache ./myrepo/app-misc/hello
+
+# Resolve dependencies and install the result.
+pkg install ./myrepo/app-misc/hello
 ```
 
-`ports2repo` uses deterministic test keys. They are suitable only for this
-kind of local test, never for a public repository.
+The path may be relative or absolute. Yakimo reads the package name and version
+from `pkg-meta.toml`, so the directory itself does not need to have a particular
+name. A local recipe temporarily overrides a same-name recipe in the installed
+checkout for that command.
 
-After changing a recipe, run `ports2repo` and `ports/install.sh` again, then
-run `pkg sync --force`. This updates both the signed source list and the
-recipe used by the resolver. Then run `pkg build hello` again. Without those
-steps, Yakimo may still be testing the previous copy.
+`pkg install <path>` resolves dependencies from the normal recipe checkout.
+To use another local recipe as a dependency, pass both directories:
+
+```sh
+pkg install ./my-lib ./my-app
+```
+
+`pkg build <path>` builds one recipe without resolving missing dependencies.
+Use `pkg install <path>` when the dependency chain also needs building.
+`pkg install --background` cannot be used with a local path because the current
+background state cannot preserve that path.
+
+After an edit, run the same command again. No repository regeneration or sync
+is needed. Use `pkg build --no-cache <path>` when you want to force a rebuild of
+an already installed version. The recipe's content hash prevents stale package
+artifacts from being reused after a recipe or source-pin change.
+
+A local recipe produces a warning because it has not been reviewed or attested
+by a repository. Its source hashes, sandbox, and linkage checks still apply.
+The explicit path is your authorization to build those local instructions.
 
 If the build uses a library that you did not declare, the error names the
 missing dependency and may name its provider:
@@ -810,14 +863,8 @@ any declared dep)
   hint: libz.so.1 — provided by installed package zlib (add it to [dependencies])
 ```
 
-Add the provider to the correct dependency list, regenerate and sync the
-test repository, and build again. Also run `pkg install hello` and try the
-installed program: a successful compilation alone does not prove that the
-program works.
-
-`pkg build` forces a source build even when the version has not changed.
-For an already installed recipe, it also replaces its store tree and updates
-the active symlinks, so changed files appear immediately.
+Add the provider to the correct dependency list and build again. Also try the
+installed program: successful compilation alone does not prove that it works.
 
 ### 11.5 Put a new package or update into a repository
 
