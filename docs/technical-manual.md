@@ -64,7 +64,9 @@ This split is why the scanner and the database are connected. A dependency decla
 
 `pkg install` and `pkg upgrade` share the same transaction engine. `install` requires at least one package specification. `upgrade` with no names targets all packages marked as explicitly installed; `--all` merely makes that intent explicit and suppresses the explanatory note.
 
-Accepted package specifications are `name`, `name@version`, and `name=version`. The last form is useful for an explicit, resolver-checked downgrade. Option requests can be attached with `name[opt:key=value,...]` or supplied transaction-wide with repeated `--opt name=value` flags.
+Accepted package specifications are `name`, `name@version`, `name=version`, and a local recipe directory path. The last versioned name form is useful for an explicit, resolver-checked downgrade. Option requests can be attached with `name[opt:key=value,...]` or supplied transaction-wide with repeated `--opt name=value` flags.
+
+A local directory is canonicalized and loaded under the name and version in its `pkg-meta.toml`. It overrides a same-name checkout recipe for that invocation. Its dependencies still resolve through the normal graph; another local dependency can be supplied by passing its directory too. An all-local graph can operate without `/var/lib/pkg/recipes` or a repository sync. Local path transactions reject `--background`, because pending state currently stores names only and could not reproduce the local paths.
 
 The high-level flow is:
 
@@ -197,19 +199,23 @@ A cache hit returns before recipe phases and before the critical-set double-buil
 
 ### 2.7 Fetching and verifying sources
 
-A build first finds the exact package name/version in `/var/cache/pkg/index/recipe-manifest.toml`. Only sources declared in that entry can be fetched. Each source URL must use HTTP or HTTPS and has a pinned SHA-256 digest.
+For a repository recipe, a build first finds the exact package name/version in `/var/cache/pkg/index/recipe-manifest.toml`. Only sources declared in that entry can be fetched. Each source URL must use HTTP or HTTPS and has a pinned SHA-256 digest.
 
-Sources live in `/var/cache/pkg/sources/` under `<sha256>-<basename>`. Existing files are re-hashed before reuse. Downloads go to a `.part` file, are size-limited, hashed, synced, and renamed into place only on a match. A mismatch deletes the partial file. Interrupted downloads restart rather than attempting HTTP range resume.
+An explicit recipe-directory argument follows a separate development path. `Recipe::load_local` derives a content-hash recipe identity and an unattested source entry from the local files. Relative paths, absolute paths, and `file://` URLs resolve to canonical local files; HTTP(S) sources remain available. This local entry authorizes only that invocation's recipe. Normal repository fetching continues to reject `file://`.
 
-`pkg fetch <name>` performs this fetch/verify step without running a build.
+Sources live in `/var/cache/pkg/sources/` under `<sha256>-<basename>`. Existing remote files are re-hashed before reuse. A local file is re-read every time, so changing it without updating the pin cannot be hidden by a valid older cache entry. Transfers go to a `.part` file, are size-limited, hashed, synced, and renamed into place only on a match. A mismatch deletes the partial file and leaves any previous complete cache entry intact. Interrupted downloads restart rather than attempting HTTP range resume.
 
-The build then creates fresh scratch and `$PKGDIR` directories and copies the verified sources into scratch under the basename recipes expect. Scratch is never incrementally reused; sanctioned reuse happens at the artifact-cache or compiler-cache layer.
+`pkg fetch <name-or-path>` performs this fetch/verify step without running a build. An all-local build plan does not require a synced recipe manifest. A mixed plan still requires it for repository-backed dependencies.
+
+The build then creates fresh scratch and `$PKGDIR` directories and copies the verified sources into scratch under the basename or declared `filename` that recipes expect. Scratch is never incrementally reused; sanctioned reuse happens at the artifact-cache or compiler-cache layer.
 
 **Current limitation:** the source fetcher uses its HTTP client directly. Although a network-capable Fetch sandbox profile exists, neither `pkg fetch` nor the build's fetch stage invokes it. The mandatory controls currently in force are the manifest entry, URL scheme, digest, and download limits—not origin restriction enforced by a network sandbox.
 
 ### 2.8 Sandboxed recipe phases
 
-`prepare`, `build`, `check`, and `install` run in that order. Prepare and check scripts are optional. Build is mandatory except for `[build] binary = true` repackaging; install is always mandatory. A script is copied into scratch and executed as `/bin/sh -e <script>`. A failed phase, including a failing check phase, fails the node.
+`prepare`, `build`, `check`, and `install` run in that order. Phase content can come from a legacy external file, an inline `[scripts]` string, or a generated build-system phase. Inline and external definitions of one phase conflict; an inline phase deliberately overrides the generated one. Prepare and check are optional. Custom source builds need a build phase, except for `[build] binary = true`; every recipe needs either a generated or custom install phase. The selected content is written into scratch and executed as `/bin/sh -e <script>`. A failed phase, including a failing check phase, fails the node.
+
+For `autotools`, `meson`, `cmake`, and `make`, Yakimo first unpacks the first recognized tar archive using the sandboxed toolchain. It enters `[build] source_dir` or the single extracted directory. The generated phases provide the conventional configure/build/install commands, with shell-safe quoting of `configure_args`; install phases target `$PKGDIR`. `none` and `custom` do not perform this managed unpacking or directory selection.
 
 The Build profile uses bubblewrap with:
 

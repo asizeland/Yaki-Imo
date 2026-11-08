@@ -126,12 +126,19 @@ stage_into_store -> activate_identities -> SQLite generation commit
 live FHS symlinks, queryable DB state, audit/history/undo surfaces
 ```
 
-The resolution universe is the **local recipe checkout**, not a direct query
-against remote package metadata. The signed recipe-manifest entry is consulted
-again when sources are fetched. The signed index supplies package/version and
-recipe-commit metadata, while the current sync implementation does not itself
-materialize the recipe checkout or `profiles.toml`; development flows provision
-those separately, normally through `ports/install.sh` and generated test data.
+The usual resolution universe is the **local recipe checkout**, not a direct
+query against remote package metadata. `run_transaction` also accepts recipe
+paths: `register_local_recipe` loads them and `graph_from_recipes` overlays them
+on same-name checkout entries. The overlay map flows through option expansion
+and `build_plan`, so every stage uses the selected files.
+
+For repository recipes, the signed recipe-manifest entry is consulted again when
+sources are fetched. For local paths, `Recipe::load_local` carries an unattested
+entry on the `Recipe`; an all-local plan skips the repository manifest entirely.
+The signed index supplies package/version and recipe-commit metadata, while the
+current sync implementation does not itself materialize the recipe checkout or
+`profiles.toml`; full-tree development flows provision those separately,
+normally through `ports/install.sh` and generated test data.
 
 For a focused trace of `pkg install`, read in order:
 
@@ -300,9 +307,12 @@ caching it, and advances the persisted index floor only after the index cache
 write succeeds. `sync_status` reads local metadata without networking.
 
 `recipe_manifest.rs` maps name/version to `RecipeManifestEntry`: recipe commit,
-source pins, attestations, and criticality. `verify_attestations` checks the
-reviewer signatures and critical-set independent-review count. Repository
-fixtures are executable examples:
+source pins, attestations, and criticality. It also owns the shared recipe-file
+list, content-derived `recipe_commit`, `source.toml` parser, and
+`local_manifest_entry` constructor used for explicit local recipe directories.
+`Source::filename` preserves an optional staged basename.
+`verify_attestations` checks the reviewer signatures and critical-set
+independent-review count. Repository fixtures are executable examples:
 
 - `pkg-repo/examples/mkrepo.rs` fabricates small signed repositories;
 - `pkg-repo/examples/ports2repo.rs` converts one or more ports trees, verifies
@@ -314,11 +324,14 @@ tools.
 
 ### Fetch boundary
 
-`fetch.rs::fetch_sources` accepts a `RecipeManifestEntry`, not arbitrary recipe
-URLs. `fetch_url` refuses a URL absent from that entry. Files are cached as
-`<sha256>-<basename>`, re-hashed before reuse, downloaded to `.part`, size
-capped, and renamed only after their digest matches. Hash/origin refusals map
-to gate errors; transport failures map to build errors.
+`fetch.rs::fetch_sources` accepts a repository `RecipeManifestEntry`, not
+arbitrary recipe URLs. `fetch_url` refuses a URL absent from that entry.
+`fetch_local_sources` is the separate explicit-local path: it additionally
+accepts the canonical `file://` URLs produced by `local_manifest_entry` and
+re-reads local files rather than letting an old cache entry hide an edit. Files
+are cached as `<sha256>-<basename>`, transferred to `.part`, size capped, and
+renamed only after their digest matches. Hash/origin refusals map to gate errors;
+transport failures map to build errors.
 
 Do not describe the current fetch path as network-sandboxed: although
 `SandboxProfile::Fetch` exists, `pkg fetch` and `run_recipe_phases` call the
@@ -385,7 +398,9 @@ worker into that cgroup.
 
 `pkg-build/src/recipe.rs` defines `Recipe`, `BuildContext`, `Phase`, and
 `BuildOutcome`. `Recipe::load` parses `pkg-meta.toml` and associates the recipe
-directory and commit. `run_recipe_phases` performs:
+directory and commit. `Recipe::load_local` canonicalizes an explicit path,
+derives its content identity, and attaches its local source entry.
+`run_recipe_phases` performs:
 
 1. manifest-guarded source fetch;
 2. fresh scratch and `$PKGDIR` creation, then source materialization;
