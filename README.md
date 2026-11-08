@@ -9,7 +9,8 @@ Largely AI slop at the moment, as my life allows me I will replace this with
 100% human, organic, unadulterated slop. All the ideas, mechanics and features
 are of my own slop.
 
-Yaki Imo is a source-build-only Linux package manager which tries to solve the issues above. 
+Yaki Imo is a source-build-only Linux package manager which tries to solve the issues
+I have experienced in other distributions. 
 
 ## Where the project stands
 
@@ -139,29 +140,3 @@ The build pipeline helps you get it right: dependencies appear at stable paths,
 options arrive as `PKG_OPT_*` variables, and if your binary links
 something you didn't declare, the build fails and names the package
 that provides it.
-
-## Configuration
-
-System config lives in `/etc/pkg/config.toml`. Supported sections:
-
-The intention is to like in Gentoo, have a set of global settings
-alongside files which configure individual packages.
-
-```toml
-# Compiler cache wrapper for builds ("ccache"/"sccache"/"off").
-[cache]
-compiler = "ccache"
-
-# Build parallelism: total compile jobs across the machine (default:
-# core count) and the per-package `make -j` cap (default: 4).
-# `pkg install --jobs N` overrides `jobs` for one invocation.
-[build]
-jobs = 8
-max_pkg_jobs = 4
-
-# Relocate individual state paths from their spec (FHS-style)
-# defaults. Keys are the default absolute paths; values must be
-# absolute.
-[paths]
-"/var/lib/pkg/cache" = "/somedisk/pkg-cache"
-```

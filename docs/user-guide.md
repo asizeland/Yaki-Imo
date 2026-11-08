@@ -16,6 +16,13 @@ The documentation has three parts:
 - **[Developer's manual](docs/developers-manual.md):** how the source code is
   organized and how to contribute to Yakimo itself.
 
+Eventually user guide will be expanded into a larger document:
+
+- [NTBD Handbook](docs/NTBD_Handbook.odt) which will contain the information 
+  relevant to managing the base system, and most relevant day to day activities:
+  working on different kinds of documents, development, virtualization, printing
+  playing games...
+
 ## Contents
 
 1. The five basic ideas
