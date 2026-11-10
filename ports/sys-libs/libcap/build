@@ -1,5 +1,0 @@
-# Plain Makefile package (no configure). The Go bindings and the PAM
-# module stay off: no Go toolchain or PAM in the tree.
-tar xJf libcap-2.76.tar.xz
-cd libcap-2.76
-make prefix=/usr lib=lib GOLANG=no PAM_CAP=no

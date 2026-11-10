@@ -1,4 +1,0 @@
-tar xJf grep-3.12.tar.xz
-cd grep-3.12
-./configure --prefix=/usr --disable-nls
-make

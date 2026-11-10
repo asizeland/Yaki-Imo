@@ -9,8 +9,8 @@
 # client would defeat both. What can be automated is the *bump* itself:
 # this script is the repo-side half of that (Debian's uscan plays the
 # same role for debian/watch files). It queries each recipe's upstream,
-# reports which recipes are behind, and with --apply rewrites
-# pkg-meta.toml + source.toml to the newest matching release, fetching
+# reports which recipes are behind, and with --apply rewrites the embedded
+# source pin (or legacy source.toml) to the newest matching release, fetching
 # the new distfile to compute its hash. The bump then flows through the
 # normal review/attestation path like any other tree change.
 #

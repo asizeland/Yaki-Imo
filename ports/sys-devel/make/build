@@ -1,4 +1,0 @@
-tar xzf make-4.4.1.tar.gz
-cd make-4.4.1
-./configure --prefix=/usr --disable-nls
-make

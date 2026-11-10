@@ -1,2 +1,0 @@
-# Nothing to compile: the bundle is the product.
-cp cacert-2025-07-15.pem ca-certificates.crt

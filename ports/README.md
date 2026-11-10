@@ -18,9 +18,11 @@ it against the packaged glibc is the stage-2 bootstrap.
 ```
 
 A managed `build.system` (`autotools`, `meson`, `cmake`, or `make`) supplies the
-normal build/install phases and unpacks the source archive. Custom phases can be
-inline in `[scripts]`. Legacy `source.toml` and external phase files remain
-supported, but defining the same sources or phase in both forms is an error.
+normal build/install phases and unpacks the source archive. Custom phases are
+inline in `[scripts]`. Every recipe in this tree uses the single-file format.
+Yakimo still accepts legacy `source.toml` and external phase files in older
+external trees, but defining the same sources or phase in both forms is an
+error.
 
 ## The set
 

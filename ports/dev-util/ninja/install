@@ -1,2 +1,0 @@
-mkdir -p "$PKGDIR/usr/bin"
-cp ninja-1.12.1/ninja "$PKGDIR/usr/bin/"

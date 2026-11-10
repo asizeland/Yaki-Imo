@@ -8,3 +8,42 @@ category = "sys-devel"
 [dependencies]
 link = ["ncurses", "libxcrypt"]
 runtime = ["glibc", "ncurses", "libxcrypt"]
+
+[[source]]
+url = "https://ftpmirror.gnu.org/gnu/gettext/gettext-0.26.tar.xz"
+sha256 = "d1fb86e260cfe7da6031f94d2e44c0da55903dbae0a2fa0fae78c91ae1b56f00"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+exec 2> "$PWD/.build-stderr.log"
+tar xJf gettext-0.26.tar.xz
+cd gettext-0.26
+# am_cv_func_iconv_works=yes: skip configure's runtime iconv probe.
+# The probe requires EUC-JP gconv modules, which the seed glibc in the
+# e2e sandbox doesn't carry — a sandbox artifact, not a property of the
+# system the package will run on (its glibc has full gconv). The probe
+# failing is also what made the build break: without HAVE_ICONV,
+# libtextstyle compiles a stub whose flush() signature doesn't match
+# the vtable, a hard error under GCC 15.
+# --without-selinux: none in the tree; the host's libselinux would
+# leak into libgettextlib undeclared (gate-fatal).
+# --with-included-libxml: use gettext's bundled copy — the host's
+# libxml2 would otherwise leak into libgettextsrc undeclared.
+am_cv_func_iconv_works=yes ./configure --prefix=/usr --disable-nls --disable-openmp --without-selinux --with-included-libxml
+# libasprintf's link rule is `--tag=CXX ... || --tag=CC ...`: the CXX
+# tag is deliberately unconfigured (LT_INIT has no CXX tag), so the
+# first attempt is SUPPOSED to fail and the CC fallback builds the
+# shared library. libtool 2.5.4 instead ignores the unknown tag and
+# "succeeds" building only the static archive, the fallback never
+# fires, and install then can't stat the never-created .so. Point the
+# rule straight at the CC link (the artifact every distro ships).
+sed -i '/^libasprintf\.la:/,+1s/\$(CXXLINK)/$(LINK)/' \
+    gettext-runtime/libasprintf/Makefile
+make
+'''
+install = '''
+make -C gettext-0.26 DESTDIR="$PKGDIR" install
+'''

@@ -1,7 +1,0 @@
-tar xjf elfutils-0.193.tar.bz2
-cd elfutils-0.193
-export PATH="/pkg/deps/pkgconf/usr/bin:$PATH"
-./configure --prefix=/usr --libdir=/usr/lib \
-    --disable-debuginfod --disable-libdebuginfod \
-    --without-bzlib --without-lzma --without-zstd
-make

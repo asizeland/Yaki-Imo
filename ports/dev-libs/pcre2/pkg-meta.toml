@@ -4,3 +4,22 @@ category = "dev-libs"
 
 [dependencies]
 runtime = ["glibc"]
+
+[[source]]
+url = "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.45/pcre2-10.45.tar.bz2"
+sha256 = "21547f3516120c75597e5b30a992e27a592a31950b5140e7b8bfde3f192033c4"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xjf pcre2-10.45.tar.bz2
+cd pcre2-10.45
+./configure --prefix=/usr --disable-static \
+    --enable-pcre2-16 --enable-pcre2-32 --enable-jit
+make
+'''
+install = '''
+make -C pcre2-10.45 DESTDIR="$PKGDIR" install
+'''

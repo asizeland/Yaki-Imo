@@ -1,1 +1,0 @@
-make -C gzip-1.15 DESTDIR="$PKGDIR" install

@@ -2,6 +2,10 @@ name = "nvidia-drivers"
 version = "595.112.07"
 category = "x11-drivers"
 
+[[source]]
+url = "https://download.nvidia.com/XFree86/Linux-x86_64/595.112.07/NVIDIA-Linux-x86_64-595.112.07.run"
+sha256 = "1a38ecd538a2da6232a7330184063af59e9fc946c908cca555bd07909848b9f0"
+
 [dependencies]
 link = ["glibc", "gcc", "linux"]
 runtime = ["glibc", "gcc", "linux", "kmod", "dkms"]
@@ -9,7 +13,67 @@ build = ["gcc", "make", "binutils"]
 
 [build]
 binary = true
+system = "custom"
 
 [dkms]
 name = "nvidia"
 version = "595.112.07"
+
+[scripts]
+build = '''
+V=595.112.07
+sh "NVIDIA-Linux-x86_64-$V.run" --extract-only
+'''
+install = '''
+V=595.112.07
+D=NVIDIA-Linux-x86_64-$V
+SRC="$PKGDIR/usr/src/nvidia-$V"
+mkdir -p "$SRC"
+cp -a "$D/kernel" "$SRC/"
+cat > "$SRC/dkms.conf" <<'EOF'
+PACKAGE_NAME="nvidia"
+PACKAGE_VERSION="595.112.07"
+AUTOINSTALL="yes"
+MAKE[0]="'make' -C kernel SYSSRC=${kernel_source_dir} SYSOUT=${kernel_source_dir} NV_KERNEL_MODULES='nvidia nvidia-modeset nvidia-drm nvidia-uvm' modules"
+BUILT_MODULE_NAME[0]="nvidia"
+BUILT_MODULE_LOCATION[0]="kernel"
+DEST_MODULE_LOCATION[0]="/extra"
+BUILT_MODULE_NAME[1]="nvidia-modeset"
+BUILT_MODULE_LOCATION[1]="kernel"
+DEST_MODULE_LOCATION[1]="/extra"
+BUILT_MODULE_NAME[2]="nvidia-drm"
+BUILT_MODULE_LOCATION[2]="kernel"
+DEST_MODULE_LOCATION[2]="/extra"
+BUILT_MODULE_NAME[3]="nvidia-uvm"
+BUILT_MODULE_LOCATION[3]="kernel"
+DEST_MODULE_LOCATION[3]="/extra"
+EOF
+
+for library in libnvidia-ml.so libnvidia-cfg.so libcuda.so \
+               libnvidia-opencl.so libnvidia-ptxjitcompiler.so \
+               libnvidia-nvvm.so libGLX_nvidia.so libEGL_nvidia.so \
+               libnvidia-glcore.so libnvidia-eglcore.so libnvidia-glsi.so \
+               libnvidia-glvkspirv.so libnvidia-gpucomp.so \
+               libnvidia-tls.so libnvidia-rtcore.so; do
+    install -Dm755 "$D/$library.$V" "$PKGDIR/usr/lib/$library.$V"
+done
+
+ln -s "libnvidia-ml.so.$V" "$PKGDIR/usr/lib/libnvidia-ml.so.1"
+ln -s "libnvidia-cfg.so.$V" "$PKGDIR/usr/lib/libnvidia-cfg.so.1"
+ln -s "libcuda.so.$V" "$PKGDIR/usr/lib/libcuda.so.1"
+ln -s "libnvidia-opencl.so.$V" "$PKGDIR/usr/lib/libnvidia-opencl.so.1"
+ln -s "libGLX_nvidia.so.$V" "$PKGDIR/usr/lib/libGLX_nvidia.so.0"
+ln -s "libEGL_nvidia.so.$V" "$PKGDIR/usr/lib/libEGL_nvidia.so.0"
+
+install -Dm755 "$D/nvidia-smi" "$PKGDIR/usr/bin/nvidia-smi"
+install -Dm755 "$D/nvidia-modprobe" "$PKGDIR/usr/bin/nvidia-modprobe"
+install -Dm755 "$D/nvidia-persistenced" "$PKGDIR/usr/bin/nvidia-persistenced"
+install -Dm644 "$D/firmware/gsp_ga10x.bin" \
+    "$PKGDIR/usr/lib/firmware/nvidia/$V/gsp_ga10x.bin"
+install -Dm644 "$D/nvidia_icd.json" \
+    "$PKGDIR/usr/share/vulkan/icd.d/nvidia_icd.json"
+install -Dm644 "$D/10_nvidia.json" \
+    "$PKGDIR/usr/share/egl/egl_vendor.d/10_nvidia.json"
+install -Dm644 "$D/nvidia.icd" "$PKGDIR/etc/OpenCL/vendors/nvidia.icd"
+install -Dm644 "$D/LICENSE" "$PKGDIR/usr/share/licenses/nvidia-drivers/LICENSE"
+'''

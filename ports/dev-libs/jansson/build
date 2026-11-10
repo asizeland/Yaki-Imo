@@ -1,4 +1,0 @@
-tar xzf jansson-2.14.tar.gz
-cd jansson-2.14
-./configure --prefix=/usr --disable-static
-make

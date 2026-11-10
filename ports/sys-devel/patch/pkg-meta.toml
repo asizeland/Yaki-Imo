@@ -7,3 +7,21 @@ category = "sys-devel"
 # 2.7.6's bundled gnulib predates GCC 15's C23 default.
 [dependencies]
 runtime = ["glibc"]
+
+[[source]]
+url = "https://ftpmirror.gnu.org/gnu/patch/patch-2.8.tar.xz"
+sha256 = "f87cee69eec2b4fcbf60a396b030ad6aa3415f192aa5f7ee84cad5e11f7f5ae3"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xJf patch-2.8.tar.xz
+cd patch-2.8
+./configure --prefix=/usr --disable-nls
+make
+'''
+install = '''
+make -C patch-2.8 DESTDIR="$PKGDIR" install
+'''

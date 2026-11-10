@@ -6,3 +6,21 @@ category = "dev-libs"
 # the kernel through it. bison/flex are farm build tools.
 [dependencies]
 runtime = ["glibc"]
+
+[[source]]
+url = "https://github.com/thom311/libnl/releases/download/libnl3_11_0/libnl-3.11.0.tar.gz"
+sha256 = "2a56e1edefa3e68a7c00879496736fdbf62fc94ed3232c0baba127ecfa76874d"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xzf libnl-3.11.0.tar.gz
+cd libnl-3.11.0
+./configure --prefix=/usr --disable-static
+make
+'''
+install = '''
+make -C libnl-3.11.0 DESTDIR="$PKGDIR" install
+'''

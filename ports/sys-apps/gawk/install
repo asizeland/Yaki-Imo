@@ -1,1 +1,0 @@
-make -C gawk-5.4.1 DESTDIR="$PKGDIR" install

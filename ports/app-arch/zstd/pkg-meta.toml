@@ -6,3 +6,19 @@ category = "app-arch"
 link = ["glibc", "zlib", "xz"]
 runtime = ["glibc", "zlib", "xz"]
 build = ["gcc", "make"]
+
+[[source]]
+url = "https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz"
+sha256 = "eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xzf zstd-1.5.7.tar.gz
+make -C zstd-1.5.7
+'''
+install = '''
+make -C zstd-1.5.7 DESTDIR="$PKGDIR" PREFIX=/usr install
+'''

@@ -5,3 +5,24 @@ category = "sys-apps"
 [dependencies]
 link = ["gmp"]
 runtime = ["glibc", "gmp"]
+
+[[source]]
+url = "https://ftpmirror.gnu.org/gnu/coreutils/coreutils-9.12.tar.xz"
+sha256 = "a480198559733e9b3da999e90543ac6f888a2caa544d8d664c5a1f17e528e210"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xJf coreutils-9.12.tar.xz
+cd coreutils-9.12
+# --without-selinux / --without-openssl: selinux isn't in the tree,
+# and openssl's libcrypto would be used by cksum — the host's would
+# leak in undeclared (gate-fatal). gmp IS declared.
+./configure --prefix=/usr --disable-nls --without-selinux --without-openssl
+make
+'''
+install = '''
+make -C coreutils-9.12 DESTDIR="$PKGDIR" install
+'''

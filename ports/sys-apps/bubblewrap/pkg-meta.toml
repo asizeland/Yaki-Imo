@@ -10,3 +10,28 @@ category = "sys-apps"
 link = ["libcap"]
 runtime = ["glibc", "libcap"]
 build = ["meson", "ninja", "python3", "pkgconf"]
+
+[[source]]
+url = "https://github.com/containers/bubblewrap/releases/download/v0.11.0/bubblewrap-0.11.0.tar.xz"
+sha256 = "988fd6b232dafa04b8b8198723efeaccdb3c6aa9c1c7936219d5791a8b7a8646"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xJf bubblewrap-0.11.0.tar.xz
+export PATH="/pkg/deps/meson/usr/bin:/pkg/deps/ninja/usr/bin:/pkg/deps/python3/usr/bin:/pkg/deps/pkgconf/usr/bin:$PATH"
+meson setup bubblewrap-0.11.0 bwrap-build \
+    --prefix=/usr --libdir=/usr/lib --buildtype=release \
+    -Dman=disabled -Dtests=false -Dselinux=disabled \
+    -Dbash_completion=disabled -Dzsh_completion=disabled
+ninja -C bwrap-build
+'''
+install = '''
+export PATH="/pkg/deps/ninja/usr/bin:/pkg/deps/python3/usr/bin:$PATH"
+DESTDIR="$PKGDIR" ninja -C bwrap-build install
+# bwrap needs the setuid bit (or unprivileged user namespaces) to set up
+# its sandbox; setuid matches what distributions ship.
+chmod u+s "$PKGDIR/usr/bin/bwrap"
+'''

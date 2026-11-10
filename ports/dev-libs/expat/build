@@ -1,4 +1,0 @@
-tar xJf expat-2.7.1.tar.xz
-cd expat-2.7.1
-./configure --prefix=/usr --disable-static
-make

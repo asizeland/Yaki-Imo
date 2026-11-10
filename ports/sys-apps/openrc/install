@@ -1,6 +1,0 @@
-export PATH="/pkg/deps/ninja/usr/bin:/pkg/deps/python3/usr/bin:$PATH"
-DESTDIR="$PKGDIR" ninja -C openrc-build install
-
-# Upstream populates the standard runlevels. Keep the service definitions,
-# but leave all runlevel selection to the system administrator.
-find "$PKGDIR/etc/runlevels" -type l -delete

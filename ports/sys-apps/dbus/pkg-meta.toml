@@ -8,3 +8,68 @@ category = "sys-apps"
 link = ["expat"]
 runtime = ["glibc", "expat"]
 build = ["pkgconf", "meson", "ninja", "python3"]
+
+[[source]]
+url = "https://dbus.freedesktop.org/releases/dbus/dbus-1.16.2.tar.xz"
+sha256 = "0ba2a1a4b16afe7bceb2c07e9ce99a8c2c3508e5dec290dbb643384bd6beb7e2"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xJf dbus-1.16.2.tar.xz
+export PATH="/pkg/deps/meson/usr/bin:/pkg/deps/ninja/usr/bin:/pkg/deps/python3/usr/bin:/pkg/deps/pkgconf/usr/bin:$PATH"
+# dbus 1.16+ is meson-only. traditional_activation stays on: without
+# systemd, service activation is dbus-daemon's own job.
+meson setup dbus-1.16.2 dbus-build \
+    --prefix=/usr --libdir=/usr/lib --sysconfdir=/etc --localstatedir=/var \
+    --buildtype=release \
+    -Druntime_dir=/run \
+    -Dsystemd=disabled -Duser_session=false \
+    -Dtraditional_activation=true \
+    -Dapparmor=disabled -Dselinux=disabled -Dlibaudit=disabled \
+    -Dlaunchd=disabled -Dx11_autolaunch=disabled \
+    -Ddoxygen_docs=disabled -Dducktype_docs=disabled -Dxml_docs=disabled \
+    -Dchecks=false -Dmodular_tests=disabled -Dinstalled_tests=false
+ninja -C dbus-build
+'''
+install = '''
+export PATH="/pkg/deps/ninja/usr/bin:/pkg/deps/python3/usr/bin:$PATH"
+DESTDIR="$PKGDIR" ninja -C dbus-build install
+
+mkdir -p "$PKGDIR/etc/init.d"
+cat > "$PKGDIR/etc/init.d/dbus" <<'EOF'
+#!/sbin/openrc-run
+
+supervisor=supervise-daemon
+extra_started_commands="reload"
+description="D-Bus system message bus"
+command="/usr/bin/dbus-daemon"
+command_args="--system"
+command_args_foreground="--nofork"
+dbus_socket="/run/dbus/system_bus_socket"
+
+depend() {
+	need localmount
+	after bootmisc
+}
+
+start_pre() {
+	/usr/bin/dbus-uuidgen --ensure=/etc/machine-id
+	checkpath -q -d -m 0755 /run/dbus
+}
+
+stop_post() {
+	[ ! -S "$dbus_socket" ] || rm -f "$dbus_socket"
+}
+
+reload() {
+	ebegin "Reloading D-Bus system bus configuration"
+	/usr/bin/dbus-send --print-reply --system --type=method_call \
+		--dest=org.freedesktop.DBus / org.freedesktop.DBus.ReloadConfig >/dev/null
+	eend $?
+}
+EOF
+chmod 0755 "$PKGDIR/etc/init.d/dbus"
+'''

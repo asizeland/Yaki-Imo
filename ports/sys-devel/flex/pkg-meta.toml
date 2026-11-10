@@ -5,3 +5,21 @@ category = "sys-devel"
 # Scanner generator. Runs m4 at runtime on its skeletons.
 [dependencies]
 runtime = ["glibc", "m4"]
+
+[[source]]
+url = "https://github.com/westes/flex/releases/download/v2.6.4/flex-2.6.4.tar.gz"
+sha256 = "e87aae032bf07c26f85ac0ed3250998c37621d95f8bd748b31f15b33c45ee995"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xzf flex-2.6.4.tar.gz
+cd flex-2.6.4
+./configure --prefix=/usr --disable-nls
+make
+'''
+install = '''
+make -C flex-2.6.4 DESTDIR="$PKGDIR" install
+'''

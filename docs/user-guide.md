@@ -690,10 +690,11 @@ do not need to write shell commands for this package. Start by copying a similar
 recipe from your tree. `$PORTS/sys-apps/sed/` is a single-file Autotools
 example.
 
-Older recipes may still use `source.toml` and external `prepare`, `build`,
-`check`, and `install` files. Do not define the same source list or phase in
-both forms: Yakimo reports the conflict instead of choosing one silently.
-`watch.toml` remains a separate optional file for upstream version tracking.
+Every recipe in the seed tree uses this single-file format. Older external
+trees may still use `source.toml` and external `prepare`, `build`, `check`, and
+`install` files. Do not define the same source list or phase in both forms:
+Yakimo reports the conflict instead of choosing one silently. `watch.toml`
+remains a separate optional file for upstream version tracking.
 
 ### 11.1 Package details and dependencies
 

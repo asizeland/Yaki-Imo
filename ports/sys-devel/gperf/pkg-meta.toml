@@ -5,3 +5,23 @@ category = "sys-devel"
 # Perfect-hash generator — eudev's build consumes it.
 [dependencies]
 runtime = ["glibc"]
+
+[[source]]
+url = "https://ftpmirror.gnu.org/gnu/gperf/gperf-3.3.tar.gz"
+sha256 = "fd87e0aba7e43ae054837afd6cd4db03a3f2693deb3619085e6ed9d8d9604ad8"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xzf gperf-3.3.tar.gz
+cd gperf-3.3
+# -static-libstdc++/-static-libgcc: gperf is C++, and no package
+# provides libstdc++ yet (same stage-2 situation as ninja).
+LDFLAGS="-static-libstdc++ -static-libgcc" ./configure --prefix=/usr
+make
+'''
+install = '''
+make -C gperf-3.3 DESTDIR="$PKGDIR" install
+'''

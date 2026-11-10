@@ -8,3 +8,39 @@ category = "dev-vcs"
 [dependencies]
 link = ["curl", "zlib", "openssl", "expat"]
 runtime = ["glibc", "curl", "zlib", "openssl", "expat", "ca-certificates"]
+
+[[source]]
+url = "https://mirrors.edge.kernel.org/pub/software/scm/git/git-2.50.1.tar.xz"
+sha256 = "7e3e6c36decbd8f1eedd14d42db6674be03671c2204864befa2a41756c5c8fc4"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xJf git-2.50.1.tar.xz
+cd git-2.50.1
+# No ./configure needed: git's Makefile takes everything as variables.
+# All dep -I/-L are explicit: config scripts (curl-config) report their
+# final /usr prefix, useless inside the sandbox where deps live at
+# /pkg/deps/<name>. KEEP THESE FLAGS IDENTICAL IN BOTH PHASES: git's
+# Makefile tracks flags (GIT-CFLAGS) and rebuilds the world on any
+# change — an install phase with different flags recompiles everything.
+make prefix=/usr \
+    NO_PERL=1 NO_TCLTK=1 NO_GETTEXT=1 NO_PYTHON=1 \
+    CURL_CONFIG=/pkg/deps/curl/usr/bin/curl-config \
+    OPENSSL_LIBDIR=/pkg/deps/openssl/usr/lib \
+    CFLAGS="-O2 -I/pkg/deps/curl/usr/include -I/pkg/deps/zlib/usr/include -I/pkg/deps/expat/usr/include -I/pkg/deps/openssl/usr/include" \
+    LDFLAGS="-L/pkg/deps/curl/usr/lib -L/pkg/deps/zlib/usr/lib -L/pkg/deps/expat/usr/lib -L/pkg/deps/openssl/usr/lib -Wl,-rpath,/usr/lib"
+'''
+install = '''
+# Flags must match the build phase exactly (see build: GIT-CFLAGS
+# tracking rebuilds on any flag change).
+make -C git-2.50.1 prefix=/usr DESTDIR="$PKGDIR" \
+    NO_PERL=1 NO_TCLTK=1 NO_GETTEXT=1 NO_PYTHON=1 \
+    CURL_CONFIG=/pkg/deps/curl/usr/bin/curl-config \
+    OPENSSL_LIBDIR=/pkg/deps/openssl/usr/lib \
+    CFLAGS="-O2 -I/pkg/deps/curl/usr/include -I/pkg/deps/zlib/usr/include -I/pkg/deps/expat/usr/include -I/pkg/deps/openssl/usr/include" \
+    LDFLAGS="-L/pkg/deps/curl/usr/lib -L/pkg/deps/zlib/usr/lib -L/pkg/deps/expat/usr/lib -L/pkg/deps/openssl/usr/lib -Wl,-rpath,/usr/lib" \
+    install
+'''

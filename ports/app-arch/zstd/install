@@ -1,1 +1,0 @@
-make -C zstd-1.5.7 DESTDIR="$PKGDIR" PREFIX=/usr install

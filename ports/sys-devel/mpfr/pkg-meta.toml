@@ -6,3 +6,21 @@ category = "sys-devel"
 [dependencies]
 link = ["gmp"]
 runtime = ["glibc", "gmp"]
+
+[[source]]
+url = "https://ftpmirror.gnu.org/gnu/mpfr/mpfr-4.2.2.tar.xz"
+sha256 = "b67ba0383ef7e8a8563734e2e889ef5ec3c3b898a01d00fa0a6869ad81c6ce01"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xJf mpfr-4.2.2.tar.xz
+cd mpfr-4.2.2
+./configure --prefix=/usr --disable-nls
+make
+'''
+install = '''
+make -C mpfr-4.2.2 DESTDIR="$PKGDIR" install
+'''

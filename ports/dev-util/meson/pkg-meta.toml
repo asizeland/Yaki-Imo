@@ -7,3 +7,38 @@ category = "dev-util"
 [dependencies]
 runtime = ["glibc", "python3"]
 build = ["python3"]
+
+[[source]]
+url = "https://github.com/mesonbuild/meson/releases/download/1.8.2/meson-1.8.2.tar.gz"
+sha256 = "c105816d8158c76b72adcb9ff60297719096da7d07f6b1f000fd8c013cd387af"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xzf meson-1.8.2.tar.gz
+'''
+install = '''
+mkdir -p "$PKGDIR/usr/lib/meson" "$PKGDIR/usr/bin"
+cp -r meson-1.8.2/mesonbuild "$PKGDIR/usr/lib/meson/"
+cp meson-1.8.2/meson.py "$PKGDIR/usr/lib/meson/"
+cat > "$PKGDIR/usr/bin/meson" <<'EOF'
+#!/bin/sh
+# Relocatable wrapper: meson.py is found relative to this script, so it
+# works both in the live tree (/usr/bin/meson) and inside the build
+# sandbox (/pkg/deps/meson/usr/bin/meson). Prefer a python3 installed
+# next to us; otherwise take python3 from PATH (build sandbox case).
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -x "$here/python3" ]; then PY="$here/python3"; else PY=python3; fi
+exec "$PY" "$here/../lib/meson/meson.py" "$@"
+EOF
+chmod +x "$PKGDIR/usr/bin/meson"
+
+# Byte-compile the module tree so the .pyc files are part of the
+# manifest. Without this, the first run of meson in the live tree
+# writes __pycache__ through the store symlinks and pollutes the
+# (immutable) store, which `db check` then reports as a content
+# mismatch.
+python3 -m compileall -q "$PKGDIR/usr/lib/meson/mesonbuild"
+'''

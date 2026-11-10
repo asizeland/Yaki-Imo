@@ -7,3 +7,21 @@ category = "sys-devel"
 # gnulib builds cleanly under GCC 15's C23 default.
 [dependencies]
 runtime = ["glibc"]
+
+[[source]]
+url = "https://ftpmirror.gnu.org/gnu/m4/m4-1.4.20.tar.xz"
+sha256 = "e236ea3a1ccf5f6c270b1c4bb60726f371fa49459a8eaaebc90b216b328daf2b"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xJf m4-1.4.20.tar.xz
+cd m4-1.4.20
+./configure --prefix=/usr --disable-nls
+make
+'''
+install = '''
+make -C m4-1.4.20 DESTDIR="$PKGDIR" install
+'''

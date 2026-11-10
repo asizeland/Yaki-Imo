@@ -1,1 +1,0 @@
-make -C dkms-3.3.0 DESTDIR="$PKGDIR" install install-doc

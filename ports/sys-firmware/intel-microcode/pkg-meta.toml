@@ -4,3 +4,22 @@ category = "sys-firmware"
 
 [dependencies]
 runtime = ["linux"]
+
+[[source]]
+url = "https://github.com/intel/Intel-Linux-Processor-Microcode-Data-Files/archive/refs/tags/microcode-20260925.tar.gz"
+filename = "intel-microcode-20260925.tar.gz"
+sha256 = "0ec19023dad1e6dd0c5909174b8dff2555b91cf01671e36271a1ef36655c0cfc"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xzf intel-microcode-20260925.tar.gz
+'''
+install = '''
+SRC=Intel-Linux-Processor-Microcode-Data-Files-microcode-20260925
+mkdir -p "$PKGDIR/usr/lib/firmware" "$PKGDIR/usr/share/licenses/intel-microcode"
+cp -r "$SRC/intel-ucode" "$PKGDIR/usr/lib/firmware/"
+install -m 644 "$SRC/license" "$PKGDIR/usr/share/licenses/intel-microcode/license"
+'''

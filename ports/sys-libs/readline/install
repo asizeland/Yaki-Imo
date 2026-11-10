@@ -1,1 +1,0 @@
-make -C readline-8.3 DESTDIR="$PKGDIR" install

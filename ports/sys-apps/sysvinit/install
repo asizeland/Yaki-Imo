@@ -1,1 +1,0 @@
-make -C sysvinit-3.14/src ROOT="$PKGDIR" install

@@ -1,1 +1,0 @@
-make -C less-643 install prefix="$PKGDIR/usr"

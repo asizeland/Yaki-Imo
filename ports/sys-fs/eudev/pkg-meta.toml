@@ -9,3 +9,52 @@ category = "sys-fs"
 link = ["util-linux", "kmod"]
 runtime = ["glibc", "util-linux", "kmod"]
 build = ["pkgconf"]
+
+[[source]]
+url = "https://github.com/eudev-project/eudev/releases/download/v3.2.14/eudev-3.2.14.tar.gz"
+sha256 = "8da4319102f24abbf7fff5ce9c416af848df163b29590e666d334cc1927f006f"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xzf eudev-3.2.14.tar.gz
+cd eudev-3.2.14
+export PATH="/pkg/deps/pkgconf/usr/bin:$PATH"
+./configure --prefix=/usr --sysconfdir=/etc --disable-static \
+    --disable-manpages --enable-blkid --enable-kmod
+make
+'''
+install = '''
+make -C eudev-3.2.14 DESTDIR="$PKGDIR" install
+
+mkdir -p "$PKGDIR/etc/init.d"
+cat > "$PKGDIR/etc/init.d/udev" <<'EOF'
+#!/sbin/openrc-run
+
+supervisor=supervise-daemon
+description="eudev device manager"
+command="/usr/sbin/udevd"
+
+depend() {
+	provide dev
+	need devfs sysfs
+	before fsck
+}
+
+start_pre() {
+	if [ -e /proc/sys/kernel/hotplug ]; then
+		echo "" > /proc/sys/kernel/hotplug
+	fi
+	checkpath -q -d -m 0755 /run/udev
+}
+
+start_post() {
+	udevadm trigger --action=add --type=subsystems
+	udevadm trigger --action=add --type=devices
+	udevadm settle
+}
+EOF
+chmod 0755 "$PKGDIR/etc/init.d/udev"
+'''

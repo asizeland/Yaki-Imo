@@ -4,3 +4,21 @@ category = "sys-apps"
 
 [dependencies]
 runtime = ["glibc"]
+
+[[source]]
+url = "https://github.com/tukaani-project/xz/releases/download/v5.8.4/xz-5.8.4.tar.gz"
+sha256 = "0014c7886930454fe8bd4228665b51af55eeae560ea135c9c4cd33f55b2591d9"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xzf xz-5.8.4.tar.gz
+cd xz-5.8.4
+./configure --prefix=/usr --disable-nls
+make
+'''
+install = '''
+make -C xz-5.8.4 DESTDIR="$PKGDIR" install
+'''

@@ -1,2 +1,0 @@
-V=595.112.07
-sh "NVIDIA-Linux-x86_64-$V.run" --extract-only

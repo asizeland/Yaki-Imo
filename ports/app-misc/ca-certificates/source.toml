@@ -1,4 +1,0 @@
-[[source]]
-url = "https://curl.se/ca/cacert-2025-07-15.pem"
-filename = "cacert-2025-07-15.pem"
-sha256 = "7430e90ee0cdca2d0f02b1ece46fbf255d5d0408111f009638e3b892d6ca089c"

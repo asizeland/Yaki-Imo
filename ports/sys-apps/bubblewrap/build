@@ -1,7 +1,0 @@
-tar xJf bubblewrap-0.11.0.tar.xz
-export PATH="/pkg/deps/meson/usr/bin:/pkg/deps/ninja/usr/bin:/pkg/deps/python3/usr/bin:/pkg/deps/pkgconf/usr/bin:$PATH"
-meson setup bubblewrap-0.11.0 bwrap-build \
-    --prefix=/usr --libdir=/usr/lib --buildtype=release \
-    -Dman=disabled -Dtests=false -Dselinux=disabled \
-    -Dbash_completion=disabled -Dzsh_completion=disabled
-ninja -C bwrap-build

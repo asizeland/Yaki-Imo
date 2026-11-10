@@ -4,3 +4,26 @@ category = "dev-libs"
 
 [dependencies]
 runtime = ["glibc"]
+
+[[source]]
+url = "https://github.com/openssl/openssl/releases/download/openssl-3.5.2/openssl-3.5.2.tar.gz"
+sha256 = "c53a47e5e441c930c3928cf7bf6fb00e5d129b630e0aa873b08258656e7345ec"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xzf openssl-3.5.2.tar.gz
+cd openssl-3.5.2
+# Configure is perl (the sandbox farm provides it as a build tool).
+# --openssldir=/etc/ssl matches where ca-certificates installs.
+# --libdir=lib: the linux-x86_64 target defaults to lib64, but the
+# whole tree standardizes on /usr/lib.
+./Configure linux-x86_64 --prefix=/usr --openssldir=/etc/ssl \
+    --libdir=lib shared no-docs
+make
+'''
+install = '''
+make -C openssl-3.5.2 DESTDIR="$PKGDIR" install_sw
+'''

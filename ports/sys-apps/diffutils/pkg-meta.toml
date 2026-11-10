@@ -6,3 +6,21 @@ category = "sys-apps"
 # scripts depend on it.
 [dependencies]
 runtime = ["glibc"]
+
+[[source]]
+url = "https://ftpmirror.gnu.org/gnu/diffutils/diffutils-3.12.tar.xz"
+sha256 = "7c8b7f9fc8609141fdea9cece85249d308624391ff61dedaf528fcb337727dfd"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xJf diffutils-3.12.tar.xz
+cd diffutils-3.12
+./configure --prefix=/usr --disable-nls
+make
+'''
+install = '''
+make -C diffutils-3.12 DESTDIR="$PKGDIR" install
+'''

@@ -1,2 +1,0 @@
-cd libcap-2.76
-make prefix=/usr lib=lib GOLANG=no PAM_CAP=no DESTDIR="$PKGDIR" install

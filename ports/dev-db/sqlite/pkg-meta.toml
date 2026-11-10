@@ -2,6 +2,11 @@ name = "sqlite"
 version = "3.45.3"
 category = "dev-db"
 
+# Upstream's version is 3.45.3; the tarball uses the concatenated form.
+[[source]]
+url = "https://sqlite.org/2024/sqlite-autoconf-3450300.tar.gz"
+sha256 = "b2809ca53124c19c60f42bf627736eae011afdcc205bb48270a5ee9a38191531"
+
 [dependencies]
 runtime = ["glibc"]
 
@@ -12,3 +17,32 @@ runtime = ["glibc"]
 default = true
 abi_affecting = false
 description = "Full-text search (FTS4/FTS5) support"
+
+[build]
+system = "custom"
+
+[scripts]
+build = '''
+tar xzf sqlite-autoconf-3450300.tar.gz
+cd sqlite-autoconf-3450300
+# Recipe-owned feature plumbing (the §4.3 contract: the PM declares the
+# option, the recipe owns what it does). sqlite-autoconf's configure
+# defaults --enable-fts5=yes, so the OFF branch must disable explicitly
+# — merely omitting the -D flags is not enough.
+if [ "$PKG_OPT_FTS5" = "1" ]; then
+    export CFLAGS="-O2 -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_FTS4"
+    FTS5=--enable-fts5
+else
+    FTS5=--disable-fts5
+fi
+# readline/editline/zlib stay off even when the HOST happens to have
+# them (foreign roots bind the host /usr read-only, and configure would
+# otherwise auto-detect them — undeclared linkage, rightly gate-fatal).
+# zlib has no configure switch, so its cache variables are pre-seeded.
+ac_cv_header_zlib_h=no ac_cv_search_deflate=no \
+    ./configure --prefix=/usr "$FTS5" --disable-readline --disable-editline
+make
+'''
+install = '''
+make -C sqlite-autoconf-3450300 DESTDIR="$PKGDIR" install
+'''
