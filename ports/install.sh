@@ -17,5 +17,15 @@ ROOT=${2:-${PKG_ROOT:-/}}
 
 [ -d "$REPO/recipes" ] || { echo "$REPO has no recipes/ (run ports2repo first)" >&2; exit 1; }
 mkdir -p "$ROOT/var/lib/pkg/recipes"
-cp -r "$REPO"/recipes/* "$ROOT/var/lib/pkg/recipes/"
+for recipe in "$REPO"/recipes/*; do
+    name=${recipe##*/}
+    dest=$ROOT/var/lib/pkg/recipes/$name
+    mkdir -p "$dest"
+    # A migration from external phases/source pins to pkg-meta.toml must
+    # not leave the old definitions active in the installed checkout.
+    for file in source.toml prepare build check install; do
+        rm -f "$dest/$file"
+    done
+    cp -r "$recipe"/. "$dest/"
+done
 echo "installed $(ls "$REPO/recipes" | wc -l) recipes into $ROOT/var/lib/pkg/recipes"

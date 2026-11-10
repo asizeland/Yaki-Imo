@@ -229,10 +229,9 @@ pub struct SchedConfig {
     pub build_root: PathBuf,
     /// Source cache passed to the fetch stage.
     pub source_cache: PathBuf,
-    /// Repository sync cache (the dir `pkg sync` wrote `index.json` and
-    /// `recipe-manifest.toml` into). The fetch stage's T7 guard reads
-    /// the recipe manifest from here via
-    /// `pkg_repo::load_cached_recipe_manifest`.
+    /// Repository sync cache containing `index.json` and
+    /// `recipe-manifest.toml`. Only repository-backed nodes require it;
+    /// local recipe nodes carry their own source entries.
     pub repo_cache: PathBuf,
     /// Running glibc for the post-build gate, when known.
     pub host_glibc: Option<Version>,
@@ -794,11 +793,21 @@ pub fn execute_plan(conn: &Connection, plan: &BuildPlan, cfg: &SchedConfig) -> P
             std::collections::BTreeSet::new()
         });
 
-    // The recipe manifest is the fetch stage's T7 guard: no source may
-    // be fetched except through a manifest entry, so without the cached
-    // manifest EVERY node's fetch would fail. Fail the whole plan up
-    // front instead (the error names `pkg sync` as the remedy).
-    let recipe_manifest = Arc::new(pkg_repo::load_cached_recipe_manifest(&cfg.repo_cache)?);
+    // Repository nodes share the synced source manifest. An all-local
+    // plan needs no repository cache: each local recipe carries its own
+    // explicitly authorized, hash-pinned source entry.
+    let requires_repository = plan
+        .nodes
+        .values()
+        .any(|node| node.recipe.local_manifest.is_none());
+    let recipe_manifest = if requires_repository {
+        pkg_repo::load_cached_recipe_manifest(&cfg.repo_cache)?
+    } else {
+        pkg_repo::RecipeManifest {
+            packages: Vec::new(),
+        }
+    };
+    let recipe_manifest = Arc::new(recipe_manifest);
 
     let mut pool = TokenPool::new(cfg.sched_tokens);
     let mut states: BTreeMap<String, NodeState> = plan
@@ -1632,12 +1641,15 @@ fn record_build_metadata_inner(
         )?;
     }
 
-    // Provenance (§9.2.1): from the signed recipe manifest where
-    // available; unknown fields are recorded as empty/0, never
-    // fabricated.
-    let entry = pkg_repo::load_cached_recipe_manifest(&cfg.repo_cache)
-        .ok()
-        .and_then(|m| m.find(&node.name, &node.version.to_string()).cloned());
+    // Provenance comes from the local entry for an explicit local build,
+    // or the repository manifest otherwise. Local attestations and index
+    // versions remain empty/0 rather than being fabricated.
+    let entry = match &node.recipe.local_manifest {
+        Some(entry) => Some(entry.clone()),
+        None => pkg_repo::load_cached_recipe_manifest(&cfg.repo_cache)
+            .ok()
+            .and_then(|m| m.find(&node.name, &node.version.to_string()).cloned()),
+    };
     let source_hashes = entry
         .as_ref()
         .map(|e| serde_json::to_string(&e.sources).unwrap_or_else(|_| "[]".to_string()))
@@ -1662,11 +1674,15 @@ fn record_build_metadata_inner(
             package_id: row.id,
             recipe_commit: node.recipe.recipe_commit.clone(),
             source_hashes,
-            index_version: pkg_repo::sync::cached_index_version(&cfg.repo_cache)
-                .ok()
-                .flatten()
-                .map(|v| v as i64)
-                .unwrap_or(0),
+            index_version: if node.recipe.local_manifest.is_some() {
+                0
+            } else {
+                pkg_repo::sync::cached_index_version(&cfg.repo_cache)
+                    .ok()
+                    .flatten()
+                    .map(|v| v as i64)
+                    .unwrap_or(0)
+            },
             attestations,
             build_host: format!("{hostname} (linux {osrelease})"),
             builder_version: format!(
@@ -1934,6 +1950,7 @@ mod tests {
             .unwrap(),
             dir: PathBuf::from("/r"),
             recipe_commit: "c".into(),
+            local_manifest: None,
         };
         for (n, ds) in [("a", vec![]), ("b", vec!["a"]), ("c", vec![])] {
             plan.nodes.insert(

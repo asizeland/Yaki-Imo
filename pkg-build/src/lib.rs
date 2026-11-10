@@ -21,6 +21,7 @@
 //!
 //! Public modules are re-exported flat (`pub use x::*`).
 
+pub mod build_system;
 pub mod cache;
 pub mod cascade;
 pub mod dkms;

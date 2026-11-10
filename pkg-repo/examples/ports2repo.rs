@@ -26,32 +26,18 @@
 //! ```
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use ed25519_dalek::{Signer, SigningKey};
 use pkg_core::manifest::PackageManifest;
 use pkg_repo::recipe_manifest::{
-    attestation_message, Attestation, RecipeManifest, RecipeManifestEntry, Source,
+    attestation_message, read_source_pins, recipe_commit, Attestation, RecipeManifest,
+    RecipeManifestEntry, Source, RECIPE_FILES,
 };
 use pkg_repo::trust::{
     canonical_bytes, hex_encode, key_fingerprint, sha256_hex, RoleDelegation, RootManifest,
     SignatureEntry, SignedDocument,
 };
-
-#[derive(serde::Deserialize, Default)]
-struct SourceToml {
-    #[serde(default)]
-    source: Vec<SourcePin>,
-}
-
-#[derive(serde::Deserialize)]
-struct SourcePin {
-    url: String,
-    sha256: String,
-    /// Staged filename (default: URL basename). Lets a recipe rename
-    /// ambiguous upstream names like GitHub's `v1.2.3.tar.gz`.
-    filename: Option<String>,
-}
 
 fn test_key(seed: u8) -> SigningKey {
     SigningKey::from_bytes(&[seed; 32])
@@ -86,31 +72,6 @@ fn sign_doc(payload: serde_json::Value, signers: &[&SigningKey]) -> Vec<u8> {
         signatures,
     })
     .unwrap()
-}
-
-/// The recipe files that make up a package's identity, in fixed order.
-const RECIPE_FILES: [&str; 6] = [
-    "pkg-meta.toml",
-    "source.toml",
-    "prepare",
-    "build",
-    "check",
-    "install",
-];
-
-/// Content-derived recipe commit: first 12 hex of the SHA-256 over the
-/// sorted (name, bytes) pairs of the recipe files present.
-fn recipe_commit(dir: &Path) -> String {
-    let mut hasher = sha2::Sha256::default();
-    use sha2::Digest;
-    for f in RECIPE_FILES {
-        let path = dir.join(f);
-        if let Ok(bytes) = std::fs::read(&path) {
-            hasher.update(f.as_bytes());
-            hasher.update(&bytes);
-        }
-    }
-    hex_encode(&hasher.finalize())[..12].to_string()
 }
 
 fn main() {
@@ -182,16 +143,13 @@ fn main() {
         let meta_text = std::fs::read_to_string(dir.join("pkg-meta.toml")).unwrap();
         let meta = PackageManifest::from_toml_str(&meta_text)
             .unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
-        let srcs: SourceToml = match std::fs::read_to_string(dir.join("source.toml")) {
-            Ok(text) => toml::from_str(&text)
-                .unwrap_or_else(|e| panic!("{}: source.toml: {e}", dir.display())),
-            Err(_) => SourceToml::default(),
-        };
+        let source_pins =
+            read_source_pins(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
         let commit = recipe_commit(dir);
 
         // Verify + stage the pinned distfiles.
         let mut sources = Vec::new();
-        for pin in &srcs.source {
+        for pin in &source_pins {
             let file_name = pin
                 .filename
                 .clone()
@@ -215,6 +173,7 @@ fn main() {
             sources.push(Source {
                 url: format!("{base_url}/sources/{file_name}"),
                 sha256: pin.sha256.clone(),
+                filename: None,
             });
         }
 

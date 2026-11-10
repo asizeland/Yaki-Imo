@@ -35,10 +35,12 @@
 //! by URL). Anything attesting outside this crate must reproduce that
 //! byte string exactly.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
+use pkg_core::manifest::{PackageManifest, SourcePin};
 use pkg_core::{PkgError, PkgResult};
 
 use crate::trust::{hex_decode, TrustStore};
@@ -124,6 +126,131 @@ pub struct RecipeManifestEntry {
 pub struct Source {
     pub url: String,
     pub sha256: String,
+    /// Optional basename used in the source cache and build scratch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct SourceToml {
+    #[serde(default)]
+    pub source: Vec<SourcePin>,
+}
+
+/// Recipe files covered by the content-derived recipe identity.
+pub const RECIPE_FILES: [&str; 6] = [
+    "pkg-meta.toml",
+    "source.toml",
+    "prepare",
+    "build",
+    "check",
+    "install",
+];
+
+/// First 12 hexadecimal digits of SHA-256 over the sorted recipe files.
+pub fn recipe_commit(dir: &Path) -> String {
+    let mut hasher = Sha256::new();
+    for name in RECIPE_FILES {
+        if let Ok(bytes) = std::fs::read(dir.join(name)) {
+            hasher.update(name.as_bytes());
+            hasher.update(&bytes);
+        }
+    }
+    crate::trust::hex_encode(&hasher.finalize())[..12].to_string()
+}
+
+pub fn read_source_pins(dir: &Path) -> PkgResult<Vec<SourcePin>> {
+    let meta_path = dir.join("pkg-meta.toml");
+    let meta_text = std::fs::read_to_string(&meta_path).map_err(PkgError::Io)?;
+    let manifest = PackageManifest::from_toml_str(&meta_text)?;
+    select_source_pins(&manifest, dir)
+}
+
+fn select_source_pins(manifest: &PackageManifest, dir: &Path) -> PkgResult<Vec<SourcePin>> {
+    let path = dir.join("source.toml");
+    let external = match std::fs::read_to_string(&path) {
+        Ok(text) => toml::from_str::<SourceToml>(&text)
+            .map(|parsed| parsed.source)
+            .map_err(|e| PkgError::Parse(format!("{}: {e}", path.display()))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(PkgError::Io(e)),
+    }?;
+    if !manifest.sources.is_empty() && !external.is_empty() {
+        return Err(PkgError::Parse(format!(
+            "{} declares sources in both pkg-meta.toml and source.toml; use only one",
+            dir.display()
+        )));
+    }
+    Ok(if manifest.sources.is_empty() {
+        external
+    } else {
+        manifest.sources.clone()
+    })
+}
+
+/// Builds the source authorization for an explicitly named local recipe.
+/// Relative paths are resolved from the recipe directory. No repository
+/// attestations are invented for this user-supplied entry.
+pub fn local_manifest_entry(
+    manifest: &PackageManifest,
+    dir: &Path,
+) -> PkgResult<RecipeManifestEntry> {
+    let mut sources = Vec::new();
+    for pin in select_source_pins(manifest, dir)? {
+        let url = if pin.url.starts_with("https://") || pin.url.starts_with("http://") {
+            pin.url.clone()
+        } else {
+            if pin.url.contains("://") && !pin.url.starts_with("file://") {
+                return Err(PkgError::Parse(format!(
+                    "{}: unsupported local source scheme in {}",
+                    dir.join("source.toml").display(),
+                    pin.url
+                )));
+            }
+            let raw = pin.url.strip_prefix("file://").unwrap_or(&pin.url);
+            let path = PathBuf::from(raw);
+            let path = if path.is_absolute() {
+                path
+            } else {
+                dir.join(path)
+            };
+            let path = std::fs::canonicalize(&path).map_err(|e| {
+                PkgError::Parse(format!(
+                    "local source {} for {}: {e}",
+                    path.display(),
+                    manifest.name
+                ))
+            })?;
+            if !path.is_file() {
+                return Err(PkgError::Parse(format!(
+                    "local source {} for {} is not a regular file",
+                    path.display(),
+                    manifest.name
+                )));
+            }
+            let text = path.to_str().ok_or_else(|| {
+                PkgError::Parse(format!(
+                    "local source path for {} is not valid UTF-8",
+                    manifest.name
+                ))
+            })?;
+            format!("file://{text}")
+        };
+        sources.push(Source {
+            url,
+            sha256: pin.sha256,
+            filename: pin.filename,
+        });
+    }
+    Ok(RecipeManifestEntry {
+        name: manifest.name.clone(),
+        version: manifest.version.to_string(),
+        recipe_commit: recipe_commit(dir),
+        committer_fingerprint: None,
+        sources,
+        attestations: Vec::new(),
+        critical: manifest.critical,
+    })
 }
 
 /// One reviewer's sign-off: an Ed25519 signature by a reviewer-role key
@@ -379,6 +506,7 @@ mod tests {
                     "https://github.com/tukaani-project/xz/releases/download/v5.6.1/xz-5.6.1.tar.xz"
                         .into(),
                 sha256: "deadbeef".into(),
+                filename: None,
             }],
             attestations: vec![],
             critical,
@@ -502,9 +630,75 @@ sig = "11"
         a.sources.push(Source {
             url: "https://b.example/b.tar".into(),
             sha256: "22".into(),
+            filename: None,
         });
         let mut b = a.clone();
         b.sources.reverse();
         assert_eq!(attestation_message(&a), attestation_message(&b));
+    }
+
+    #[test]
+    fn local_entry_resolves_paths_and_keeps_remote_sources() {
+        let dir = std::env::temp_dir().join(format!("pkg-local-entry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("payload.txt"), b"hello").unwrap();
+        std::fs::write(
+            dir.join("source.toml"),
+            r#"[[source]]
+url = "./payload.txt"
+sha256 = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+filename = "renamed.txt"
+
+[[source]]
+url = "https://example.com/remote.tar.gz"
+sha256 = "aa"
+"#,
+        )
+        .unwrap();
+        let manifest = PackageManifest::from_toml_str(
+            "name = \"local-app\"\nversion = \"1.0\"\ncategory = \"app-misc\"\n",
+        )
+        .unwrap();
+        let entry = local_manifest_entry(&manifest, &dir).unwrap();
+        assert_eq!(entry.name, "local-app");
+        assert_eq!(entry.recipe_commit.len(), 12);
+        assert!(entry.attestations.is_empty());
+        assert_eq!(entry.sources[0].filename.as_deref(), Some("renamed.txt"));
+        assert_eq!(
+            entry.sources[0].url,
+            format!("file://{}", dir.join("payload.txt").display())
+        );
+        assert_eq!(entry.sources[1].url, "https://example.com/remote.tar.gz");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn embedded_sources_work_and_conflict_with_legacy_source_file() {
+        let dir = std::env::temp_dir().join(format!("pkg-embedded-source-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("pkg-meta.toml"),
+            r#"name = "local-app"
+version = "1"
+category = "app-misc"
+[[source]]
+url = "https://example.com/app.tar.gz"
+sha256 = "abc"
+"#,
+        )
+        .unwrap();
+        assert_eq!(read_source_pins(&dir).unwrap().len(), 1);
+        std::fs::write(
+            dir.join("source.toml"),
+            "[[source]]\nurl = \"https://example.com/other.tar.gz\"\nsha256 = \"def\"\n",
+        )
+        .unwrap();
+        let err = read_source_pins(&dir).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("both pkg-meta.toml and source.toml"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

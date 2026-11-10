@@ -326,41 +326,54 @@ pub fn load_alternative_prefs(conn: &Connection) -> PkgResult<BTreeMap<String, S
 pub fn graph_from_recipes(
     recipes_dir: &Path,
     preferred_providers: &BTreeMap<String, String>,
+    local_recipes: &BTreeMap<String, Recipe>,
 ) -> PkgResult<ResolvedGraph> {
     let mut graph = PackageGraph::new();
-    if !recipes_dir.is_dir() {
+    if recipes_dir.is_dir() {
+        for entry in fs::read_dir(recipes_dir).map_err(PkgError::Io)? {
+            let entry = entry.map_err(PkgError::Io)?;
+            let meta = entry.path().join("pkg-meta.toml");
+            if !meta.is_file() {
+                continue;
+            }
+            let text = fs::read_to_string(&meta).map_err(PkgError::Io)?;
+            let manifest = PackageManifest::from_toml_str(&text)?;
+            if local_recipes.contains_key(&manifest.name) {
+                continue;
+            }
+            add_manifest_to_graph(&mut graph, &manifest)?;
+        }
+    } else if local_recipes.is_empty() {
         return Err(PkgError::NotFound(format!(
             "recipe repository {} not found — run `pkg sync` first",
             recipes_dir.display()
         )));
     }
-    for entry in fs::read_dir(recipes_dir).map_err(PkgError::Io)? {
-        let entry = entry.map_err(PkgError::Io)?;
-        let meta = entry.path().join("pkg-meta.toml");
-        if !meta.is_file() {
-            continue;
-        }
-        let text = fs::read_to_string(&meta).map_err(PkgError::Io)?;
-        let manifest = PackageManifest::from_toml_str(&text)?;
-        // Base deps at defaults, build deps included — see
-        // `catalog_from_recipes` for why build deps resolve too.
-        let deps = manifest
-            .dep_set(&BTreeMap::new())
-            .and_then(|mut d| {
-                manifest.build_dep_set(&BTreeMap::new()).map(|b| {
-                    d.extend(b);
-                    d
-                })
-            })
-            .map_err(PkgError::from)?;
-        graph.add_package(
-            manifest.name.clone(),
-            manifest.version.clone(),
-            &manifest.provides,
-            deps,
-        );
+    for recipe in local_recipes.values() {
+        add_manifest_to_graph(&mut graph, &recipe.manifest)?;
     }
     graph.finalize(preferred_providers)
+}
+
+fn add_manifest_to_graph(graph: &mut PackageGraph, manifest: &PackageManifest) -> PkgResult<()> {
+    // Build dependencies resolve too: their tools and headers must be
+    // available in the build sandbox.
+    let deps = manifest
+        .dep_set(&BTreeMap::new())
+        .and_then(|mut d| {
+            manifest.build_dep_set(&BTreeMap::new()).map(|b| {
+                d.extend(b);
+                d
+            })
+        })
+        .map_err(PkgError::from)?;
+    graph.add_package(
+        manifest.name.clone(),
+        manifest.version.clone(),
+        &manifest.provides,
+        deps,
+    );
+    Ok(())
 }
 
 /// Loads a package's recipe from the recipe repo.
@@ -375,6 +388,145 @@ pub fn load_recipe(name: &str) -> PkgResult<Recipe> {
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
     Recipe::load(&dir, commit)
+}
+
+fn load_recipe_with_locals(
+    name: &str,
+    local_recipes: &BTreeMap<String, Recipe>,
+) -> PkgResult<Recipe> {
+    match local_recipes.get(name) {
+        Some(recipe) => Ok(recipe.clone()),
+        None => load_recipe(name),
+    }
+}
+
+fn looks_like_recipe_path(value: &str) -> bool {
+    let path = Path::new(value);
+    path.is_absolute()
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value == "."
+        || value == ".."
+        || value.contains('/')
+        || path.file_name().and_then(|name| name.to_str()) == Some("pkg-meta.toml")
+        || path.join("pkg-meta.toml").is_file()
+}
+
+fn local_recipe_dir(path: &Path) -> &Path {
+    if path.file_name().and_then(|name| name.to_str()) == Some("pkg-meta.toml") {
+        path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+    } else {
+        path
+    }
+}
+
+fn register_local_recipe(
+    local_recipes: &mut BTreeMap<String, Recipe>,
+    dir: &Path,
+) -> PkgResult<String> {
+    let recipe = Recipe::load_local(local_recipe_dir(dir))?;
+    let name = recipe.manifest.name.clone();
+    if let Some(existing) = local_recipes.get(&name) {
+        if existing.dir != recipe.dir {
+            return Err(PkgError::Parse(format!(
+                "two local recipe directories supplied for package {name}: {} and {}",
+                existing.dir.display(),
+                recipe.dir.display()
+            )));
+        }
+        return Ok(name);
+    }
+    eprintln!(
+        "warning: using local recipe {} for {} {}; SHA-256 checks remain active, \
+         but this recipe has no repository attestations",
+        recipe.dir.display(),
+        name,
+        recipe.manifest.version
+    );
+    local_recipes.insert(name.clone(), recipe);
+    Ok(name)
+}
+
+fn discover_local_recipe_dirs(tree: &Path) -> PkgResult<Vec<PathBuf>> {
+    let tree = fs::canonicalize(tree).map_err(|e| {
+        PkgError::Parse(format!("reading local recipe tree {}: {e}", tree.display()))
+    })?;
+    if !tree.is_dir() {
+        return Err(PkgError::Parse(format!(
+            "local recipe tree {} is not a directory",
+            tree.display()
+        )));
+    }
+    let root = if tree.join("recipes").is_dir() {
+        tree.join("recipes")
+    } else {
+        tree
+    };
+    let mut dirs = Vec::new();
+    for entry in fs::read_dir(&root).map_err(PkgError::Io)? {
+        let first = entry.map_err(PkgError::Io)?.path();
+        if !first.is_dir() {
+            continue;
+        }
+        if first.join("pkg-meta.toml").is_file() {
+            dirs.push(first);
+            continue;
+        }
+        for entry in fs::read_dir(first).map_err(PkgError::Io)? {
+            let second = entry.map_err(PkgError::Io)?.path();
+            if second.is_dir() && second.join("pkg-meta.toml").is_file() {
+                dirs.push(second);
+            }
+        }
+    }
+    dirs.sort();
+    dirs.dedup();
+    if dirs.is_empty() {
+        return Err(PkgError::NotFound(format!(
+            "no pkg-meta.toml recipes found in local recipe tree {}",
+            root.display()
+        )));
+    }
+    Ok(dirs)
+}
+
+fn load_local_recipe_tree(tree: &Path) -> PkgResult<BTreeMap<String, Recipe>> {
+    let dirs = discover_local_recipe_dirs(tree)?;
+    let mut recipes: BTreeMap<String, Recipe> = BTreeMap::new();
+    for dir in dirs {
+        let recipe = Recipe::load_local(&dir)?;
+        let name = recipe.manifest.name.clone();
+        if let Some(existing) = recipes.get(&name) {
+            return Err(PkgError::Parse(format!(
+                "local recipe tree contains two recipes for package {name}: {} and {}",
+                existing.dir.display(),
+                recipe.dir.display()
+            )));
+        }
+        recipes.insert(name, recipe);
+    }
+    eprintln!(
+        "warning: using local recipe tree {} ({} recipes); SHA-256 checks remain active, \
+         but these recipes have no repository attestations",
+        tree.display(),
+        recipes.len()
+    );
+    Ok(recipes)
+}
+
+fn load_recipe_target(target: &str) -> PkgResult<(String, Recipe)> {
+    if looks_like_recipe_path(target) {
+        let mut local_recipes = BTreeMap::new();
+        let name = register_local_recipe(&mut local_recipes, Path::new(target))?;
+        let recipe = local_recipes
+            .remove(&name)
+            .expect("registered local recipe");
+        Ok((name, recipe))
+    } else {
+        Ok((target.to_string(), load_recipe(target)?))
+    }
 }
 
 fn installed_versions(conn: &Connection) -> PkgResult<HashMap<String, Version>> {
@@ -598,14 +750,20 @@ fn cmd_upgrade(specs: Vec<String>, all: bool, flags: TransactionFlags) -> PkgRes
 /// Shared install/upgrade flow: resolve → cascade → preview or build.
 fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> PkgResult<()> {
     let selection = parse_opts(&flags.opts)?;
-    // Split `name[opt:key=val]` brackets off the specs (§4.3 CLI
-    // pseudo-dependency surface); the plain specs drive resolution,
-    // the bracketed requests join the per-command option tier.
+    // Split option brackets off each request. A path supplied recipe is
+    // registered under its manifest name, which then drives resolution
+    // and package-scoped option handling exactly like a named recipe.
     let mut clean_specs = Vec::with_capacity(specs.len());
     let mut spec_reqs = Vec::new();
+    let mut local_recipes = BTreeMap::new();
     for spec in &specs {
         let (plain, reqs) = options::split_opt_bracket(spec)?;
-        let pname = parse_spec(&plain).0;
+        let is_local = looks_like_recipe_path(&plain);
+        let pname = if is_local {
+            register_local_recipe(&mut local_recipes, Path::new(&plain))?
+        } else {
+            parse_spec(&plain).0
+        };
         for (key, value) in reqs {
             spec_reqs.push(options::OptionRequest {
                 package: Some(pname.clone()),
@@ -614,7 +772,18 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
                 requester: spec.clone(),
             });
         }
-        clean_specs.push(plain);
+        clean_specs.push(if is_local { pname } else { plain });
+    }
+    if let Some(tree) = &flags.recipe_tree {
+        for (name, recipe) in load_local_recipe_tree(tree)? {
+            local_recipes.entry(name).or_insert(recipe);
+        }
+    }
+    if flags.background && (flags.recipe_tree.is_some() || !local_recipes.is_empty()) {
+        return Err(PkgError::Parse(
+            "--background cannot preserve local recipe paths or trees; run the local build in the foreground"
+                .into(),
+        ));
     }
     let specs = clean_specs;
     let _lock = lock_exclusive()?;
@@ -625,7 +794,7 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
     let pins = load_pins()?;
     let recipes_dir = at(RECIPES_DIR);
     let preferred_providers = load_alternative_prefs(&conn)?;
-    let graph = graph_from_recipes(&recipes_dir, &preferred_providers)?;
+    let graph = graph_from_recipes(&recipes_dir, &preferred_providers, &local_recipes)?;
     let installed = installed_versions(&conn)?;
 
     // `upgrade` with no names targets every explicitly installed pkg.
@@ -643,7 +812,7 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
     let mut selected: HashMap<String, Version> = HashMap::new();
     for spec in &specs {
         let (name, pinned_version) = parse_spec(spec);
-        let recipe = load_recipe(&name)?;
+        let recipe = load_recipe_with_locals(&name, &local_recipes)?;
         let root_version = match &pinned_version {
             Some(v) => v
                 .parse()
@@ -670,7 +839,11 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
     // live: undeclared keys, option-less packages, and per-command
     // widen-else-conflict are hard errors naming the offender.
     let option_config = options::option_config_from(&at(options::OPTIONS_PATH))?;
-    let manifest_lookup = |n: &str| load_recipe(n).ok().map(|r| r.manifest);
+    let manifest_lookup = |n: &str| {
+        load_recipe_with_locals(n, &local_recipes)
+            .ok()
+            .map(|r| r.manifest)
+    };
     // Widen fixpoint (§4.3 "enabling is always safe"): an enabled
     // option's add_deps pull new packages into the selected set, and
     // those packages' own selections can add further deps. Options are
@@ -708,7 +881,7 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
             break selections;
         }
         for (dn, constraint) in added {
-            let recipe = load_recipe(&dn)?;
+            let recipe = load_recipe_with_locals(&dn, &local_recipes)?;
             let version = recipe.manifest.version.clone();
             if !constraint.matches(&version) {
                 return Err(PkgError::Resolution(format!(
@@ -733,7 +906,7 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
     // staged-pending target is rejected here, not after a multi-hour
     // build produced binaries the running libc can't execute.
     for (name, version) in &selected {
-        let recipe = load_recipe(name)?;
+        let recipe = load_recipe_with_locals(name, &local_recipes)?;
         if let Some(floor) =
             glibc_floor_of(&recipe.manifest, options::selection_of(&selections, name))?
         {
@@ -757,7 +930,7 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
         let is_direct = requested.contains(name);
         match installed.get(name) {
             Some(v) if v == version => {
-                let recipe = load_recipe(name)?;
+                let recipe = load_recipe_with_locals(name, &local_recipes)?;
                 let opt_tag = recipe
                     .manifest
                     .opt_tag(options::selection_of(&selections, name))
@@ -822,7 +995,7 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
 
     // -- dry-run preview (Issue 4.4.1), then stop --------------------
     if flags.dry_run {
-        let plan = build_plan(&conn, &cascade_plan, &direct, &selections)?;
+        let plan = build_plan(&conn, &cascade_plan, &direct, &selections, &local_recipes)?;
         let cores = effective_jobs(flags.jobs)?;
         let mut etas = BTreeMap::new();
         for name in plan.nodes.keys() {
@@ -879,11 +1052,11 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
         // recorded as state for `pkg clean` / `pkg cascade`.
         record_pending_deferral(&cascade_names)?;
         retain_requested(
-            build_plan(&conn, &cascade_plan, &direct, &selections)?,
+            build_plan(&conn, &cascade_plan, &direct, &selections, &local_recipes)?,
             &requested,
         )
     } else {
-        build_plan(&conn, &cascade_plan, &direct, &selections)?
+        build_plan(&conn, &cascade_plan, &direct, &selections, &local_recipes)?
     };
 
     if effective_plan.nodes.is_empty() {
@@ -1209,6 +1382,7 @@ fn build_plan(
     cascade_plan: &cascade::CascadePlan,
     direct: &[(String, Version)],
     selections: &HashMap<String, BTreeMap<String, bool>>,
+    local_recipes: &BTreeMap<String, Recipe>,
 ) -> PkgResult<BuildPlan> {
     let mut plan = BuildPlan::default();
     let mut all: BTreeMap<String, (Version, BTreeSet<String>)> = BTreeMap::new();
@@ -1229,7 +1403,7 @@ fn build_plan(
     let installed = queries::list_installed_packages(conn)?;
     let plan_names: BTreeSet<String> = all.keys().cloned().collect();
     for (name, (version, deps)) in all {
-        let recipe = load_recipe(&name)?;
+        let recipe = load_recipe_with_locals(&name, local_recipes)?;
         let selection = options::selection_of(selections, &name);
         let abi_tag = compute_abi_tag(conn, &recipe.manifest, selection)?;
         let filtered = recipe.manifest.filter_selection(selection);
@@ -2360,7 +2534,7 @@ fn cmd_rebuild(affected: bool, assume_yes: bool) -> PkgResult<()> {
     // Re-resolve each affected package AT its installed version (a
     // rebuild, not an upgrade): the solver then pulls the preferred
     // provider into the solution.
-    let graph = graph_from_recipes(&at(RECIPES_DIR), &prefs)?;
+    let graph = graph_from_recipes(&at(RECIPES_DIR), &prefs, &BTreeMap::new())?;
     let pins = load_pins()?;
     let profile_constraints = active_profile_constraints(&pins);
     let mut selected: HashMap<String, Version> = HashMap::new();
@@ -3445,46 +3619,54 @@ fn cmd_isolate(path: &str, args: Vec<String>) -> PkgResult<()> {
     Ok(())
 }
 
-fn cmd_fetch(name: &str) -> PkgResult<()> {
-    let recipe = load_recipe(name)?;
-    // pkg-repo contract: fetch_sources(entry, cache_dir) — fetch is the
-    // only network stage (Issue 3.4) and verifies SHA-256 + declared
-    // origins (v14 T7). The entry comes from the synced recipe manifest,
-    // not the recipe checkout.
-    let manifest = pkg_repo::load_cached_recipe_manifest(&at(INDEX_CACHE))?;
-    let entry = manifest
-        .find(&recipe.manifest.name, &recipe.manifest.version.to_string())
-        .ok_or_else(|| {
-            PkgError::NotFound(format!(
-                "{} {} is not in the cached recipe manifest; run `pkg sync`",
-                recipe.manifest.name, recipe.manifest.version
-            ))
-        })?;
-    let fetched = pkg_repo::fetch_sources(entry, &at(SOURCE_CACHE))?;
+fn cmd_fetch(target: &str) -> PkgResult<()> {
+    let (name, recipe) = load_recipe_target(target)?;
+    let fetched = if let Some(entry) = &recipe.local_manifest {
+        pkg_repo::fetch_local_sources(entry, &at(SOURCE_CACHE))?
+    } else {
+        // Repository recipes authorize sources through the synced,
+        // signed manifest rather than the editable checkout.
+        let manifest = pkg_repo::load_cached_recipe_manifest(&at(INDEX_CACHE))?;
+        let entry = manifest
+            .find(&name, &recipe.manifest.version.to_string())
+            .ok_or_else(|| {
+                PkgError::NotFound(format!(
+                    "{} {} is not in the cached recipe manifest; run `pkg sync`",
+                    name, recipe.manifest.version
+                ))
+            })?;
+        pkg_repo::fetch_sources(entry, &at(SOURCE_CACHE))?
+    };
     for f in &fetched {
         println!("fetched {}", f.display());
     }
     Ok(())
 }
 
-fn cmd_build(name: &str, opts: Vec<String>, jobs: Option<u32>, no_cache: bool) -> PkgResult<()> {
+fn cmd_build(target: &str, opts: Vec<String>, jobs: Option<u32>, no_cache: bool) -> PkgResult<()> {
     let cli_opts = parse_opts(&opts)?;
     let _lock = lock_exclusive()?;
     let conn = open_db()?;
-    let recipe = load_recipe(name)?;
+    let (name, recipe) = load_recipe_target(target)?;
     // Single package, so the effective selection is just config under
     // --opt; an --opt key the recipe doesn't declare is a hard error
     // here (effective_selections' typo protection).
     let option_config = options::option_config_from(&at(options::OPTIONS_PATH))?;
-    let manifest_lookup = |n: &str| load_recipe(n).ok().map(|r| r.manifest);
+    let manifest_lookup = |n: &str| {
+        if n == name {
+            Some(recipe.manifest.clone())
+        } else {
+            load_recipe(n).ok().map(|r| r.manifest)
+        }
+    };
     let selections = options::effective_selections(
-        &[name.to_string()],
+        &[name.clone()],
         &manifest_lookup,
         &option_config,
         &cli_opts,
         &[],
     )?;
-    let selection = options::selection_of(&selections, name).clone();
+    let selection = options::selection_of(&selections, &name).clone();
     let abi_tag = compute_abi_tag(&conn, &recipe.manifest, &selection)?;
     let opt_tag = recipe
         .manifest
@@ -3493,9 +3675,9 @@ fn cmd_build(name: &str, opts: Vec<String>, jobs: Option<u32>, no_cache: bool) -
 
     let mut plan = BuildPlan::default();
     plan.nodes.insert(
-        name.to_string(),
+        name.clone(),
         PlanNode {
-            name: name.to_string(),
+            name: name.clone(),
             version: recipe.manifest.version.clone(),
             abi_tag,
             arch: Arch::Amd64,
@@ -3504,15 +3686,13 @@ fn cmd_build(name: &str, opts: Vec<String>, jobs: Option<u32>, no_cache: bool) -
             recipe,
             deps_in_cascade: BTreeSet::new(),
             consumed_hash_at_plan: None,
-            // `pkg build <name>` IS the user's direct request — drives
-            // installed_explicitly on first install (§16.6).
             requested: true,
         },
     );
     let mut cfg = SchedConfig::with_defaults();
     apply_parallelism(&mut cfg, jobs)?;
     apply_opt_level(&mut cfg)?;
-    cfg.command_line = format!("pkg build {name}");
+    cfg.command_line = format!("pkg build {target}");
     cfg.cascade_id = None; // standalone build (Issue 4.2.5)
     cfg.store_roots = store_roots();
     cfg.host_glibc = running_glibc_version();
@@ -3854,6 +4034,7 @@ fn cmd_cascade(at: Option<String>, execute_pending: bool, ignore_power: bool) ->
         fs::remove_file(pending).map_err(PkgError::Io)?;
         let flags = TransactionFlags {
             opts: Vec::new(),
+            recipe_tree: None,
             dry_run: false,
             skip_rebuilds: false,
             defer_security: None,
@@ -3875,4 +4056,143 @@ fn cmd_cascade(at: Option<String>, execute_pending: bool, ignore_power: bool) ->
 fn load5() -> Option<f64> {
     let text = fs::read_to_string("/proc/loadavg").ok()?;
     text.split_whitespace().nth(1)?.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recipe_paths_are_distinct_from_package_names() {
+        assert!(looks_like_recipe_path("./hello"));
+        assert!(looks_like_recipe_path("../hello"));
+        assert!(looks_like_recipe_path("/tmp/hello"));
+        assert!(looks_like_recipe_path("recipes/hello"));
+        assert!(!looks_like_recipe_path("hello"));
+        assert!(!looks_like_recipe_path("hello@2.1"));
+    }
+
+    #[test]
+    fn manifest_file_targets_normalize_to_recipe_directories() {
+        assert!(looks_like_recipe_path("pkg-meta.toml"));
+        assert_eq!(local_recipe_dir(Path::new("pkg-meta.toml")), Path::new("."));
+        assert_eq!(
+            local_recipe_dir(Path::new("./pkg-meta.toml")),
+            Path::new(".")
+        );
+        assert_eq!(
+            local_recipe_dir(Path::new("/tmp/hello/pkg-meta.toml")),
+            Path::new("/tmp/hello")
+        );
+        assert_eq!(local_recipe_dir(Path::new("./hello")), Path::new("./hello"));
+    }
+
+    #[test]
+    fn local_tree_discovery_supports_ports_flat_and_generated_layouts() {
+        let base = std::env::temp_dir().join(format!("pkg-local-layouts-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        for (root, relative, name) in [
+            (
+                base.join("ports"),
+                PathBuf::from("app-misc/hello"),
+                "ports-hello",
+            ),
+            (base.join("flat"), PathBuf::from("hello"), "flat-hello"),
+            (
+                base.join("generated"),
+                PathBuf::from("recipes/hello"),
+                "generated-hello",
+            ),
+        ] {
+            let dir = root.join(relative);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("pkg-meta.toml"),
+                format!("name = \"{name}\"\nversion = \"1\"\ncategory = \"app-misc\"\n"),
+            )
+            .unwrap();
+            assert_eq!(
+                discover_local_recipe_dirs(&root).unwrap(),
+                vec![fs::canonicalize(&dir).unwrap()]
+            );
+            assert!(load_local_recipe_tree(&root).unwrap().contains_key(name));
+        }
+        fs::create_dir_all(base.join("empty")).unwrap();
+        assert!(discover_local_recipe_dirs(&base.join("empty")).is_err());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn local_tree_rejects_duplicate_package_names() {
+        let base =
+            std::env::temp_dir().join(format!("pkg-local-tree-duplicate-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        for dir in [base.join("cat-a/hello"), base.join("cat-b/hello")] {
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(
+                dir.join("pkg-meta.toml"),
+                "name = \"hello\"\nversion = \"1\"\ncategory = \"app-misc\"\n",
+            )
+            .unwrap();
+        }
+        let err = load_local_recipe_tree(&base).unwrap_err();
+        assert!(err.to_string().contains("two recipes for package hello"));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn conflicting_local_recipes_for_one_name_are_rejected() {
+        let base = std::env::temp_dir().join(format!("pkg-local-cli-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let a = base.join("a");
+        let b = base.join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        let manifest = "name = \"hello\"\nversion = \"1\"\ncategory = \"app-misc\"\n";
+        fs::write(a.join("pkg-meta.toml"), manifest).unwrap();
+        fs::write(b.join("pkg-meta.toml"), manifest).unwrap();
+        let mut recipes = BTreeMap::new();
+        register_local_recipe(&mut recipes, &a).unwrap();
+        register_local_recipe(&mut recipes, &a).unwrap();
+        let err = register_local_recipe(&mut recipes, &b).unwrap_err();
+        assert!(err.to_string().contains("two local recipe directories"));
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn local_recipes_overlay_the_checkout_and_need_no_checkout() {
+        let base = std::env::temp_dir().join(format!("pkg-local-graph-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let checkout = base.join("checkout");
+        let installed = checkout.join("hello");
+        let local_dir = base.join("local");
+        fs::create_dir_all(&installed).unwrap();
+        fs::create_dir_all(&local_dir).unwrap();
+        fs::write(
+            installed.join("pkg-meta.toml"),
+            "name = \"hello\"\nversion = \"1\"\ncategory = \"app-misc\"\n",
+        )
+        .unwrap();
+        fs::write(
+            local_dir.join("pkg-meta.toml"),
+            "name = \"hello\"\nversion = \"2\"\ncategory = \"app-misc\"\n",
+        )
+        .unwrap();
+        let local = Recipe::load_local(&local_dir).unwrap();
+        let locals = BTreeMap::from([(local.manifest.name.clone(), local)]);
+        for tree in [checkout, base.join("missing")] {
+            let graph = graph_from_recipes(&tree, &BTreeMap::new(), &locals).unwrap();
+            let selected = graph
+                .resolve_with_constraints(
+                    "hello",
+                    "2".parse().unwrap(),
+                    &PinSet::new(),
+                    &EffectiveConstraints::new(),
+                    &HashMap::new(),
+                )
+                .unwrap();
+            assert_eq!(selected.get("hello"), Some(&"2".parse().unwrap()));
+        }
+        fs::remove_dir_all(base).unwrap();
+    }
 }

@@ -31,7 +31,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use pkg_core::manifest::PackageManifest;
+use pkg_core::manifest::{BuildSystem, PackageManifest};
 use pkg_core::{AbiTag, PkgError, PkgResult, Version};
 use pkg_db::queries::{self, BuildRecord};
 use pkg_sandbox::{run_sandboxed_with_binds, SandboxProfile};
@@ -81,6 +81,9 @@ pub struct Recipe {
     pub manifest: PackageManifest,
     pub dir: PathBuf,
     pub recipe_commit: String,
+    /// Source authorization derived from an explicitly named local recipe.
+    /// Repository recipes leave this empty and use the synced manifest.
+    pub local_manifest: Option<pkg_repo::RecipeManifestEntry>,
 }
 
 impl Recipe {
@@ -89,11 +92,34 @@ impl Recipe {
         let text = fs::read_to_string(&meta)
             .map_err(|e| PkgError::Parse(format!("reading {}: {e}", meta.display())))?;
         let manifest = PackageManifest::from_toml_str(&text)?;
-        Ok(Recipe {
+        let recipe = Recipe {
             manifest,
             dir: dir.to_path_buf(),
             recipe_commit: recipe_commit.into(),
-        })
+            local_manifest: None,
+        };
+        for phase in PHASES {
+            if recipe.phase_script(phase).is_some()
+                && recipe.manifest.scripts.get(phase.script_name()).is_some()
+            {
+                return Err(PkgError::Parse(format!(
+                    "recipe {} defines the `{}` phase both in pkg-meta.toml and as an external file",
+                    dir.display(),
+                    phase.script_name()
+                )));
+            }
+        }
+        Ok(recipe)
+    }
+
+    pub fn load_local(dir: &Path) -> PkgResult<Self> {
+        let dir = fs::canonicalize(dir)
+            .map_err(|e| PkgError::Parse(format!("reading local recipe {}: {e}", dir.display())))?;
+        let mut recipe = Recipe::load(&dir, "")?;
+        let entry = pkg_repo::local_manifest_entry(&recipe.manifest, &dir)?;
+        recipe.recipe_commit = entry.recipe_commit.clone();
+        recipe.local_manifest = Some(entry);
+        Ok(recipe)
     }
 
     /// The script for `phase`, if the recipe provides one. A missing
@@ -131,10 +157,9 @@ pub struct BuildContext {
     /// Running glibc version, when known — enables the post-build
     /// scanner gate (v12 §9 verification framing).
     pub host_glibc: Option<Version>,
-    /// The recipe manifest cached by `pkg sync` — the fetch stage's T7
-    /// guard (`fetch_sources` takes the manifest *entry*). `Arc`
-    /// because the orchestrator shares one loaded manifest across every
-    /// worker thread and build attempt.
+    /// The repository recipe manifest cached by `pkg sync`. Local recipe
+    /// nodes instead use `Recipe::local_manifest`. `Arc` lets the
+    /// orchestrator share the repository manifest across workers.
     pub recipe_manifest: std::sync::Arc<pkg_repo::RecipeManifest>,
     /// The node's runtime deps resolved to their installed store dirs
     /// (populated by the orchestrator, which owns the DB connection).
@@ -404,21 +429,24 @@ fn run_recipe_phases_impl(
     phase_logs: &mut Vec<(Phase, String)>,
 ) -> PkgResult<()> {
     // -- fetch --------------------------------------------------------
-    // pkg-repo contract: fetch_sources(entry, cache_dir) downloads the
-    // [source]s declared in the package's *recipe manifest entry*,
-    // verifies SHA-256, and refuses origins the manifest doesn't
-    // declare (T7). The manifest comes from the `pkg sync` cache, not
-    // from the recipe checkout — the checkout is transport (v12 §2).
-    let manifest_entry = ctx
-        .recipe_manifest
-        .find(&recipe.manifest.name, &recipe.manifest.version.to_string())
-        .ok_or_else(|| {
-            PkgError::NotFound(format!(
-                "{} {} is not in the cached recipe manifest; run `pkg sync`",
-                recipe.manifest.name, recipe.manifest.version
-            ))
-        })?;
-    let sources: Vec<PathBuf> = pkg_repo::fetch_sources(manifest_entry, &ctx.source_cache)?;
+    // Repository recipes use the synced manifest as their source
+    // authorization. An explicitly named local recipe carries its own
+    // entry; only that path permits local file URLs. Both paths enforce
+    // the pinned SHA-256 before any source reaches the build sandbox.
+    let sources: Vec<PathBuf> = if let Some(entry) = &recipe.local_manifest {
+        pkg_repo::fetch_local_sources(entry, &ctx.source_cache)?
+    } else {
+        let manifest_entry = ctx
+            .recipe_manifest
+            .find(&recipe.manifest.name, &recipe.manifest.version.to_string())
+            .ok_or_else(|| {
+                PkgError::NotFound(format!(
+                    "{} {} is not in the cached recipe manifest; run `pkg sync`",
+                    recipe.manifest.name, recipe.manifest.version
+                ))
+            })?;
+        pkg_repo::fetch_sources(manifest_entry, &ctx.source_cache)?
+    };
 
     // A build always starts from a pristine tree (design 4.3.2: no
     // incremental rebuilds — autotools caches and generated headers
@@ -439,6 +467,7 @@ fn run_recipe_phases_impl(
     // names carry a `<sha256>-` prefix (pkg-repo's `cache_file_name`);
     // recipe scripts reference their sources by the URL's bare file
     // name, so the prefix is stripped here.
+    let mut staged_sources = Vec::new();
     for src in &sources {
         let name = src.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
             PkgError::Build(format!("source path {} has no file name", src.display()))
@@ -452,18 +481,11 @@ fn run_recipe_phases_impl(
             _ => name,
         };
         fs::copy(src, ctx.scratch_dir.join(bare)).map_err(PkgError::Io)?;
+        staged_sources.push(bare.to_string());
     }
 
     let env = build_env(ctx, recipe)?;
     let profile = SandboxProfile::Build;
-    // The resolved dependency tree, RO-bound into the build sandbox
-    // twice (v12 §9): at its real store paths (the gate scans those,
-    // and any baked-in rpaths resolve) and at a stable per-name alias
-    // `/pkg/deps/<name>`, so recipes reference e.g.
-    // `-I /pkg/deps/libfoo/usr/include` without globbing the
-    // identity-hashed store path (which changes on every rebuild).
-    // Build-kind deps join the binds (visibility) but not the gate
-    // provider set — see `BuildContext::build_deps`.
     let dep_binds: Vec<(PathBuf, PathBuf)> = ctx
         .gate_deps
         .iter()
@@ -478,34 +500,32 @@ fn run_recipe_phases_impl(
             ]
         })
         .collect();
+    let work_dir = if recipe.manifest.build_system.is_managed() {
+        prepare_managed_source(recipe, ctx, &staged_sources, &dep_binds, &env)?
+    } else {
+        ctx.scratch_dir.clone()
+    };
 
     // -- prepare / build / check / install ----------------------------
     for phase in PHASES {
-        let Some(script) = recipe.phase_script(phase) else {
-            // A binary-blob repackaging ([build] binary = true) needs
-            // no compile step; extraction/placement happens in install.
+        let Some(script) = materialize_phase(recipe, phase, ctx, &work_dir)? else {
             let required = matches!(phase, Phase::Install)
-                || (matches!(phase, Phase::Build) && !recipe.manifest.binary);
+                || (matches!(phase, Phase::Build)
+                    && !recipe.manifest.binary
+                    && recipe.manifest.build_system == BuildSystem::Custom);
             if required {
                 return Err(PkgError::Build(format!(
-                    "recipe {} has no `{}` script",
+                    "recipe {} has no `{}` script or generated phase",
                     recipe.dir.display(),
                     phase.script_name()
                 )));
             }
             continue;
         };
-        // The recipe dir is NOT bound into the sandbox — copy the phase
-        // script into the scratch dir (the build's only always-RW bind)
-        // and run it from there.
-        let local_script = ctx
-            .scratch_dir
-            .join(format!(".pkg-phase-{}", phase.script_name()));
-        fs::copy(script, &local_script).map_err(PkgError::Io)?;
         let cmd = vec![
             "/bin/sh".to_string(),
             "-e".to_string(),
-            local_script.display().to_string(),
+            script.display().to_string(),
         ];
         let outcome = run_sandboxed_with_binds(&profile, &dep_binds, &cmd, &ctx.scratch_dir, &env)?;
         phase_logs.push((phase, outcome.stderr_tail.clone()));
@@ -558,6 +578,125 @@ fn run_recipe_phases_impl(
         }
     }
     Ok(())
+}
+
+fn prepare_managed_source(
+    recipe: &Recipe,
+    ctx: &BuildContext,
+    staged_sources: &[String],
+    dep_binds: &[(PathBuf, PathBuf)],
+    env: &[(String, String)],
+) -> PkgResult<PathBuf> {
+    let archive = staged_sources.first().filter(|name| is_tar_archive(name));
+    if let Some(archive) = archive {
+        let cmd = vec!["tar".into(), "-xf".into(), archive.clone()];
+        let outcome = run_sandboxed_with_binds(
+            &SandboxProfile::Build,
+            dep_binds,
+            &cmd,
+            &ctx.scratch_dir,
+            env,
+        )?;
+        if !outcome.success() {
+            return Err(PkgError::Build(format!(
+                "{} {}: source unpack failed ({}): {}",
+                recipe.manifest.name, recipe.manifest.version, outcome.status, outcome.stderr_tail
+            )));
+        }
+    }
+
+    if let Some(configured) = &recipe.manifest.source_dir {
+        let relative = Path::new(configured);
+        if configured.is_empty()
+            || relative.is_absolute()
+            || relative
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(PkgError::Build(format!(
+                "invalid source_dir {configured:?}: use a relative path inside the source tree"
+            )));
+        }
+        let dir = ctx.scratch_dir.join(relative);
+        if !dir.is_dir() {
+            return Err(PkgError::Build(format!(
+                "source_dir {} does not exist after unpacking",
+                dir.display()
+            )));
+        }
+        return Ok(dir);
+    }
+
+    if archive.is_none() {
+        return Ok(ctx.scratch_dir.clone());
+    }
+    let mut dirs = Vec::new();
+    for entry in fs::read_dir(&ctx.scratch_dir).map_err(PkgError::Io)? {
+        let entry = entry.map_err(PkgError::Io)?;
+        if entry.file_type().map_err(PkgError::Io)?.is_dir() {
+            dirs.push(entry.path());
+        }
+    }
+    match dirs.len() {
+        0 => Ok(ctx.scratch_dir.clone()),
+        1 => Ok(dirs.remove(0)),
+        _ => Err(PkgError::Build(format!(
+            "{}: source archive produced several directories; set [build] source_dir",
+            recipe.manifest.name
+        ))),
+    }
+}
+
+fn is_tar_archive(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        ".tar",
+        ".tar.gz",
+        ".tgz",
+        ".tar.bz2",
+        ".tbz2",
+        ".tar.xz",
+        ".txz",
+        ".tar.zst",
+        ".tar.zstd",
+    ]
+    .iter()
+    .any(|suffix| lower.ends_with(suffix))
+}
+
+fn materialize_phase(
+    recipe: &Recipe,
+    phase: Phase,
+    ctx: &BuildContext,
+    work_dir: &Path,
+) -> PkgResult<Option<PathBuf>> {
+    let mut content = if let Some(path) = recipe.phase_script(phase) {
+        fs::read_to_string(path).map_err(PkgError::Io)?
+    } else if let Some(script) = recipe.manifest.scripts.get(phase.script_name()) {
+        script.to_string()
+    } else if let Some(script) = crate::build_system::generated_phase(
+        recipe.manifest.build_system,
+        phase,
+        &recipe.manifest.configure_args,
+    ) {
+        script
+    } else {
+        return Ok(None);
+    };
+    if recipe.manifest.build_system.is_managed() {
+        let dir = work_dir.to_str().ok_or_else(|| {
+            PkgError::Build(format!(
+                "source directory {} is not valid UTF-8",
+                work_dir.display()
+            ))
+        })?;
+        content = format!("cd {}\n{}", crate::build_system::shell_quote(dir), content);
+    }
+    let local_script = ctx
+        .scratch_dir
+        .join(format!(".pkg-phase-{}", phase.script_name()));
+    fs::write(&local_script, content).map_err(PkgError::Io)?;
+    Ok(Some(local_script))
 }
 
 fn unix_now() -> i64 {
@@ -874,6 +1013,7 @@ default = false
             manifest,
             dir: PathBuf::from("/recipe"),
             recipe_commit: "abc".into(),
+            local_manifest: None,
         };
         // Empty selection → defaults; still exported (recipe scripts
         // test $PKG_OPT_* unconditionally).
@@ -894,6 +1034,7 @@ default = false
             manifest: manifest.clone(),
             dir: PathBuf::from("/recipe"),
             recipe_commit: "abc".into(),
+            local_manifest: None,
         };
         let env = build_env(&ctx(BTreeMap::new()), &recipe).unwrap();
         let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
@@ -916,6 +1057,7 @@ default = false
             manifest,
             dir: PathBuf::from("/recipe"),
             recipe_commit: "abc".into(),
+            local_manifest: None,
         };
         let sel = BTreeMap::from([("pulseaudio".to_string(), true)]);
         let env = build_env(&ctx(sel), &recipe).unwrap();
@@ -929,6 +1071,7 @@ default = false
             manifest: manifest_with_options(),
             dir: PathBuf::from("/recipe"),
             recipe_commit: "abc".into(),
+            local_manifest: None,
         };
         let mut c = ctx(BTreeMap::new());
         c.gate_deps = vec![pkg_scanner::DeclaredDep {
@@ -963,6 +1106,7 @@ default = false
             manifest,
             dir: PathBuf::from("/recipe"),
             recipe_commit: "abc".into(),
+            local_manifest: None,
         };
         let sel = BTreeMap::from([("wayland".to_string(), true)]);
         let env = build_env(&ctx(sel), &recipe).unwrap();
@@ -990,8 +1134,51 @@ compiler_cache = false
             manifest,
             dir: PathBuf::from("/recipe"),
             recipe_commit: "abc".into(),
+            local_manifest: None,
         };
         let env = build_env(&ctx(BTreeMap::new()), &recipe).unwrap();
         assert!(env.iter().all(|(k, _)| k != "CC" && k != "CXX"));
+    }
+
+    #[test]
+    fn inline_and_external_phase_conflict_is_rejected() {
+        let dir = std::env::temp_dir().join(format!("pkg-phase-conflict-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("pkg-meta.toml"),
+            "name = \"hello\"\nversion = \"1\"\ncategory = \"app\"\n[scripts]\nbuild = \"make\"\n",
+        )
+        .unwrap();
+        fs::write(dir.join("build"), "make\n").unwrap();
+        let err = Recipe::load(&dir, "abc").unwrap_err();
+        assert!(err.to_string().contains("both in pkg-meta.toml"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn configured_source_dir_is_validated_without_leaving_scratch() {
+        let scratch = std::env::temp_dir().join(format!("pkg-source-dir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&scratch);
+        fs::create_dir_all(scratch.join("src")).unwrap();
+        let manifest = PackageManifest::from_toml_str(
+            "name = \"hello\"\nversion = \"1\"\ncategory = \"app\"\n[build]\nsystem = \"make\"\nsource_dir = \"src\"\n",
+        )
+        .unwrap();
+        let recipe = Recipe {
+            manifest,
+            dir: scratch.clone(),
+            recipe_commit: "abc".into(),
+            local_manifest: None,
+        };
+        let mut context = ctx(BTreeMap::new());
+        context.scratch_dir = scratch.clone();
+        let selected = prepare_managed_source(&recipe, &context, &[], &[], &[]).unwrap();
+        assert_eq!(selected, scratch.join("src"));
+
+        let mut recipe = recipe;
+        recipe.manifest.source_dir = Some("../outside".into());
+        assert!(prepare_managed_source(&recipe, &context, &[], &[], &[]).is_err());
+        fs::remove_dir_all(scratch).unwrap();
     }
 }

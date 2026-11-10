@@ -258,6 +258,72 @@ pub struct ManifestOption {
 }
 
 // ---------------------------------------------------------------------
+// Sources, phase scripts, and build systems
+// ---------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourcePin {
+    pub url: String,
+    pub sha256: String,
+    #[serde(default)]
+    pub filename: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhaseScripts {
+    #[serde(default)]
+    pub prepare: Option<String>,
+    #[serde(default)]
+    pub build: Option<String>,
+    #[serde(default)]
+    pub check: Option<String>,
+    #[serde(default)]
+    pub install: Option<String>,
+}
+
+impl PhaseScripts {
+    pub fn get(&self, phase: &str) -> Option<&str> {
+        match phase {
+            "prepare" => self.prepare.as_deref(),
+            "build" => self.build.as_deref(),
+            "check" => self.check.as_deref(),
+            "install" => self.install.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BuildSystem {
+    #[default]
+    Custom,
+    Autotools,
+    Meson,
+    CMake,
+    Make,
+    None,
+}
+
+impl BuildSystem {
+    pub fn is_managed(self) -> bool {
+        matches!(
+            self,
+            BuildSystem::Autotools | BuildSystem::Meson | BuildSystem::CMake | BuildSystem::Make
+        )
+    }
+
+    pub fn accepts_configure_args(self) -> bool {
+        matches!(
+            self,
+            BuildSystem::Autotools | BuildSystem::Meson | BuildSystem::CMake
+        )
+    }
+}
+
+// ---------------------------------------------------------------------
 // PackageManifest
 // ---------------------------------------------------------------------
 
@@ -279,6 +345,11 @@ pub struct PackageManifest {
     pub link_deps: Vec<Dependency>,
     pub runtime_deps: Vec<Dependency>,
     pub build_deps: Vec<Dependency>,
+    pub sources: Vec<SourcePin>,
+    pub scripts: PhaseScripts,
+    pub build_system: BuildSystem,
+    pub source_dir: Option<String>,
+    pub configure_args: Vec<String>,
     /// Declared options from `[options.<name>]` tables (v3), keyed by
     /// option name. A `BTreeMap` so every accessor that iterates it
     /// (`dep_set`, `opt_tag`, `options_export_env`) is deterministic.
@@ -405,6 +476,25 @@ impl PackageManifest {
             dkms_name: d.name,
             dkms_version: d.version,
         });
+        if raw.build.binary && raw.build.system.is_managed() {
+            return Err(ManifestError::InvalidBuild(
+                "binary = true cannot be combined with a managed build system".into(),
+            )
+            .into());
+        }
+        if !raw.build.configure_args.is_empty() && !raw.build.system.accepts_configure_args() {
+            return Err(ManifestError::InvalidBuild(format!(
+                "configure_args are not used by build system {:?}",
+                raw.build.system
+            ))
+            .into());
+        }
+        if raw.build.source_dir.is_some() && !raw.build.system.is_managed() {
+            return Err(ManifestError::InvalidBuild(
+                "source_dir requires a managed build system".into(),
+            )
+            .into());
+        }
 
         Ok(PackageManifest {
             name: raw.name,
@@ -415,6 +505,11 @@ impl PackageManifest {
             link_deps,
             runtime_deps,
             build_deps,
+            sources: raw.source,
+            scripts: raw.scripts,
+            build_system: raw.build.system,
+            source_dir: raw.build.source_dir,
+            configure_args: raw.build.configure_args,
             options,
             compiler_cache: raw.build.compiler_cache,
             critical: raw.build.critical,
@@ -680,6 +775,10 @@ struct RawManifest {
     provides: Vec<String>,
     #[serde(default)]
     dependencies: RawDependencies,
+    #[serde(default)]
+    source: Vec<SourcePin>,
+    #[serde(default)]
+    scripts: PhaseScripts,
     /// v3: `[options.<name>]` tables. Keyed by option name; each value is
     /// validated for shape by `RawOption`'s `deny_unknown_fields` and its
     /// dependency expressions by `parse_dependency_expr` during the
@@ -781,6 +880,12 @@ struct RawBuild {
     critical: bool,
     #[serde(default)]
     binary: bool,
+    #[serde(default)]
+    system: BuildSystem,
+    #[serde(default)]
+    source_dir: Option<String>,
+    #[serde(default)]
+    configure_args: Vec<String>,
 }
 
 /// `Default` is hand-written (not derived) because the SPEC default for
@@ -791,6 +896,9 @@ impl Default for RawBuild {
             compiler_cache: true,
             critical: false,
             binary: false,
+            system: BuildSystem::Custom,
+            source_dir: None,
+            configure_args: Vec::new(),
         }
     }
 }
@@ -914,6 +1022,7 @@ pub enum ManifestError {
     EmptyDependency,
     InvalidVirtual(String),
     InvalidVersion(String),
+    InvalidBuild(String),
     /// A selection passed to `dep_set`/`opt_tag`/`options_export_env`
     /// named an option the manifest never declared in `[options.<name>]`
     /// (v3). A hard error rather than a silent no-op: an unrecognized
@@ -929,6 +1038,7 @@ impl fmt::Display for ManifestError {
             ManifestError::EmptyDependency => write!(f, "empty dependency expression"),
             ManifestError::InvalidVirtual(msg) => write!(f, "invalid virtual dependency: {msg}"),
             ManifestError::InvalidVersion(msg) => write!(f, "invalid version in dependency: {msg}"),
+            ManifestError::InvalidBuild(msg) => write!(f, "invalid build declaration: {msg}"),
             ManifestError::UnknownOption(name) => {
                 write!(f, "unknown option in selection: '{name}'")
             }
@@ -1528,7 +1638,6 @@ mod tests {
     #[test]
     fn options_export_env_covers_every_declared_option() {
         let m = PackageManifest::from_toml_str(OPTIONS_TOML).unwrap();
-        // Empty selection → defaults; name uppercased, '-' → '_'.
         let env = m.options_export_env(&BTreeMap::new()).unwrap();
         assert_eq!(
             env,
@@ -1537,7 +1646,6 @@ mod tests {
                 ("PKG_OPT_SSL_WEAK".to_string(), "0".to_string()),
             ]
         );
-        // Overrides apply.
         let env = m
             .options_export_env(&selection(&[("ssl-weak", true), ("docs", false)]))
             .unwrap();
@@ -1548,5 +1656,65 @@ mod tests {
                 ("PKG_OPT_SSL_WEAK".to_string(), "1".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn single_file_manifest_parses_sources_scripts_and_build_system() {
+        let m = PackageManifest::from_toml_str(
+            r#"
+name = "hello"
+version = "2.12"
+category = "app-misc"
+
+[[source]]
+url = "./hello.tar.gz"
+sha256 = "abc"
+filename = "hello.tar.gz"
+
+[build]
+system = "autotools"
+source_dir = "hello-2.12"
+configure_args = ["--disable-nls"]
+
+[scripts]
+check = "make check"
+"#,
+        )
+        .unwrap();
+        assert_eq!(m.sources.len(), 1);
+        assert_eq!(m.sources[0].filename.as_deref(), Some("hello.tar.gz"));
+        assert_eq!(m.build_system, BuildSystem::Autotools);
+        assert_eq!(m.source_dir.as_deref(), Some("hello-2.12"));
+        assert_eq!(m.configure_args, ["--disable-nls"]);
+        assert_eq!(m.scripts.get("check"), Some("make check"));
+        assert!(m.scripts.get("install").is_none());
+    }
+
+    #[test]
+    fn legacy_manifest_defaults_to_custom_without_embedded_content() {
+        let m = PackageManifest::from_toml_str(
+            "name = \"hello\"\nversion = \"1\"\ncategory = \"app-misc\"\n",
+        )
+        .unwrap();
+        assert_eq!(m.build_system, BuildSystem::Custom);
+        assert!(m.sources.is_empty());
+        assert!(m.configure_args.is_empty());
+        assert!(m.scripts.get("build").is_none());
+    }
+
+    #[test]
+    fn invalid_build_system_combinations_are_rejected() {
+        for extra in [
+            "[build]\nsystem = \"make\"\nconfigure_args = [\"--x\"]",
+            "[build]\nsystem = \"custom\"\nsource_dir = \"src\"",
+            "[build]\nbinary = true\nsystem = \"make\"",
+        ] {
+            let text =
+                format!("name = \"hello\"\nversion = \"1\"\ncategory = \"app-misc\"\n{extra}");
+            assert!(PackageManifest::from_toml_str(&text).is_err(), "{extra}");
+        }
+        let unknown =
+            "name = \"hello\"\nversion = \"1\"\ncategory = \"app\"\n[build]\nsystem = \"unknown\"";
+        assert!(PackageManifest::from_toml_str(unknown).is_err());
     }
 }

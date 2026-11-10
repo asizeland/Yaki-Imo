@@ -129,12 +129,11 @@ and when a build fails the error is designed to be a sentence you can
 act on.
 
 **What about packaging your own software?** This is not an
-afterthought. A recipe is a small directory: a `pkg-meta.toml`
-manifest, a `source.toml` pin, and plain `sh` phase scripts (at the moment
-I feel like these add unecessary complexity to creating packages, I will
-aim to simplify this system such that only the somepkg.toml is required,
-shell scrips will not have to be created by user this is a simplification 
-being used at the moment). 
+afterthought. A common source recipe needs only `pkg-meta.toml`: it holds
+package metadata, SHA-256-pinned `[[source]]` entries, and a managed
+`[build] system` for Autotools, Meson, CMake, or Make. Optional inline
+`[scripts]` handle custom steps; older `source.toml` files and external
+shell phase files remain supported.
 
 The build pipeline helps you get it right: dependencies appear at stable paths,
 options arrive as `PKG_OPT_*` variables, and if your binary links

@@ -11,8 +11,9 @@ PORTS=$(cd "$(dirname "$0")" && pwd)
 DIST=${1:?usage: fetch-distfiles.sh <distfiles-dir>}
 mkdir -p "$DIST"
 
-# Extract url/sha256 pairs from every source.toml in the tree.
-find "$PORTS" -name source.toml | while read -r f; do
+# Extract url/sha256 pairs from legacy source.toml files and embedded
+# [[source]] tables in pkg-meta.toml.
+find "$PORTS" \( -name source.toml -o -name pkg-meta.toml \) | while read -r f; do
     url=$(sed -n 's/^url = "\(.*\)"/\1/p' "$f" | head -1)
     sha=$(sed -n 's/^sha256 = "\(.*\)"/\1/p' "$f" | head -1)
     fname=$(sed -n 's/^filename = "\(.*\)"/\1/p' "$f" | head -1)

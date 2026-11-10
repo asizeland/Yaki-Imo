@@ -11,14 +11,14 @@ explained where they are first used.
 The documentation has three parts:
 
 - **This user guide:** installation, daily use, configuration, and packaging.
-- **[Technical manual](docs/technical-manual.md):** what happens inside each
+- **[Technical manual](technical-manual.md):** what happens inside each
   feature and why the less obvious tools exist.
-- **[Developer's manual](docs/developers-manual.md):** how the source code is
+- **[Developer's manual](developers-manual.md):** how the source code is
   organized and how to contribute to Yakimo itself.
 
 Eventually user guide will be expanded into a larger document:
 
-- [NTBD Handbook](docs/NTBD_Handbook.odt) which will contain the information 
+- [NTBD Handbook](NTBD_Handbook.odt) which will contain the information
   relevant to managing the base system, and most relevant day to day activities:
   working on different kinds of documents, development, virtualization, printing
   playing games...
@@ -519,37 +519,50 @@ below when a test needs stronger separation.
 
 ### 10.1 The seed ports tree
 
-The `ports/` directory in the Yakimo source tree is a small
-ebuild/ports-style recipe collection meant for live testing: the C
-library and its prerequisites (linux-headers, glibc, libxcrypt — all
-built from source), libraries
-(zlib, bzip2, ncurses, readline), tools (sqlite, lua, less, tar, gzip,
-xz, grep, sed, gawk), documentation (man-pages), a game
-(tty-solitaire), a vendor binary (discord), the chrootable core
-(bash, coreutils), an init system (sysvinit), the git chain
-(pkgconf, openssl, expat, ca-certificates, curl, git — proven with a
-real HTTPS fetch), a minimal-system set (util-linux, iproute2,
-procps-ng, e2fsprogs, openssh), and the NetworkManager stack
-(python3, meson, ninja, libffi, pcre2, glib, dbus, kmod, eudev,
-the gnutls chain, libnl, wpa_supplicant, networkmanager).
-`ports/README.md` has the details; `e2e/ports.sh` automates the whole
-flow.
+The seed recipe tree is a small ebuild/ports-style collection meant for live
+testing. It is maintained in its own Git repository, separately from the
+Yakimo source. Clone it anywhere and remember its path:
+
+```sh
+git clone <ports-git-url> "$HOME/src/yakimo-ports"
+export PORTS=$HOME/src/yakimo-ports
+```
+
+The tree contains the C library and its prerequisites (linux-headers, glibc,
+libxcrypt — all built from source), libraries (zlib, bzip2, ncurses, readline),
+tools (sqlite, lua, less, tar, gzip, xz, grep, sed, gawk), documentation
+(man-pages), a game (tty-solitaire), a vendor binary (discord), the chrootable
+core (bash, coreutils), an init system (sysvinit), the git chain (pkgconf,
+openssl, expat, ca-certificates, curl, git — proven with a real HTTPS fetch),
+a minimal-system set (util-linux, iproute2, procps-ng, e2fsprogs, openssh),
+and the NetworkManager stack (python3, meson, ninja, libffi, pcre2, glib, dbus,
+kmod, eudev, the gnutls chain, libnl, wpa_supplicant, networkmanager).
+`$PORTS/README.md` has the details.
+
+The package-manager repository's `e2e/ports.sh` automates the full signed-repo
+flow. That harness expects the recipe checkout at `ports/` in the workspace;
+use a checkout or symlink there when running it. Direct `--recipe-tree`
+commands accept any location and do not need that layout.
 
 Activation links are relative, so a `PKG_ROOT`-installed tree is
 directly chrootable. On live installation media the flow is:
 
-```
-# mount the target partition at /mnt/target
-$ export PKG_ROOT=/mnt/target
-$ sh ports/install.sh /path/to/repo && pkg sync
-$ pkg install bash coreutils grep sed gawk tar gzip xz less lua sysvinit
-# mount /proc /sys /dev (arch-chroot does this for you), then:
-$ chroot /mnt/target /bin/sh
+```sh
+# Mount the target partition at /mnt/target first.
+export PKG_ROOT=/mnt/target
+pkg install --recipe-tree "$PORTS" \
+    bash coreutils grep sed gawk tar gzip xz less lua sysvinit
+# Mount /proc, /sys, and /dev (arch-chroot does this for you), then:
+chroot /mnt/target /usr/bin/bash
+# Inside the chroot, do not retain the host-side PKG_ROOT setting:
+unset PKG_ROOT
 ```
 
-Testing — more installs, option flips, service experiments —
-continues inside the chroot. The e2e suite proves this works by
-booting the installed sysvinit as PID 1 in a container and running an
+Testing — more installs, option flips, service experiments — continues inside
+the chroot. To run package operations there, provide a musl-static `pkg` binary
+and make the recipe tree visible with a bind mount; a host dynamic binary is
+not guaranteed to run against the target libc. The e2e suite proves the base
+works by booting the installed sysvinit as PID 1 in a container and running an
 inittab action through the tree's own `/bin/sh`.
 
 ### 10.2 Bootable test appliance
@@ -575,16 +588,16 @@ what makes builds reproducible and signable. So there is no "install
 the latest" pointer a client follows. Instead, the *bump* is
 automated on the repository side:
 
-```
-$ ports/watch.sh           # which recipes are behind upstream?
-$ ports/watch.sh --apply   # bump version + hash in place
+```sh
+"$PORTS/watch.sh"           # which recipes are behind upstream?
+"$PORTS/watch.sh" --apply   # bump version + hash in place
 ```
 
-A recipe carries a `watch.toml` describing how to poll its upstream
-(git tags or a release-page pattern, with a stable-only filter).
-`--apply` downloads the new distfile, recomputes the hash, and rewrites
-the recipe. The bump then goes through review and signing like any
-other tree change. (This is the same role Debian's `uscan` plays.)
+A recipe carries a `watch.toml` describing how to poll its upstream (Git tags
+or a release-page pattern, with a stable-only filter). `--apply` downloads the
+new distfile, recomputes the hash, and rewrites the recipe. This is a maintainer
+tool, not an automatic client-side upgrade. Section 11.6 explains the complete
+tree-maintenance workflow.
 
 ### 10.4 OpenRC and Intel/NVIDIA hardware recipes
 
@@ -673,9 +686,9 @@ configure_args = ["--disable-nls"]
 ```
 
 This tells Yakimo what to download, how to verify it, and how to build it. You
-do not need to write shell commands for this package. Start by copying the
-recipe for a similar program in `ports/`; `ports/sys-apps/sed/` is a single-file
-Autotools example.
+do not need to write shell commands for this package. Start by copying a similar
+recipe from your tree. `$PORTS/sys-apps/sed/` is a single-file Autotools
+example.
 
 Older recipes may still use `source.toml` and external `prepare`, `build`,
 `check`, and `install` files. Do not define the same source list or phase in
@@ -839,47 +852,54 @@ instead of errors.
 
 ### 11.4 Test and improve a recipe
 
-Pass the recipe directory directly. You do not need to generate a repository,
-install a recipe checkout, configure trust, or run `pkg sync`:
+Pass the recipe directory or its `pkg-meta.toml` file directly. You do not need
+to generate a repository, install a recipe checkout, configure trust, or run
+`pkg sync`:
 
 ```sh
 export PKG_ROOT=/tmp/hello-test
 
 # Fetch and check the sources without compiling.
-pkg fetch ./myrepo/app-misc/hello
+pkg fetch ./myrepo/app-misc/hello/pkg-meta.toml
 
 # Build the current files, bypassing previously cached package artifacts.
 pkg build --no-cache ./myrepo/app-misc/hello
 
-# Resolve dependencies and install the result.
-pkg install ./myrepo/app-misc/hello
+# Resolve dependencies from the local tree and install the result.
+pkg install --recipe-tree ./myrepo ./myrepo/app-misc/hello/pkg-meta.toml
 ```
 
 The path may be relative or absolute. Yakimo reads the package name and version
-from `pkg-meta.toml`, so the directory itself does not need to have a particular
-name. A local recipe temporarily overrides a same-name recipe in the installed
-checkout for that command.
+from `pkg-meta.toml`, so the recipe directory itself does not need a particular
+name. `--recipe-tree` accepts a ports tree (`category/package/`), a flat tree
+(`package/`), or a generated repository containing `recipes/package/`. You can
+also install a package by name with `--recipe-tree` instead of giving its path.
 
-`pkg install <path>` resolves dependencies from the normal recipe checkout.
-To use another local recipe as a dependency, pass both directories:
+Dependencies otherwise come from the installed recipe checkout. You can still
+pass several local recipe paths together when you do not want to load a tree:
 
 ```sh
 pkg install ./my-lib ./my-app
 ```
 
+An explicit recipe path overrides a same-name recipe in the tree; the tree
+overrides the installed checkout. Duplicate package names inside one tree are
+an error.
+
 `pkg build <path>` builds one recipe without resolving missing dependencies.
-Use `pkg install <path>` when the dependency chain also needs building.
-`pkg install --background` cannot be used with a local path because the current
-background state cannot preserve that path.
+Use `pkg install` when the dependency chain also needs building. `--background`
+cannot be used with a local path or tree because the current background state
+cannot preserve those paths.
 
 After an edit, run the same command again. No repository regeneration or sync
 is needed. Use `pkg build --no-cache <path>` when you want to force a rebuild of
 an already installed version. The recipe's content hash prevents stale package
 artifacts from being reused after a recipe or source-pin change.
 
-A local recipe produces a warning because it has not been reviewed or attested
-by a repository. Its source hashes, sandbox, and linkage checks still apply.
-The explicit path is your authorization to build those local instructions.
+Local recipes and trees produce a warning because they have not been reviewed
+or attested by a repository. Their source hashes, sandbox, and linkage checks
+still apply. The explicit paths are your authorization to build those local
+instructions.
 
 If the build uses a library that you did not declare, the error names the
 missing dependency and may name its provider:
@@ -898,55 +918,178 @@ installed program: successful compilation alone does not prove that it works.
 
 There are two different things called the repository here:
 
-1. The **recipe source tree**, such as the `ports/` directory in Git. This
-   is where people write and review recipes.
-2. The **generated package repository**, which contains signed indexes,
-   recipe manifests, and source files. This is what `pkg sync` downloads.
+1. The **recipe source tree** is a Git repository containing directories such
+   as `app-misc/hello/`. People write and review recipes here. It can be used
+   directly with `--recipe-tree`; it does not have to live inside Yakimo's
+   source checkout.
+2. The **generated package repository** contains signed indexes, recipe
+   manifests, and source files. This is what `pkg sync` downloads.
 
 Editing `/var/lib/pkg/recipes/` changes only your machine. It does not update
 either repository for other people.
 
-To contribute a package to the project's recipe tree:
+To contribute a package, work in the recipe tree's own repository:
 
 ```sh
-git clone <project-git-url>
-cd <project-directory>
+git clone <ports-git-url> yakimo-ports
+cd yakimo-ports
 git switch -c add-hello
+export PORTS=$PWD
 
-# Add and test ports/app-misc/hello/ as described above.
-git add ports/app-misc/hello
+# Add and test app-misc/hello/ as described in section 11.4.
+git add app-misc/hello
 git diff --cached
-git commit -m "ports: add hello 2.12"
+git commit -m "Add hello 2.12"
 git push -u origin add-hello
 ```
 
-If you do not have permission to push to the main project, push to your fork
-and open a pull request. Include the recipe files and `watch.toml` where
-possible. Do not commit downloaded tarballs, `/tmp` test roots, or generated
-repository output. Explain how you tested the package and mention any
-runtime steps or limitations.
+If you do not have permission to push to the main tree, push to your fork and
+open a pull request. Include `watch.toml` where possible. Do not commit
+downloaded tarballs, test roots, build output, or generated repository files.
+Explain how you tested the package and mention any runtime steps or
+limitations.
 
 A repository maintainer then reviews and merges the change, generates a new
-repository with an increased `index_version`, signs it with the deployment's
-real keys, and publishes the generated files. The test keys produced by
-`ports2repo` must not become a public trust root. After publication, users
-receive the package with:
+package repository with an increased `index_version`, signs it with the
+deployment's real keys, and publishes the generated files. The test keys
+produced by `ports2repo` must not become a public trust root. After
+publication, users receive the package with:
 
 ```sh
 pkg sync
 pkg install hello
 ```
 
-For a later upstream release, use `ports/watch.sh --apply` when the recipe
-has a suitable `watch.toml`. This updates exact versions and source hashes;
-it does not make clients follow an unreviewed "latest" pointer. The script
-checks the whole tree and may update more than one recipe, so review
-`git diff` and stage only the changes you intend to submit. Test each new
-version and submit its recipe change through the same review process.
+If you operate your own test repository, you can regenerate it directly. When
+deleting or renaming a package, use a new output directory or remove its stale
+generated recipe so the old copy is not published again.
 
-If you operate your own test repository, you can regenerate it directly.
-When deleting or renaming a package, use a new output directory or remove
-its stale generated recipe so the old copy is not published again.
+### 11.6 Maintain a recipe tree
+
+A recipe tree is the source of truth for packagers. Keep it in Git, make one
+focused change per branch, and test the actual package before proposing the
+change. A typical tree uses `<category>/<package>/pkg-meta.toml`, with an
+optional `watch.toml` beside it. Package names must be unique within a tree:
+Yakimo rejects duplicate names instead of choosing one silently.
+
+Start from a current, clean checkout:
+
+```sh
+cd "$PORTS"
+git status --short
+git switch main
+git pull --ff-only
+git switch -c update-hello
+```
+
+For a new package, choose the closest existing recipe, declare every link,
+runtime, and build dependency, and pin every source with SHA-256. Add a watch
+rule when upstream exposes usable tags or release listings. For an existing
+package, first see which watched recipes have updates:
+
+```sh
+"$PORTS/watch.sh"
+```
+
+This command only reports. It does not edit recipes. A recipe without
+`watch.toml` is skipped, so a clean report does not prove that every package in
+the tree is current.
+
+#### Describe where updates come from
+
+`watch.toml` is a flat TOML file. This example discovers stable Git tags and
+turns a version into the archive URL used by the recipe:
+
+```toml
+type = "git-tags"
+url = "https://github.com/example/hello.git"
+tag_prefix = "v"
+stable_regex = '^[0-9]+\.[0-9]+(\.[0-9]+)?$'
+url_template = "https://github.com/example/hello/archive/refs/tags/v{version}.tar.gz"
+filename_template = "hello-{version}.tar.gz"
+```
+
+The Git URL is used only to list tags. The archive URL in `url_template`
+produces the downloadable source. For a project that publishes a release index
+instead, use `type = "release-regex"`, set `url` to that page, and set `regex`
+to a pattern whose first capture group is the version:
+
+```toml
+type = "release-regex"
+url = "https://ftp.gnu.org/gnu/hello/"
+regex = 'hello-([0-9.]+)\.tar\.gz'
+stable_regex = '^[0-9]+\.[0-9]+(\.[0-9]+)?$'
+url_template = "https://ftp.gnu.org/gnu/hello/hello-{version}.tar.gz"
+```
+
+`stable_regex` excludes versions whose names do not fit your stability policy.
+It is a filter, not a security assessment. Check upstream's release notes and
+do not automatically exclude security releases merely because their version
+format is unusual.
+
+#### Apply and inspect an update
+
+```sh
+"$PORTS/watch.sh" --apply
+git status --short
+git diff
+```
+
+For each outdated watched recipe, `--apply` downloads the archive named by
+`url_template`, calculates its SHA-256, and updates the exact version and
+source pin in `pkg-meta.toml` or legacy `source.toml`. The script checks the
+whole tree and may change several recipes. There is currently no per-package
+filter, so stage only the changes you intend to keep.
+
+A newly calculated hash proves that future downloads must match the archive
+you just fetched. It does not prove that the archive is authentic. Check the
+release source, signatures where available, and upstream changes before
+accepting the bump. Do not replace a hash merely to make an unexpected
+checksum failure disappear.
+
+Some updates need manual work: changed archive layouts may require a new
+`source_dir`; new libraries need dependency declarations; and changed build
+options may need recipe edits. Recipes with no suitable watch rule must be
+updated by hand using the same version-and-hash process.
+
+#### Test, review, and publish
+
+Test each changed recipe in a disposable root, including its dependency
+closure:
+
+```sh
+export PKG_ROOT=/tmp/yakimo-tree-test
+pkg fetch "$PORTS/app-misc/hello/pkg-meta.toml"
+pkg install --recipe-tree "$PORTS" "$PORTS/app-misc/hello/pkg-meta.toml"
+hello --version
+```
+
+Use the program's real test suite in the recipe's `check` phase when one is
+available. Test important options and packages that depend on the changed
+library, not just whether compilation finishes. `pkg install --dry-run` shows
+the resulting rebuild cascade. After a failure, fix the recipe and repeat the
+test; do not treat a cached old artifact as proof that the new recipe works.
+
+Review the final diff and commit only recipe sources:
+
+```sh
+git diff --check
+git diff
+git add app-misc/hello
+git commit -m "Update hello to 2.12.1"
+```
+
+Send the branch through the tree's normal review process. Direct tree users
+choose when to pull and can then preview updates with:
+
+```sh
+pkg upgrade --all --recipe-tree "$PORTS" --dry-run
+```
+
+No `pkg sync` is involved in that local-tree workflow. If the tree also feeds
+a generated package repository, regenerate, sign, and publish it only after
+the recipe changes have passed review. Never publish deterministic test keys
+as a production trust root.
 
 ---
 
@@ -1027,32 +1170,38 @@ sh e2e/ports.sh         # the whole ports tree from scratch — hours
 
 ### Installing from the ports tree by hand
 
-The e2e scripts automate everything below, but doing it by hand is the
-best way to learn how the pieces fit. The flow has four stages, and
-each one exists for a reason.
+The e2e scripts automate everything below, but doing it by hand is the best way
+to learn how the pieces fit. This is the four-stage **signed-repository** flow.
+The simpler unsigned local-tree flow is in section 11.4.
 
-**1. Fetch the sources.** `pkg` never downloads from upstream URLs at
-install time — it fetches from a repo you control, against hashes the
-recipes pin. So first, download every tarball the tree pins and verify
-each SHA-256:
+Set `PORTS` to the separate recipe checkout. In the container, you can clone it
+or bind it at `/ports`:
 
 ```sh
-sh ports/fetch-distfiles.sh /tmp/dist
+export PORTS=/ports
+```
+
+**1. Fetch the sources.** In this flow, `pkg` fetches from a repository you
+control, against hashes the recipes pin. First download every tarball the tree
+pins and verify each SHA-256:
+
+```sh
+sh "$PORTS/fetch-distfiles.sh" /tmp/dist
 ls /tmp/dist | wc -l        # count the currently pinned source files
 ```
 
-The script is idempotent (verified files are kept) and retries
-transient network errors, so re-running it is always safe.
+The script is idempotent (verified files are kept) and retries transient
+network errors, so re-running it is always safe.
 
-**2. Build a signed repo and install the recipes.** `ports2repo` turns
-the tree into a repo: every recipe gets a content-derived commit id,
-the distfiles are copied in, and the index/manifest/root documents are
-signed. `install.sh` then copies the recipes into the root:
+**2. Build a signed repo and install the recipes.** `ports2repo` turns the tree
+into a repo: every recipe gets a content-derived commit id, the distfiles are
+copied in, and the index/manifest/root documents are signed. `install.sh` then
+copies the recipes into the root:
 
 ```sh
 /src/target/debug/examples/ports2repo /tmp/repo http://127.0.0.1:8784 \
-    --distfiles /tmp/dist /src/ports
-sh ports/install.sh /tmp/repo
+    --distfiles /tmp/dist "$PORTS"
+sh "$PORTS/install.sh" /tmp/repo
 ```
 
 Two things to note here:

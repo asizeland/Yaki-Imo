@@ -166,6 +166,7 @@ fn main() {
             sources.push(Source {
                 url: format!("{base_url}/sources/{file_name}"),
                 sha256: sha256_hex(&bytes),
+                filename: None,
             });
         }
         let mut entry = RecipeManifestEntry {

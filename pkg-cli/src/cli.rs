@@ -21,6 +21,11 @@ pub struct TransactionFlags {
     #[arg(long = "opt", value_name = "name=val")]
     pub opts: Vec<String>,
 
+    /// Resolve packages from an unsigned local recipe tree before the
+    /// installed checkout. Accepts ports, flat, or generated-repo layout.
+    #[arg(long, value_name = "DIR")]
+    pub recipe_tree: Option<std::path::PathBuf>,
+
     /// Resolve and preview the full cascade, then stop (Issue 4.4.1).
     #[arg(long)]
     pub dry_run: bool,
@@ -62,7 +67,8 @@ pub struct TransactionFlags {
 pub enum Command {
     /// Install a package (binary-first n/a — source builds only; §16.1).
     Install {
-        /// `name`, `name@version`, or `name=version` (recovery path).
+        /// `name`, `name@version`, `name=version`, a local recipe directory,
+        /// or its pkg-meta.toml file.
         specs: Vec<String>,
         #[command(flatten)]
         flags: TransactionFlags,
@@ -263,10 +269,10 @@ pub enum Command {
         args: Vec<String>,
     },
 
-    /// Fetch + verify a package's declared sources (v14 T7).
+    /// Fetch + verify sources for a package name, recipe directory, or manifest file.
     Fetch { name: String },
 
-    /// Force a source build of a package (§16.1).
+    /// Force a source build from a package name, recipe directory, or manifest file.
     Build {
         name: String,
         #[arg(long = "opt", value_name = "name=val")]

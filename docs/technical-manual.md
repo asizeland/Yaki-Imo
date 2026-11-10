@@ -64,9 +64,9 @@ This split is why the scanner and the database are connected. A dependency decla
 
 `pkg install` and `pkg upgrade` share the same transaction engine. `install` requires at least one package specification. `upgrade` with no names targets all packages marked as explicitly installed; `--all` merely makes that intent explicit and suppresses the explanatory note.
 
-Accepted package specifications are `name`, `name@version`, `name=version`, and a local recipe directory path. The last versioned name form is useful for an explicit, resolver-checked downgrade. Option requests can be attached with `name[opt:key=value,...]` or supplied transaction-wide with repeated `--opt name=value` flags.
+Accepted package specifications are `name`, `name@version`, `name=version`, a local recipe directory, or its `pkg-meta.toml` file. The last versioned name form is useful for an explicit, resolver-checked downgrade. Option requests can be attached with `name[opt:key=value,...]` or supplied transaction-wide with repeated `--opt name=value` flags.
 
-A local directory is canonicalized and loaded under the name and version in its `pkg-meta.toml`. It overrides a same-name checkout recipe for that invocation. Its dependencies still resolve through the normal graph; another local dependency can be supplied by passing its directory too. An all-local graph can operate without `/var/lib/pkg/recipes` or a repository sync. Local path transactions reject `--background`, because pending state currently stores names only and could not reproduce the local paths.
+A local recipe is canonicalized and loaded under the name and version in its manifest. `--recipe-tree <dir>` additionally loads dependencies from a ports-style, flat, or generated-repository recipe directory without synchronizing it. Explicit local targets override tree entries, which override the installed checkout. Duplicate names within a tree are rejected. Several explicit local paths may still be supplied together instead. An all-local graph operates without `/var/lib/pkg/recipes` or a repository sync. Local path and tree transactions reject `--background`, because pending state currently stores names only and could not reproduce those paths.
 
 The high-level flow is:
 

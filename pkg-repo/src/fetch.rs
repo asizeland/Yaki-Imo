@@ -22,10 +22,10 @@
 //! was attacker-controlled would still fail the hash, so restart-from-
 //! scratch costs bandwidth but keeps exactly one integrity check).
 //!
-//! Fetch runs in the sandbox's *Fetch* profile (v14 §4: network
-//! restricted to declared origins, only the source cache writable); the
-//! build stage itself has no network at all, so this module is the only
-//! network path in a build.
+//! The current HTTP client runs directly, before the build sandbox;
+//! the recipe phases themselves have no network. Explicit local recipes
+//! may also use verified `file://` sources through `fetch_local_sources`.
+//! Repository fetching remains HTTP(S)-only.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -97,21 +97,42 @@ impl From<FetchError> for PkgError {
     }
 }
 
-/// Fetch every declared source of a manifest entry, returning the
-/// verified cache paths in manifest order.
+#[derive(Debug, Clone, Copy)]
+enum FetchPolicy {
+    Repository,
+    Local,
+}
+
+/// Fetch every declared source of a repository manifest entry.
 pub fn fetch_sources(entry: &RecipeManifestEntry, cache_dir: &Path) -> PkgResult<Vec<PathBuf>> {
+    fetch_with_policy(entry, cache_dir, FetchPolicy::Repository)
+}
+
+/// Fetch sources for an explicitly named local recipe. In addition to
+/// HTTP(S), this path accepts the local file URLs produced by
+/// `local_manifest_entry`. Repository manifests never use this policy.
+pub fn fetch_local_sources(
+    entry: &RecipeManifestEntry,
+    cache_dir: &Path,
+) -> PkgResult<Vec<PathBuf>> {
+    fetch_with_policy(entry, cache_dir, FetchPolicy::Local)
+}
+
+fn fetch_with_policy(
+    entry: &RecipeManifestEntry,
+    cache_dir: &Path,
+    policy: FetchPolicy,
+) -> PkgResult<Vec<PathBuf>> {
     std::fs::create_dir_all(cache_dir)?;
     entry
         .sources
         .iter()
-        .map(|s| fetch_one(s, cache_dir))
+        .map(|s| fetch_one(s, cache_dir, policy))
         .collect()
 }
 
-/// Fetch one URL *guarded by the manifest*: the URL must be declared in
-/// `entry.sources` (exact string match) or the request is refused (T7).
-/// This is the entry point the fetch sandbox profile's network policy
-/// is derived from.
+/// Fetch one URL *guarded by the repository manifest*: the URL must be
+/// declared in `entry.sources` (exact string match) or be refused (T7).
 pub fn fetch_url(entry: &RecipeManifestEntry, url: &str, cache_dir: &Path) -> PkgResult<PathBuf> {
     let source =
         entry
@@ -121,7 +142,7 @@ pub fn fetch_url(entry: &RecipeManifestEntry, url: &str, cache_dir: &Path) -> Pk
             .ok_or_else(|| FetchError::NotInManifest {
                 url: url.to_string(),
             })?;
-    fetch_one(source, cache_dir)
+    fetch_one(source, cache_dir, FetchPolicy::Repository)
 }
 
 /// Cache file name for a source: `<sha256>-<basename>`. Hash-first so
@@ -129,9 +150,9 @@ pub fn fetch_url(entry: &RecipeManifestEntry, url: &str, cache_dir: &Path) -> Pk
 /// the basename keeps the directory human-inspectable.
 pub fn cache_file_name(source: &Source) -> String {
     let base = source
-        .url
-        .rsplit('/')
-        .next()
+        .filename
+        .as_deref()
+        .or_else(|| source.url.rsplit('/').next())
         .filter(|b| {
             !b.is_empty()
                 && b.chars()
@@ -160,22 +181,21 @@ pub fn sha256_file(path: &Path) -> PkgResult<String> {
 }
 
 fn hex_from_digest(hasher: Sha256) -> String {
-    // `finalize` already IS the digest — hex-encode it directly.
-    // (`sha256_hex` would hash the digest a second time.)
     hex_encode(&hasher.finalize())
 }
 
-fn fetch_one(source: &Source, cache_dir: &Path) -> PkgResult<PathBuf> {
-    validate_url(&source.url)?;
+fn fetch_one(source: &Source, cache_dir: &Path, policy: FetchPolicy) -> PkgResult<PathBuf> {
+    validate_url(&source.url, policy)?;
     let dest = cache_dir.join(cache_file_name(source));
 
-    // Reuse a complete, verified cache entry.
-    if dest.exists() {
+    // A local pathname is live development input, not an immutable
+    // repository object. Re-read it so an edit without a hash update is
+    // rejected instead of being hidden by an older valid cache entry.
+    let reread_local = matches!(policy, FetchPolicy::Local) && source.url.starts_with("file://");
+    if dest.exists() && !reread_local {
         match sha256_file(&dest) {
             Ok(h) if h == source.sha256 => return Ok(dest),
             _ => {
-                // Corrupt or partial cache entry: remove and refetch.
-                // Never build from bytes that failed the pin.
                 let _ = std::fs::remove_file(&dest);
             }
         }
@@ -185,7 +205,7 @@ fn fetch_one(source: &Source, cache_dir: &Path) -> PkgResult<PathBuf> {
         "{}.part",
         dest.file_name().unwrap().to_string_lossy()
     ));
-    download_to_part(&source.url, &part)?;
+    transfer_to_part(&source.url, &part)?;
     let got = sha256_file(&part)?;
     if got != source.sha256 {
         let _ = std::fs::remove_file(&part);
@@ -200,29 +220,33 @@ fn fetch_one(source: &Source, cache_dir: &Path) -> PkgResult<PathBuf> {
     Ok(dest)
 }
 
-/// Only http(s) over TLS-terminating transports. `file://`, `ftp://`,
-/// gopher, bare IPs with userinfo tricks — all refused. The manifest is
-/// the allowlist of *origins*; this is the allowlist of *schemes*.
-fn validate_url(url: &str) -> PkgResult<()> {
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        return Err(FetchError::BadUrl(format!(
-            "{url}: only http:// and https:// origins are fetchable"
-        ))
-        .into());
+fn validate_url(url: &str, policy: FetchPolicy) -> PkgResult<()> {
+    let remote = url.starts_with("https://") || url.starts_with("http://");
+    let local = matches!(policy, FetchPolicy::Local) && url.starts_with("file://");
+    if !remote && !local {
+        let message = match policy {
+            FetchPolicy::Repository => "only http:// and https:// origins are fetchable",
+            FetchPolicy::Local => "only http://, https://, and file:// local sources are fetchable",
+        };
+        return Err(FetchError::BadUrl(format!("{url}: {message}")).into());
     }
-    if url.chars().any(|c| c.is_whitespace()) {
+    if remote && url.chars().any(|c| c.is_whitespace()) {
         return Err(FetchError::BadUrl(format!("{url}: whitespace in URL")).into());
     }
     Ok(())
 }
 
-fn download_to_part(url: &str, part: &Path) -> PkgResult<()> {
-    // A leftover .part from a crashed fetch is restarted from scratch
-    // (see module docs on why no Range resume).
-    let resp = ureq::get(url)
-        .call()
-        .map_err(|e| FetchError::Http(format!("{url}: {e}")))?;
-    let mut reader = resp.into_reader().take(MAX_SOURCE_BYTES + 1);
+fn transfer_to_part(url: &str, part: &Path) -> PkgResult<()> {
+    // A leftover .part from a crashed fetch is restarted from scratch.
+    let reader: Box<dyn Read> = if let Some(path) = url.strip_prefix("file://") {
+        Box::new(std::fs::File::open(path)?)
+    } else {
+        let resp = ureq::get(url)
+            .call()
+            .map_err(|e| FetchError::Http(format!("{url}: {e}")))?;
+        Box::new(resp.into_reader())
+    };
+    let mut reader = reader.take(MAX_SOURCE_BYTES + 1);
     let mut out = std::fs::File::create(part)?;
     let mut total: u64 = 0;
     let mut buf = vec![0u8; 256 * 1024];
@@ -242,8 +266,6 @@ fn download_to_part(url: &str, part: &Path) -> PkgResult<()> {
         }
         out.write_all(&buf[..n])?;
     }
-    // Durability before the rename: a crash between rename and flush
-    // must not resurrect an unflushed file at the final path.
     out.sync_all()?;
     Ok(())
 }
@@ -264,6 +286,7 @@ mod tests {
                 .map(|u| Source {
                     url: u.to_string(),
                     sha256: "ab".repeat(32),
+                    filename: None,
                 })
                 .collect(),
             attestations: vec![],
@@ -273,8 +296,6 @@ mod tests {
 
     #[test]
     fn refuses_urls_not_in_manifest() {
-        // T7: the dependency-confusion guard fires before any network
-        // access, so this test needs no network.
         let e = entry_with(&["https://example.com/foo-1.0.tar.gz"]);
         let dir = std::env::temp_dir();
         let err = fetch_url(&e, "https://attacker.example/foo-1.0.tar.gz", &dir).unwrap_err();
@@ -301,20 +322,27 @@ mod tests {
         let a = Source {
             url: "https://a.example/x.tar.gz".into(),
             sha256: "11".into(),
+            filename: None,
         };
         let b = Source {
             url: "https://b.example/x.tar.gz".into(),
             sha256: "22".into(),
+            filename: None,
         };
         assert_ne!(cache_file_name(&a), cache_file_name(&b));
         assert!(cache_file_name(&a).starts_with("11-"));
         assert!(cache_file_name(&a).ends_with("x.tar.gz"));
-        // Weird basenames fall back to a safe name.
         let c = Source {
             url: "https://a.example/".into(),
             sha256: "33".into(),
+            filename: None,
         };
         assert_eq!(cache_file_name(&c), "33-source");
+        let renamed = Source {
+            filename: Some("renamed.tar.gz".into()),
+            ..a
+        };
+        assert!(cache_file_name(&renamed).ends_with("renamed.tar.gz"));
     }
 
     #[test]
@@ -328,5 +356,47 @@ mod tests {
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn local_sources_are_verified_and_mismatches_are_rejected() {
+        let dir = std::env::temp_dir().join(format!("pkg-local-fetch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("input.txt");
+        std::fs::write(&input, b"hello").unwrap();
+        let entry = RecipeManifestEntry {
+            name: "local".into(),
+            version: "1".into(),
+            recipe_commit: "abc".into(),
+            committer_fingerprint: None,
+            sources: vec![Source {
+                url: format!("file://{}", input.display()),
+                sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824".into(),
+                filename: Some("payload.txt".into()),
+            }],
+            attestations: Vec::new(),
+            critical: false,
+        };
+        let cache = dir.join("cache");
+        let fetched = fetch_local_sources(&entry, &cache).unwrap();
+        assert_eq!(std::fs::read(&fetched[0]).unwrap(), b"hello");
+        assert!(fetched[0].ends_with(format!("{}-payload.txt", entry.sources[0].sha256)));
+
+        std::fs::write(&input, b"changed").unwrap();
+        let err = fetch_local_sources(&entry, &cache).unwrap_err();
+        assert!(err.to_string().contains("SHA-256 mismatch"));
+        assert_eq!(std::fs::read(&fetched[0]).unwrap(), b"hello");
+        std::fs::write(&input, b"hello").unwrap();
+
+        let mut bad = entry.clone();
+        bad.sources[0].sha256 = "00".repeat(32);
+        let err = fetch_local_sources(&bad, &cache).unwrap_err();
+        assert!(err.to_string().contains("SHA-256 mismatch"));
+        assert!(!cache.join(cache_file_name(&bad.sources[0])).exists());
+        assert!(!cache
+            .join(format!("{}.part", cache_file_name(&bad.sources[0])))
+            .exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

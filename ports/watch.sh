@@ -84,7 +84,7 @@ latest_for() {
 }
 
 # apply_bump <recipe-dir> <new-version> — fetch the new distfile, hash
-# it, and rewrite pkg-meta.toml + source.toml.
+# it, and rewrite the version plus its embedded or external source pin.
 apply_bump() {
     dir=$1 new=$2
     template=$(field url_template "$dir/watch.toml")
@@ -104,12 +104,29 @@ apply_bump() {
     fi
 
     sed -i "s/^version = .*/version = \"$new\"/" "$dir/pkg-meta.toml"
-    {
-        echo '[[source]]'
-        echo "url = \"$url\""
-        echo "sha256 = \"$sum\""
-        [ -n "$fname" ] && echo "filename = \"$fname\""
-    } > "$dir/source.toml"
+    if [ -f "$dir/source.toml" ]; then
+        {
+            echo '[[source]]'
+            echo "url = \"$url\""
+            echo "sha256 = \"$sum\""
+            [ -n "$fname" ] && echo "filename = \"$fname\""
+        } > "$dir/source.toml"
+    else
+        sed -i \
+            -e '/^\[\[source\]\]$/,/^\[/ {' \
+            -e "s|^url = .*|url = \"$url\"|" \
+            -e "s/^sha256 = .*/sha256 = \"$sum\"/" \
+            -e '/^filename = /d' \
+            -e '}' \
+            "$dir/pkg-meta.toml"
+        if [ -n "$fname" ]; then
+            sed -i \
+                -e '/^\[\[source\]\]$/,/^\[/ {' \
+                -e "/^sha256 = /a filename = \"$fname\"" \
+                -e '}' \
+                "$dir/pkg-meta.toml"
+        fi
+    fi
 }
 
 status=0

@@ -125,16 +125,18 @@ A new or changed recipe does not need a generated repository during development:
 
 ```sh
 export PKG_ROOT=/tmp/yakimo-recipe-test
-pkg fetch ./ports/app-misc/my-package
+pkg fetch ./ports/app-misc/my-package/pkg-meta.toml
 pkg build --no-cache ./ports/app-misc/my-package
-pkg install ./ports/app-misc/my-package
+pkg install --recipe-tree ./ports ./ports/app-misc/my-package/pkg-meta.toml
 ```
 
-Relative source paths in `source.toml` are resolved from the recipe directory,
-and their SHA-256 is checked on every build. Dependencies come from the normal
-recipe checkout; pass several local recipe directories to `pkg install` when
-they depend on one another. Local recipes have no repository attestations, so
-Yakimo prints a warning while retaining the hash, sandbox, and linkage checks.
+Relative source paths in `pkg-meta.toml` or legacy `source.toml` are resolved
+from the recipe directory, and their SHA-256 is checked on every build.
+`--recipe-tree` resolves dependencies from the given ports, flat, or generated
+repository tree. Alternatively, pass several local recipe directories together
+when they depend on one another. Local recipes and trees have no repository
+attestations, so Yakimo prints a warning while retaining the hash, sandbox, and
+linkage checks.
 
 ## Turning the tree into a repository
 
@@ -161,9 +163,9 @@ pkg install lua less tty-solitaire
 > The generated repo uses deterministic **test keys** — it is for
 > localhost and pre-bootstrap testing, not distribution.
 
-Adding a package: copy the closest existing recipe, set the manifest, and pin
-the source in `source.toml` (`sha256sum` the tarball). Test it by directory path
-as above. Use the four repository steps when you need to test the complete tree
+Adding a package: copy the closest existing recipe, set the manifest, and add
+an embedded `[[source]]` pin (`sha256sum` the tarball). A managed build system
+may make that the only file you need. Test the recipe by directory path as above. Use the four repository steps when you need to test the complete tree
 or publish it. Recipe rules to keep in mind: dependencies are additive-only,
 options are declared booleans exported as `PKG_OPT_<NAME>`, every source needs a
 SHA-256 pin, and the scanner cross-checks soname linkage against declared `link`
@@ -179,7 +181,7 @@ follow. What *is* automated is the bump itself: a recipe may carry a
 
 ```sh
 ports/watch.sh           # report which recipes are behind upstream
-ports/watch.sh --apply   # bump pkg-meta.toml + source.toml in place
+ports/watch.sh --apply   # bump version + embedded or legacy source pin
 ```
 
 walks the tree and reports (or applies) available updates — the same

@@ -623,6 +623,7 @@ mod tests {
                 sources: vec![Source {
                     url: "https://upstream.example/xz.tar.xz".into(),
                     sha256: "aa".into(),
+                    filename: None,
                 }],
                 attestations: vec![],
                 critical,

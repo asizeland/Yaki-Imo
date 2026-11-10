@@ -436,5 +436,189 @@ else
     fail "pkg audit"
 fi
 
+# ---------------------------------------------------------------
+# 15. Direct local recipes: no recipe checkout, signed repo, trust
+#     store, HTTP server, or sync cache in this fresh root.
+# ---------------------------------------------------------------
+LOCAL=$E2E/local-recipes
+LROOT=$E2E/local-root
+mkdir -p "$LOCAL/dep" "$LOCAL/app" "$LROOT"
+cat > "$LOCAL/dep/pkg-meta.toml" <<'EOF'
+name = "local-dep"
+version = "1"
+category = "app-misc"
+EOF
+printf ':\n' > "$LOCAL/dep/build"
+cat > "$LOCAL/dep/install" <<'EOF'
+mkdir -p "$PKGDIR/usr/share/local-dep"
+printf 'dependency\n' > "$PKGDIR/usr/share/local-dep/installed"
+EOF
+cat > "$LOCAL/app/pkg-meta.toml" <<'EOF'
+name = "local-app"
+version = "1"
+category = "app-misc"
+[dependencies]
+runtime = ["local-dep"]
+EOF
+printf ':\n' > "$LOCAL/app/build"
+printf 'first local payload\n' > "$LOCAL/app/payload.txt"
+sum=$(sha256sum "$LOCAL/app/payload.txt" | awk '{print $1}')
+cat > "$LOCAL/app/source.toml" <<EOF
+[[source]]
+url = "./payload.txt"
+sha256 = "$sum"
+filename = "renamed.txt"
+EOF
+cat > "$LOCAL/app/install" <<'EOF'
+mkdir -p "$PKGDIR/usr/share/local-app"
+cp renamed.txt "$PKGDIR/usr/share/local-app/payload"
+EOF
+export PKG_ROOT=$LROOT
+"$PKG" install -y "$LOCAL/dep" "$LOCAL/app" >"$E2E/local-install.log" 2>&1 \
+    || { cat "$E2E/local-install.log" >&2; fail "direct local install"; }
+[ "$(cat "$LROOT/usr/share/local-app/payload")" = "first local payload" ] \
+    || fail "relative local source with staged filename"
+[ -f "$LROOT/usr/share/local-dep/installed" ] || fail "local dependency installed"
+[ ! -e "$LROOT/var/cache/pkg/index/recipe-manifest.toml" ] \
+    || fail "local install unexpectedly required a synced manifest"
+"$PKG" db check >/dev/null || fail "local install database consistency"
+pass "pkg install <recipe-path> resolves local dependencies without a repository"
+
+printf 'second local payload\n' > "$LOCAL/app/payload.txt"
+sum=$(sha256sum "$LOCAL/app/payload.txt" | awk '{print $1}')
+sed -i "s/^sha256 = .*/sha256 = \"$sum\"/" "$LOCAL/app/source.toml"
+"$PKG" build --no-cache "$LOCAL/app" >"$E2E/local-rebuild.log" 2>&1 \
+    || { cat "$E2E/local-rebuild.log" >&2; fail "direct local rebuild"; }
+[ "$(cat "$LROOT/usr/share/local-app/payload")" = "second local payload" ] \
+    || fail "edited local recipe rebuilt payload"
+pass "pkg build --no-cache <recipe-path> rebuilds an edited local source pin"
+
+printf 'unverified payload\n' > "$LOCAL/app/payload.txt"
+if "$PKG" build --no-cache "$LOCAL/app" >"$E2E/local-mismatch.log" 2>&1; then
+    fail "local source hash mismatch built successfully"
+fi
+grep -q 'SHA-256 mismatch' "$E2E/local-mismatch.log" \
+    || fail "local source mismatch diagnostic"
+[ "$(cat "$LROOT/usr/share/local-app/payload")" = "second local payload" ] \
+    || fail "failed local build changed the installed package"
+pass "local source hash mismatch is rejected without changing the installed package"
+
+# A single pkg-meta.toml can provide the source and select a managed Make
+# build. No source.toml, build, or install files exist for this recipe.
+MANAGED=$LOCAL/managed
+mkdir -p "$MANAGED" "$E2E/managed-src/managed-1"
+printf 'managed payload\n' > "$E2E/managed-src/managed-1/payload.txt"
+cat > "$E2E/managed-src/managed-1/Makefile" <<'EOF'
+all:
+	cp payload.txt managed.txt
+install:
+	mkdir -p "$(DESTDIR)/usr/share/managed"
+	cp managed.txt "$(DESTDIR)/usr/share/managed/payload"
+EOF
+tar -C "$E2E/managed-src" -czf "$MANAGED/managed-1.tar.gz" managed-1
+sum=$(sha256sum "$MANAGED/managed-1.tar.gz" | awk '{print $1}')
+cat > "$MANAGED/pkg-meta.toml" <<EOF
+name = "managed-local"
+version = "1"
+category = "app-misc"
+
+[[source]]
+url = "./managed-1.tar.gz"
+sha256 = "$sum"
+
+[build]
+system = "make"
+EOF
+"$PKG" install -y "$MANAGED" >"$E2E/managed-local.log" 2>&1 \
+    || { cat "$E2E/managed-local.log" >&2; fail "single-file managed recipe"; }
+[ "$(cat "$LROOT/usr/share/managed/payload")" = "managed payload" ] \
+    || fail "managed Make recipe installed payload"
+[ ! -e "$MANAGED/source.toml" ] && [ ! -e "$MANAGED/build" ] && [ ! -e "$MANAGED/install" ] \
+    || fail "managed recipe unexpectedly used external recipe files"
+pass "single-file recipe builds from a managed Make declaration"
+
+# Custom install logic can be inline when no stock build system applies.
+INLINE=$LOCAL/inline
+mkdir -p "$INLINE"
+cat > "$INLINE/pkg-meta.toml" <<'EOF'
+name = "inline-local"
+version = "1"
+category = "app-misc"
+
+[build]
+system = "none"
+
+[scripts]
+install = '''
+mkdir -p "$PKGDIR/usr/share/inline-local"
+printf 'inline payload\n' > "$PKGDIR/usr/share/inline-local/payload"
+'''
+EOF
+"$PKG" install -y "$INLINE" >/dev/null 2>&1 || fail "inline script recipe"
+[ "$(cat "$LROOT/usr/share/inline-local/payload")" = "inline payload" ] \
+    || fail "inline install script payload"
+pass "single-file recipe supports an inline custom phase"
+
+# A local tree supplies dependencies for an external manifest-file target.
+# No repository, trust store, sync, or installed recipe checkout is involved.
+TREE=$LOCAL/tree
+TREE_APP=$LOCAL/tree-app
+mkdir -p "$TREE/sys-libs/tree-dep" "$TREE_APP"
+cat > "$TREE/sys-libs/tree-dep/pkg-meta.toml" <<'EOF'
+name = "tree-dep"
+version = "1"
+category = "sys-libs"
+[build]
+system = "none"
+[scripts]
+install = '''
+mkdir -p "$PKGDIR/usr/share/tree-dep"
+printf 'tree dependency\n' > "$PKGDIR/usr/share/tree-dep/installed"
+'''
+EOF
+cat > "$TREE_APP/pkg-meta.toml" <<'EOF'
+name = "tree-app"
+version = "1"
+category = "app-misc"
+[dependencies]
+runtime = ["tree-dep"]
+[build]
+system = "none"
+[scripts]
+install = '''
+mkdir -p "$PKGDIR/usr/share/tree-app"
+printf 'tree application\n' > "$PKGDIR/usr/share/tree-app/installed"
+'''
+EOF
+"$PKG" install -y --recipe-tree "$TREE" "$TREE_APP/pkg-meta.toml" \
+    >"$E2E/local-tree.log" 2>&1 \
+    || { cat "$E2E/local-tree.log" >&2; fail "manifest target with local recipe tree"; }
+[ -f "$LROOT/usr/share/tree-dep/installed" ] && [ -f "$LROOT/usr/share/tree-app/installed" ] \
+    || fail "local tree dependency payloads"
+[ ! -e "$LROOT/var/lib/pkg/recipes" ] && [ ! -e "$LROOT/var/cache/pkg/index/recipe-manifest.toml" ] \
+    || fail "local tree unexpectedly required repository state"
+"$PKG" db check >/dev/null || fail "local tree database consistency"
+pass "pkg install --recipe-tree resolves dependencies for a pkg-meta.toml target"
+
+# A flat local checkout also permits installing a package by manifest name.
+FLAT=$LOCAL/flat-tree
+mkdir -p "$FLAT/flat-local"
+cat > "$FLAT/flat-local/pkg-meta.toml" <<'EOF'
+name = "flat-local"
+version = "1"
+category = "app-misc"
+[build]
+system = "none"
+[scripts]
+install = '''
+mkdir -p "$PKGDIR/usr/share/flat-local"
+printf 'flat tree\n' > "$PKGDIR/usr/share/flat-local/installed"
+'''
+EOF
+"$PKG" install -y --recipe-tree "$FLAT" flat-local >"$E2E/flat-tree.log" 2>&1 \
+    || { cat "$E2E/flat-tree.log" >&2; fail "named package from flat local tree"; }
+[ -f "$LROOT/usr/share/flat-local/installed" ] || fail "flat local tree payload"
+pass "pkg install --recipe-tree accepts a flat tree and a package name"
+
 echo
 echo "ALL E2E CHECKS PASSED"

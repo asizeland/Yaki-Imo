@@ -2,11 +2,11 @@
 
 This guide is a map of the Yakimo package-manager source tree. It is for
 contributors changing the Rust implementation or the recipes, not for a first
-installation. Start with `README.md` for project scope, `user-guide.md` for
-command and recipe usage, and `docs/technical-manual.md` for detailed runtime
+installation. Start with `../README.md` for project scope, `user-guide.md` for
+command and recipe usage, and `technical-manual.md` for detailed runtime
 semantics and known limitations.
 
-`SPEC.md` is the workspace's interface contract and target design. The Rust
+`SPEC.md` in this directory is the workspace's interface contract and target design. The Rust
 code is the authority for what currently works; the consolidated specification
 and comments sometimes describe later milestones. When changing behavior,
 check all three and make any intentional contract change explicit.
@@ -77,7 +77,7 @@ inputs, and calls the subsystem APIs. It deliberately does not depend on
 | `pkg-sandbox` | Bubblewrap policy and process execution; best-effort cgroup v2 controls | `profile.rs`, `run.rs`, `cgroups.rs` |
 | `pkg-scanner` | ELF parsing, link interfaces, post-build verification, and diagnostic heuristics | `elf.rs`, `gate.rs`, `check.rs`, `heuristic.rs` |
 | `pkg-repo` | Signed metadata, trust roles, mirror sync/cache, recipe manifests, and source downloads | `trust.rs`, `sync.rs`, `recipe_manifest.rs`, `fetch.rs` |
-| `pkg-build` | Build plans and scheduling, recipes, local artifact cache, cascades, activation, reproducibility, glibc, and DKMS | `orchestrator.rs`, `recipe.rs`, `cache.rs`, `cascade.rs`, `staging.rs`, `repro.rs`, `glibc.rs`, `dkms.rs` |
+| `pkg-build` | Build plans and scheduling, managed and custom recipes, local artifact cache, cascades, activation, reproducibility, glibc, and DKMS | `orchestrator.rs`, `recipe.rs`, `build_system.rs`, `cache.rs`, `cascade.rs`, `staging.rs`, `repro.rs`, `glibc.rs`, `dkms.rs` |
 | `pkg-audit` | Advisory matching, deleted-library process scans, and supply-chain findings | `advisories.rs`, `inode_scan.rs`, `supply_chain.rs` |
 | `pkg-init` | Dependency-free, musl-static boot-time glibc exchange and rollback | `src/main.rs` |
 | `pkg-cli` | Clap definitions and all command dispatch/orchestration | `cli.rs`, `main.rs`, `commands.rs`, `options.rs`, `preview.rs` |
@@ -128,13 +128,18 @@ live FHS symlinks, queryable DB state, audit/history/undo surfaces
 
 The usual resolution universe is the **local recipe checkout**, not a direct
 query against remote package metadata. `run_transaction` also accepts recipe
-paths: `register_local_recipe` loads them and `graph_from_recipes` overlays them
-on same-name checkout entries. The overlay map flows through option expansion
-and `build_plan`, so every stage uses the selected files.
+directories or manifest-file paths: `local_recipe_dir` normalizes the target,
+`register_local_recipe` loads it, and `graph_from_recipes` overlays it on a
+same-name checkout entry. `--recipe-tree` uses `discover_local_recipe_dirs` and
+`load_local_recipe_tree` to add ports, flat, or generated-repository layouts to
+that map. Explicit targets override tree entries; duplicate tree names fail.
+The overlay flows through option expansion and `build_plan`, so every stage uses
+the selected files.
 
 For repository recipes, the signed recipe-manifest entry is consulted again when
-sources are fetched. For local paths, `Recipe::load_local` carries an unattested
-entry on the `Recipe`; an all-local plan skips the repository manifest entirely.
+sources are fetched. For local paths and tree entries, `Recipe::load_local`
+carries an unattested entry on the `Recipe`; an all-local plan skips the
+repository manifest entirely.
 The signed index supplies package/version and recipe-commit metadata, while the
 current sync implementation does not itself materialize the recipe checkout or
 `profiles.toml`; full-tree development flows provision those separately,
@@ -174,6 +179,11 @@ Important methods are `dep_set`, `build_dep_set`, `opt_tag`, `abi_opt_tag`,
 `options_export_env`, `filter_selection`, and `dependency_edges`.
 `ManifestOption` makes options additive: enabled options can add dependencies,
 but cannot remove base dependencies or express option-to-option rules.
+`SourcePin` represents an embedded `[[source]]`; `PhaseScripts` holds optional
+inline `[scripts]`; and `BuildSystem` distinguishes managed Autotools, Meson,
+CMake, and Make builds from `none` and `custom`. The manifest also exposes
+`configure_args` and `source_dir`, rejecting managed-only fields on custom or
+binary builds and configure arguments on systems that do not consume them.
 
 `pkg-core/src/virtual.rs` defines `Dependency`, `VersionConstraint`, and
 `VirtualName`. Dependencies can be concrete packages, virtuals, or `AnyOf`
@@ -307,10 +317,13 @@ caching it, and advances the persisted index floor only after the index cache
 write succeeds. `sync_status` reads local metadata without networking.
 
 `recipe_manifest.rs` maps name/version to `RecipeManifestEntry`: recipe commit,
-source pins, attestations, and criticality. It also owns the shared recipe-file
-list, content-derived `recipe_commit`, `source.toml` parser, and
-`local_manifest_entry` constructor used for explicit local recipe directories.
-`Source::filename` preserves an optional staged basename.
+source pins, attestations, and criticality. It owns the shared recipe-file list,
+content-derived `recipe_commit`, legacy `source.toml` parser, and embedded-versus-
+external source selection; duplicate source definitions are errors. `SourcePin`
+lives in pkg-core so parsing and repository generation share one manifest model.
+`local_manifest_entry` converts the selected pins into explicit-local source
+authorization, resolving relative paths from the recipe directory. The repository
+`Source` type preserves an optional staged basename.
 `verify_attestations` checks the reviewer signatures and critical-set
 independent-review count. Repository fixtures are executable examples:
 
@@ -408,9 +421,23 @@ derives its content identity, and attaches its local source entry.
 4. pkg-config prefix relocation and libtool `.la` removal;
 5. post-build ELF verification.
 
-Prepare and check are optional. Install is mandatory. Build is mandatory except
-for `[build] binary = true` vendor-blob repackaging. Scratch trees are not
-incrementally reused; artifact/compiler caches are the reuse mechanisms.
+`build_system.rs::generated_phase` supplies the conventional build/install
+commands for `autotools`, `meson`, `cmake`, and `make`, including shell-safe
+quoting of recipe-declared `configure_args`. Phase selection in `recipe.rs` is
+external file, then inline `[scripts]`, then generated content. External and
+inline definitions of the same phase are rejected by `Recipe::load`; either
+custom form deliberately replaces the generated phase. Prepare and check are
+optional. Every recipe needs a custom or generated install phase; a custom
+non-binary recipe also needs build. Scratch trees are not incrementally reused;
+artifact/compiler caches are the reuse mechanisms.
+
+For a managed system, `prepare_managed_source` unpacks the first recognized tar
+archive with the sandboxed `tar` tool. It selects the recipe's relative
+`source_dir`, the single extracted directory, or scratch itself when there is no
+recognized archive; ambiguous directory layouts and missing/escaping configured
+paths are errors. `materialize_phase` prefixes every managed phase, including
+custom overrides, with a quoted `cd` into that directory. `none` and `custom`
+leave source materialization and working-directory selection to the recipe.
 
 `build_env` is the environment contract: `PKGDIR`, `HOME`, `MAKEFLAGS`, fixed
 `SOURCE_DATE_EPOCH`, `LC_ALL`, every declared `PKG_OPT_<NAME>`, baseline
@@ -600,27 +627,28 @@ Current CLI gaps worth recognizing before extending them: `--background` only
 writes pending names and does not start a supervisor; `env create` currently
 links already installed same-name packages rather than solving/building missing
 ones; `bootstrap` is not a full bootstrap installer; and full multilib
-co-selection is not implemented. `docs/technical-manual.md` tracks these and
-other behavioral limitations in more detail.
+co-selection is not implemented. `technical-manual.md` tracks these and other
+behavioral limitations in more detail.
 
 ## 13. Ports tree and repository development
 
-The source tree's recipes live at `ports/<category>/<package>/`. A typical
-recipe contains:
+The source tree's recipes live at `ports/<category>/<package>/`. A managed
+single-file recipe contains:
 
 ```text
-pkg-meta.toml    required PackageManifest input
-source.toml      [[source]] entries with url, sha256, optional filename
-prepare          optional sandboxed phase
-build            required except [build] binary = true
-check            optional sandboxed phase
-install          required; writes the package image under $PKGDIR
+pkg-meta.toml    identity, dependencies, [[source]], [build], optional [scripts]
 watch.toml       optional upstream-update policy for ports/watch.sh
 ```
 
+Custom and legacy recipes may additionally contain `source.toml` and external
+`prepare`, `build`, `check`, or `install` files. Sources cannot be declared in
+both manifest and legacy file, and a phase cannot be both inline and external.
+Custom source builds need build; all recipes need generated or custom install.
+
 Good small examples are:
 
-- `ports/app-shells/bash/`: a conventional source build and install;
+- `ports/sys-apps/sed/pkg-meta.toml`: a single-file managed Autotools build;
+- `ports/app-shells/bash/`: a conventional custom source build and install;
 - `ports/dev-lang/lua/pkg-meta.toml`: option-driven `add_deps`;
 - `ports/dev-db/sqlite/pkg-meta.toml`: `abi_affecting = false`;
 - `ports/net-im/discord/`: vendor-blob repackaging;
