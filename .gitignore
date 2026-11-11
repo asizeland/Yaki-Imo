@@ -3,6 +3,7 @@ old/
 docs/*
 !docs/technical-manual.md
 !docs/developers-manual.md
+!docs/future-items.md
 target/
 live/
 sandbox/

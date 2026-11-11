@@ -759,8 +759,9 @@ $LOADER "$R/patch" --version | head -1 | grep -q "GNU patch 2\.8" \
     || fail "patch runs"
 $LOADER "$R/m4" --version | head -1 | grep -q "GNU M4) 1\.4\.20" \
     || fail "m4 runs"
-$LOADER "$R/bison" --version | head -1 | grep -q "GNU Bison) 3\.8\.2" \
-    || fail "bison runs"
+"$REAL_BWRAP" --unshare-all --bind "$ROOT" / --proc /proc --dev /dev \
+    --setenv PATH /usr/bin:/bin -- /usr/bin/bison --version | head -1 | grep -q "GNU Bison) 3\.8\.2" \
+    || fail "bison runs inside the packaged root"
 $LOADER "$R/flex" --version | head -1 | grep -q "flex 2\.6\.4" \
     || fail "flex runs"
 $LOADER "$R/gperf" --version | head -1 | grep -q "GNU gperf 3\.3" \
