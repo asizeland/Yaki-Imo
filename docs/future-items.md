@@ -57,3 +57,16 @@ The current build system could probably benefit from a declarative hook system, 
 In my experience different user have different preferences for the exact kernel they are using (regardless of benefits), therefore I would like a few versions of the kernel packaged. LTS, latest, RC (release candidate), Hardened kernel and CachyOS kernel.
 
 Furthermore, regarding this, I wonder if it would be possible in Linux to implement something similar to how FreeBSD allows you to boot several different kernels, I understand it is different in nature as a monolithic project. However perhaps something similar is possible via the grub2 or Limine bootloaders.
+
+## Package recipe naming convention. 
+
+Considering the previously mentioned patch system from the debug shell, it would be very convenient to change the naming conventions of the actual files to something along the lines:
+```
+foobar.pkg
+foobar.watch
+```
+This way any patched files can simply appear as:
+```
+foobar-patch.pkg
+foobar-patch.watch
+```
