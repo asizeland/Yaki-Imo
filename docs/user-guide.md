@@ -203,6 +203,49 @@ it and run it later:
 
 ---
 
+### X11 and GTK3
+
+The recipe tree includes Xorg, libinput, `startx` and `xauth`, xterm, a
+software OpenGL fallback, and GTK 3. Install the initial set with:
+
+```
+# pkg install xinit xf86-input-libinput xterm gtk3
+```
+
+Start an X session as the user who should own it:
+
+```
+$ startx
+```
+
+The NVIDIA recipe installs its Xorg driver and GLX extension. Mesa provides
+the `softpipe` software renderer when hardware acceleration is unavailable.
+This first set does not include a desktop environment, display manager,
+Wayland, JPEG/TIFF image loaders, or hardware Mesa drivers.
+
+Make sure `/etc/hosts` contains the machine's hostname next to its local
+address. `xauth` uses that name when it creates the session's access cookie.
+For example:
+
+```
+127.0.0.1 localhost my-machine
+::1 localhost ip6-localhost
+```
+
+After changing fonts or MIME data, update their caches as root:
+
+```
+# fc-cache -f
+# update-mime-database /usr/share/mime
+```
+
+The `e2e/desktop.sh` test runs the complete path without a physical display:
+it compiles a GTK application and opens it and xterm under Xvfb through
+`startx`. This checks the installed root; it does not test a real monitor,
+keyboard, or GPU.
+
+---
+
 ## 4. Build options (similar to Gentoo's USE flags)
 
 Build options control optional package features. Each recipe declares its

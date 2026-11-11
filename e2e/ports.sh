@@ -111,7 +111,7 @@ pass "recipes installed into \$PKG_ROOT"
 for tool in env sh bash ar ranlib make tar gzip xz sed grep \
             awk gawk cut diff cmp find xargs uname install cp mv mkdir ls pwd \
             ln rm cat chmod touch basename dirname sort uniq wc tr head \
-            tail ld as nm readelf objcopy strip sleep date dd expr printf \
+            tail cpp ld as nm readelf objcopy strip sleep date dd expr printf \
             test comm m4 od id bison python3 echo true false readlink \
             msgfmt objdump perl rmdir mktemp flex gperf bzip2 depmod; do
     # command -v reports shell builtins (echo, test, printf) as bare
@@ -930,9 +930,44 @@ done
     || fail "NVIDIA EGL vendor manifest installed"
 $LOADER "$R/nvidia-smi" --help | grep -q "v595\.112\.07" \
     || fail "nvidia-smi runs without querying a GPU"
-pass "NVIDIA: four kernel modules, GSP firmware, Vulkan/EGL, and nvidia-smi"
+[ -s "$ROOT/usr/lib/xorg/modules/drivers/nvidia_drv.so" ] \
+    || fail "NVIDIA Xorg driver installed"
+[ -L "$ROOT/usr/lib/xorg/modules/extensions/libglxserver_nvidia.so" ] \
+    || fail "NVIDIA GLX server extension installed"
+pass "NVIDIA: four kernel modules, GSP firmware, Vulkan/EGL/Xorg, and nvidia-smi"
 
 "$PKG" db check >/dev/null 2>&1 || fail "db check after hardware packages"
 pass "db check clean after hardware packages"
+
+# ---------------------------------------------------------------
+# 14. Desktop foundation: X11, the libinput driver, session tools,
+#     Mesa's software fallback, and GTK3. This is a real session under
+#     Xvfb, not a physical-GPU test.
+# ---------------------------------------------------------------
+"$PKG" install -y xinit xf86-input-libinput xterm gtk3 \
+    >"$E2E/desktop.log" 2>&1 \
+    || { tail -50 "$E2E/desktop.log" >&2; fail "desktop package install"; }
+[ -x "$ROOT/usr/bin/Xvfb" ] || fail "Xvfb installed"
+[ -s "$ROOT/usr/lib/xorg/modules/input/libinput_drv.so" ] \
+    || fail "Xorg libinput driver installed"
+[ -s "$ROOT/usr/include/xorg/libinput-properties.h" ] \
+    || fail "libinput SDK header installed in /usr, not /pkg/deps"
+[ -s "$ROOT/usr/lib/dri/swrast_dri.so" ] || fail "Mesa software DRI driver"
+[ -e "$RLIBS/libgtk-3.so.0" ] || fail "GTK3 library activated"
+pass "X11/GTK packages: Xorg/Xvfb, libinput, Mesa softpipe, and GTK3 installed"
+
+DESKTOP_OUT=$(BWRAP="$REAL_BWRAP" sh e2e/desktop.sh "$ROOT" 2>&1) \
+    || { echo "$DESKTOP_OUT" >&2; fail "X11/GTK headless session"; }
+echo "$DESKTOP_OUT" | grep -q "xterm-ok" || fail "xterm under startx/Xvfb"
+echo "$DESKTOP_OUT" | grep -q "GTK window created and event loop completed" \
+    || fail "GTK window under startx/Xvfb"
+if echo "$DESKTOP_OUT" | grep -q "bad display name"; then
+    echo "$DESKTOP_OUT" >&2
+    fail "xauth display setup"
+fi
+pass "startx + xauth + Xvfb: xterm and a compiled GTK window run"
+
+"$PKG" db check >/dev/null 2>&1 || fail "db check after desktop packages"
+pass "db check clean after desktop packages"
 echo
 echo "PORTS E2E PASSED"

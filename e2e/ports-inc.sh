@@ -54,7 +54,7 @@ TOOLBIN=$E2E/toolbin
 for tool in env sh bash ar ranlib make tar gzip xz sed grep \
             awk gawk cut diff cmp find xargs uname install cp mv mkdir ls pwd \
             ln rm cat chmod touch basename dirname sort uniq wc tr head \
-            tail ld as nm readelf objcopy strip sleep date dd expr printf \
+            tail cpp ld as nm readelf objcopy strip sleep date dd expr printf \
             test comm m4 od id bison python3 echo true false readlink \
             msgfmt objdump perl rmdir mktemp flex gperf bzip2; do
     p=$(command -v "$tool" 2>/dev/null || true)
