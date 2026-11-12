@@ -1,5 +1,0 @@
-type = "release-regex"
-url = "https://ftpmirror.gnu.org/gnu/ncurses/"
-regex = 'ncurses-([0-9.]+)\.tar\.gz'
-stable_regex = '^[0-9]+\.[0-9]+$'
-url_template = "https://ftpmirror.gnu.org/gnu/ncurses/ncurses-{version}.tar.gz"

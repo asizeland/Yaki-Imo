@@ -11,4 +11,4 @@ Dockerfile
 !docs/.~lock.NTBD_Handbook.odt#
 !docs/user-guide.md
 !docs/NTBD_Handbook.odt
-ports/*
+ports/

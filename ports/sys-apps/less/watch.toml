@@ -1,6 +1,0 @@
-# The greenwoodsoftware.com index page doesn't link distfiles; the GNU
-# mirror's directory listing does.
-type = "release-regex"
-url = "https://ftpmirror.gnu.org/gnu/less/"
-regex = 'less-([0-9]+)\.tar\.gz'
-url_template = "https://www.greenwoodsoftware.com/less/less-{version}.tar.gz"

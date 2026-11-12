@@ -1,4 +1,0 @@
-type = "release-regex"
-url = "https://ftpmirror.gnu.org/gnu/nettle/"
-regex = 'nettle-(3\.[0-9]+\.[0-9]+)\.tar\.gz'
-url_template = "https://ftpmirror.gnu.org/gnu/nettle/nettle-{version}.tar.gz"
