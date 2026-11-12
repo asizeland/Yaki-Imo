@@ -19,13 +19,20 @@
 //!   wrapper (§7.9.6), and post-activation provenance/link-interface
 //!   recording (§9.2.1/§7.7.2) in the orchestrator.
 //!
+//! ## v3 changes
+//!
+//! - `debug_shell` provides retained, non-canonical interactive workspaces;
+//!   `hooks` provides typed, target-root maintenance with persistent retry state.
+//!
 //! Public modules are re-exported flat (`pub use x::*`).
 
 pub mod build_system;
 pub mod cache;
 pub mod cascade;
+pub mod debug_shell;
 pub mod dkms;
 pub mod glibc;
+pub mod hooks;
 pub mod orchestrator;
 pub mod recipe;
 pub mod repro;

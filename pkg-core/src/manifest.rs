@@ -97,26 +97,14 @@ use crate::{
 // Category
 // ---------------------------------------------------------------------
 
-/// The package's category. Only a handful of categories carry special
-/// meaning to the package manager itself — they select which hook sandbox
-/// profile applies when a package declares `post_install` or similar
-/// hooks (§7.2.1). Everything else exists purely for organization, the
-/// same way Gentoo's `dev-libs`/`app-editors`/`games-arcade` categories do
-/// without the package manager caring which is which.
+/// The package's organizational category. Typed hook operations use their own
+/// centrally defined sandbox permissions; categories do not grant them.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Category {
-    /// Hook sandbox: "None" profile — hooks rejected outright (§7.2.1).
     DevLibs,
-    /// Hook sandbox: "None" profile.
     SysLibs,
-    /// Hook sandbox: "None" profile.
     MediaLibs,
-    /// Hook sandbox: "System" profile — write access to `/boot`,
-    /// `/usr/share`, `/var/cache`; read-only `/etc` (§7.2.1).
     SysKernel,
-    /// Any category the package manager doesn't branch on. `pkg search`
-    /// and organizational tooling can still use these; the sandbox logic
-    /// just doesn't look at them.
     Other(String),
 }
 
@@ -324,6 +312,57 @@ impl BuildSystem {
 }
 
 // ---------------------------------------------------------------------
+// HookOperation
+// ---------------------------------------------------------------------
+
+/// A shared maintenance operation declared by `[hooks] operations`.
+///
+/// `ALL` is the canonical execution and storage order. Manifest entries are
+/// deduplicated and returned in this order, independent of declaration order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum HookOperation {
+    Ldconfig,
+    FontCache,
+    MimeCache,
+    IconCache,
+}
+
+impl HookOperation {
+    pub const ALL: [Self; 4] = [
+        Self::Ldconfig,
+        Self::FontCache,
+        Self::MimeCache,
+        Self::IconCache,
+    ];
+}
+
+impl fmt::Display for HookOperation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::Ldconfig => "ldconfig",
+            Self::FontCache => "font-cache",
+            Self::MimeCache => "mime-cache",
+            Self::IconCache => "icon-cache",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl std::str::FromStr for HookOperation {
+    type Err = ManifestError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "ldconfig" => Ok(Self::Ldconfig),
+            "font-cache" => Ok(Self::FontCache),
+            "mime-cache" => Ok(Self::MimeCache),
+            "icon-cache" => Ok(Self::IconCache),
+            other => Err(ManifestError::UnknownHookOperation(other.to_string())),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
 // PackageManifest
 // ---------------------------------------------------------------------
 
@@ -350,6 +389,8 @@ pub struct PackageManifest {
     pub build_system: BuildSystem,
     pub source_dir: Option<String>,
     pub configure_args: Vec<String>,
+    /// Typed `[hooks] operations`, deduplicated in [`HookOperation::ALL`] order.
+    pub hooks: Vec<HookOperation>,
     /// Declared options from `[options.<name>]` tables (v3), keyed by
     /// option name. A `BTreeMap` so every accessor that iterates it
     /// (`dep_set`, `opt_tag`, `options_export_env`) is deterministic.
@@ -401,6 +442,17 @@ impl PackageManifest {
             .map_err(|e: crate::VersionParseError| ManifestError::InvalidVersion(e.to_string()))?;
 
         let category = Category::from_name(&raw.category);
+
+        let requested_hooks = raw
+            .hooks
+            .operations
+            .iter()
+            .map(|operation| operation.parse::<HookOperation>())
+            .collect::<Result<Vec<_>, _>>()?;
+        let hooks = HookOperation::ALL
+            .into_iter()
+            .filter(|operation| requested_hooks.contains(operation))
+            .collect();
 
         let provides = raw
             .provides
@@ -510,6 +562,7 @@ impl PackageManifest {
             build_system: raw.build.system,
             source_dir: raw.build.source_dir,
             configure_args: raw.build.configure_args,
+            hooks,
             options,
             compiler_cache: raw.build.compiler_cache,
             critical: raw.build.critical,
@@ -779,6 +832,8 @@ struct RawManifest {
     source: Vec<SourcePin>,
     #[serde(default)]
     scripts: PhaseScripts,
+    #[serde(default)]
+    hooks: RawHooks,
     /// v3: `[options.<name>]` tables. Keyed by option name; each value is
     /// validated for shape by `RawOption`'s `deny_unknown_fields` and its
     /// dependency expressions by `parse_dependency_expr` during the
@@ -800,6 +855,13 @@ struct RawManifest {
     /// presence/absence; there's no need to also say so separately.
     #[serde(default)]
     dkms: Option<RawDkms>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHooks {
+    #[serde(default)]
+    operations: Vec<String>,
 }
 
 /// `name` and `version` are required (not `Option`) — if `[dkms]` appears
@@ -1023,6 +1085,7 @@ pub enum ManifestError {
     InvalidVirtual(String),
     InvalidVersion(String),
     InvalidBuild(String),
+    UnknownHookOperation(String),
     /// A selection passed to `dep_set`/`opt_tag`/`options_export_env`
     /// named an option the manifest never declared in `[options.<name>]`
     /// (v3). A hard error rather than a silent no-op: an unrecognized
@@ -1039,6 +1102,9 @@ impl fmt::Display for ManifestError {
             ManifestError::InvalidVirtual(msg) => write!(f, "invalid virtual dependency: {msg}"),
             ManifestError::InvalidVersion(msg) => write!(f, "invalid version in dependency: {msg}"),
             ManifestError::InvalidBuild(msg) => write!(f, "invalid build declaration: {msg}"),
+            ManifestError::UnknownHookOperation(operation) => {
+                write!(f, "unknown hook operation: '{operation}'")
+            }
             ManifestError::UnknownOption(name) => {
                 write!(f, "unknown option in selection: '{name}'")
             }
@@ -1081,7 +1147,66 @@ mod tests {
         assert!(!m.multilib);
         assert!(m.provides.is_empty());
         assert!(m.runtime_deps.is_empty());
+        assert!(m.hooks.is_empty());
         assert!(m.dkms.is_none());
+    }
+
+    #[test]
+    fn raw_manifest_sidecar_parses_hooks_in_canonical_order_without_duplicates() {
+        let raw_toml = r#"
+            name = "desktop-files"
+            version = "1.0"
+            category = "app-misc"
+
+            [hooks]
+            operations = ["icon-cache", "ldconfig", "font-cache", "icon-cache", "mime-cache", "ldconfig"]
+        "#;
+        let manifest = PackageManifest::from_toml_str(raw_toml).unwrap();
+        assert_eq!(manifest.hooks, HookOperation::ALL);
+    }
+
+    #[test]
+    fn hook_operation_display_and_fromstr_round_trip() {
+        for operation in HookOperation::ALL {
+            assert_eq!(operation.to_string().parse(), Ok(operation));
+        }
+        assert_eq!(
+            "font_cache".parse::<HookOperation>(),
+            Err(ManifestError::UnknownHookOperation(
+                "font_cache".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_hook_operation() {
+        let raw_toml = r#"
+            name = "example"
+            version = "1"
+            category = "app-misc"
+
+            [hooks]
+            operations = ["ldconfig", "update-bootloader"]
+        "#;
+        let err = PackageManifest::from_toml_str(raw_toml).unwrap_err();
+        assert!(matches!(err, PkgError::Parse(_)));
+        assert!(err.to_string().contains("update-bootloader"));
+    }
+
+    #[test]
+    fn rejects_unknown_hooks_field() {
+        let raw_toml = r#"
+            name = "example"
+            version = "1"
+            category = "app-misc"
+
+            [hooks]
+            operations = ["ldconfig"]
+            post_install = "arbitrary shell"
+        "#;
+        let err = PackageManifest::from_toml_str(raw_toml).unwrap_err();
+        assert!(matches!(err, PkgError::Parse(_)));
+        assert!(err.to_string().contains("post_install"));
     }
 
     #[test]

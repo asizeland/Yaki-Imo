@@ -41,11 +41,11 @@
 //!   files left stale ones. `activate_built_package` now detects the
 //!   same-identity case and applies `plan_resync_ops`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pkg_core::{Arch, Identity, PkgError, PkgResult, Track};
+use pkg_core::{Arch, HookOperation, Identity, PkgError, PkgResult, Track};
 use pkg_db::queries;
 use pkg_db::schema::{GenerationKind, GenerationPackageRow, GenerationRow, SCHEMA_VERSION};
 use rusqlite::{Connection, OptionalExtension};
@@ -580,6 +580,17 @@ where
         )));
     }
 
+    let mut hooks = BTreeSet::new();
+    for identity in activate
+        .iter()
+        .chain(deactivate.iter().map(|(identity, _)| identity))
+    {
+        let root = store_root_for(identity.arch, store_roots)?;
+        hooks.extend(crate::hooks::hooks_in_store(
+            &root.join(identity.store_dir_name()),
+        )?);
+    }
+
     // (2) Symlink swaps.
     let mut ops = Vec::new();
     for identity in &activate {
@@ -697,6 +708,7 @@ where
                 deactivated: deactivate.iter().map(|(i, _)| i.store_dir_name()).collect(),
                 symlink_ops: ops.len(),
                 generation_id: gen_id,
+                hooks,
             })
         }
         Err(e) => {
@@ -712,6 +724,7 @@ pub struct ActivationReport {
     pub deactivated: Vec<String>,
     pub symlink_ops: usize,
     pub generation_id: i64,
+    pub hooks: BTreeSet<HookOperation>,
 }
 
 /// Per-package activation used by the orchestrator for a freshly built
@@ -724,7 +737,7 @@ pub fn activate_built_package(
     store_roots: &[PathBuf],
     command: &str,
     cascade_id: Option<&str>,
-) -> PkgResult<()> {
+) -> PkgResult<ActivationReport> {
     let identity = Identity {
         name: node.name.clone(),
         version: node.version.clone(),
@@ -748,6 +761,11 @@ pub fn activate_built_package(
         .members
         .get(&(identity.name.clone(), identity.arch))
         .is_some_and(|(cur, _)| cur == &identity);
+    let previous_hooks = if rebuild_in_place {
+        crate::hooks::hooks_in_store(&root.join(identity.store_dir_name()))?
+    } else {
+        BTreeSet::new()
+    };
 
     stage_into_store(pkgdir, &identity, &root)?;
     if rebuild_in_place {
@@ -778,7 +796,7 @@ pub fn activate_built_package(
     let edges = node.recipe.manifest.dependency_edges();
     let name_for_edges = node.name.clone();
     let arch_for_edges = node.arch;
-    activate_identities(conn, &target, store_roots, move |c| {
+    let mut report = activate_identities(conn, &target, store_roots, move |c| {
         let gen = queries::record_generation(
             c,
             &command_for_gen,
@@ -788,7 +806,11 @@ pub fn activate_built_package(
         queries::record_dependency_edges(c, &name_for_edges, arch_for_edges, &edges)?;
         Ok(gen)
     })?;
-    Ok(())
+    report.hooks.extend(previous_hooks);
+    report
+        .hooks
+        .extend(node.recipe.manifest.hooks.iter().copied());
+    Ok(report)
 }
 
 // ---------------------------------------------------------------------
@@ -800,6 +822,7 @@ pub struct UndoReport {
     pub reactivated: Vec<String>,
     pub deactivated: Vec<String>,
     pub generation_id: i64,
+    pub hooks: BTreeSet<HookOperation>,
     /// Pin re-check warnings (§5.6: warn, never block).
     pub pin_warnings: Vec<String>,
     /// Stated-every-time limitations (§5.1: /etc is not reverted).
@@ -857,8 +880,8 @@ pub fn pre_transaction_gen(gens: &[GenerationRow], t: i64) -> i64 {
 ///    through [`live_state_gen`], so undo rows don't toggle). Anything
 ///    older is refused with an explanation and the sequential path
 ///    (`pkg undo` × k) named.
-/// 2. **Schema version (§5.8):** a generation recorded under a
-///    different DB schema version is non-restorable, forever.
+/// 2. **Schema version (§5.8):** package-set semantics must be compatible;
+///    the additive v3→v4 hook-state migration explicitly preserves undo.
 /// 3. **glibc (§5.1):** if the target's glibc identity differs from
 ///    the installed one, refuse — glibc anchor swaps belong to
 ///    `glibc-apply --rollback`, never to symlink undo.
@@ -894,13 +917,12 @@ pub fn undo_to_generation(
         )));
     }
 
-    // (2) Schema version.
-    if target.schema_ver != SCHEMA_VERSION {
+    // v4 only adds hook failure state; v3 and v4 generation package sets
+    // have identical semantics and remain safe to restore.
+    if !(3..=SCHEMA_VERSION).contains(&target.schema_ver) {
         return Err(PkgError::Db(format!(
-            "generation {gen_id} was recorded under schema v{} (current: \
-             v{SCHEMA_VERSION}); undo across schema migrations is forbidden \
-             because the restored set would be read with different column \
-             semantics",
+            "generation {gen_id} was recorded under incompatible schema v{} \
+             (current: v{SCHEMA_VERSION})",
             target.schema_ver
         )));
     }
@@ -969,6 +991,7 @@ pub fn undo_to_generation(
         reactivated: report.activated,
         deactivated: report.deactivated,
         generation_id: report.generation_id,
+        hooks: report.hooks,
         pin_warnings,
         notes,
     })

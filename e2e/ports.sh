@@ -181,12 +181,14 @@ pkg_loader_seed() {
 filtered() {
     PKG_GLIBC_BOUND=0
     DKMS_ROOT_ACTIVE=0
+    TARGET_ROOT_ACTIVE=0
     linux_headers_src=
     while [ "\$#" -gt 0 ]; do
         case "\$1" in
             --ro-bind|--bind)
                 if [ -e "\$2" ]; then
                     [ "\$3" = /pkg/deps/linux-headers ] && linux_headers_src=\$2
+                    [ "\$2" = "$ROOT" ] && [ "\$3" = / ] && TARGET_ROOT_ACTIVE=1
                     printf '%s\0%s\0%s\0' "\$1" "\$2" "\$3"
                 else
                     echo "bwrap-shim: skipping missing bind source \$2" >&2
@@ -215,6 +217,7 @@ filtered() {
                 fi
                 shift 3 ;;
             --)
+                if [ "\$TARGET_ROOT_ACTIVE" = 0 ]; then
                 # NixOS hosts only: the store and the toolchain farm
                 # must resolve inside the sandbox. FHS hosts already
                 # have /usr /bin /lib bound by the profile — overlaying
@@ -293,6 +296,7 @@ filtered() {
                     fi
                 fi
                 printf '%s\0%s\0%s\0' --ro-bind "\$ld64" /lib64
+                fi
                 printf '%s\0' "\$@"
                 break ;;
             *) printf '%s\0' "\$1"; shift ;;

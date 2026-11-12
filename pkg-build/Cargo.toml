@@ -24,6 +24,7 @@ toml.workspace = true
 # serde_json: provenance source_hashes/attestations are JSON columns
 # (§9.2.1); json! builds them without a serde derive dependency.
 serde_json.workspace = true
+serde.workspace = true
 # NOTE (deviation from SPEC's pin list): rusqlite is needed only to
 # *name* `rusqlite::Connection` in signatures that call pkg-db's query
 # API — pkg-db exposes the type but does not re-export it. Same

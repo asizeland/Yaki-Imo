@@ -45,7 +45,9 @@ pub const PHASES: [Phase; 4] = [Phase::Prepare, Phase::Build, Phase::Check, Phas
 /// recipe-manifest entry), not a phase script (Issue 3.4: fetch is a
 /// separate earlier stage whose only write target is the source
 /// cache).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum Phase {
     Fetch,
     Prepare,
@@ -423,16 +425,17 @@ pub fn run_recipe_phases(recipe: &Recipe, ctx: &BuildContext) -> PhaseOutcome {
     PhaseOutcome { result, logs }
 }
 
-fn run_recipe_phases_impl(
+pub(crate) struct PreparedRecipe {
+    pub work_dir: PathBuf,
+    pub env: Vec<(String, String)>,
+    pub dep_binds: Vec<(PathBuf, PathBuf)>,
+}
+
+/// Creates a pristine source workspace shared by canonical and debug builds.
+pub(crate) fn prepare_recipe_workspace(
     recipe: &Recipe,
     ctx: &BuildContext,
-    phase_logs: &mut Vec<(Phase, String)>,
-) -> PkgResult<()> {
-    // -- fetch --------------------------------------------------------
-    // Repository recipes use the synced manifest as their source
-    // authorization. An explicitly named local recipe carries its own
-    // entry; only that path permits local file URLs. Both paths enforce
-    // the pinned SHA-256 before any source reaches the build sandbox.
+) -> PkgResult<PreparedRecipe> {
     let sources: Vec<PathBuf> = if let Some(entry) = &recipe.local_manifest {
         pkg_repo::fetch_local_sources(entry, &ctx.source_cache)?
     } else {
@@ -448,12 +451,6 @@ fn run_recipe_phases_impl(
         pkg_repo::fetch_sources(manifest_entry, &ctx.source_cache)?
     };
 
-    // A build always starts from a pristine tree (design 4.3.2: no
-    // incremental rebuilds — autotools caches and generated headers
-    // bake in the previous build's answers; an option flip would link
-    // stale objects). The artifact cache, not the scratch tree, is the
-    // sanctioned reuse mechanism. (4.3.2's same-tag retry carve-out
-    // would need the phase-marker machinery, which doesn't exist yet.)
     for dir in [&ctx.scratch_dir, &ctx.pkgdir] {
         if dir.exists() {
             fs::remove_dir_all(dir).map_err(PkgError::Io)?;
@@ -461,12 +458,6 @@ fn run_recipe_phases_impl(
         fs::create_dir_all(dir).map_err(PkgError::Io)?;
     }
 
-    // Materialize the fetched sources into the scratch dir: the Build
-    // profile's only RW bind is scratch, so a tarball left in the
-    // source cache is unreachable from inside the sandbox. Cache file
-    // names carry a `<sha256>-` prefix (pkg-repo's `cache_file_name`);
-    // recipe scripts reference their sources by the URL's bare file
-    // name, so the prefix is stripped here.
     let mut staged_sources = Vec::new();
     for src in &sources {
         let name = src.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
@@ -485,7 +476,6 @@ fn run_recipe_phases_impl(
     }
 
     let env = build_env(ctx, recipe)?;
-    let profile = SandboxProfile::Build;
     let dep_binds: Vec<(PathBuf, PathBuf)> = ctx
         .gate_deps
         .iter()
@@ -505,35 +495,69 @@ fn run_recipe_phases_impl(
     } else {
         ctx.scratch_dir.clone()
     };
+    Ok(PreparedRecipe {
+        work_dir,
+        env,
+        dep_binds,
+    })
+}
+
+pub(crate) fn run_recipe_phase(
+    recipe: &Recipe,
+    ctx: &BuildContext,
+    prepared: &PreparedRecipe,
+    phase: Phase,
+) -> PkgResult<Option<String>> {
+    let Some(script) = materialize_phase(recipe, phase, ctx, &prepared.work_dir)? else {
+        let required = matches!(phase, Phase::Install)
+            || (matches!(phase, Phase::Build)
+                && !recipe.manifest.binary
+                && recipe.manifest.build_system == BuildSystem::Custom);
+        if required {
+            return Err(PkgError::Build(format!(
+                "recipe {} has no `{}` script or generated phase",
+                recipe.dir.display(),
+                phase.script_name()
+            )));
+        }
+        return Ok(None);
+    };
+    let cmd = vec![
+        "/bin/sh".to_string(),
+        "-e".to_string(),
+        script.display().to_string(),
+    ];
+    let outcome = run_sandboxed_with_binds(
+        &SandboxProfile::Build,
+        &prepared.dep_binds,
+        &cmd,
+        &ctx.scratch_dir,
+        &prepared.env,
+    )?;
+    if !outcome.success() {
+        return Err(PkgError::Build(format!(
+            "{} {}: `{}` phase failed ({}): {}",
+            recipe.manifest.name,
+            recipe.manifest.version,
+            phase,
+            outcome.status,
+            outcome.stderr_tail
+        )));
+    }
+    Ok(Some(outcome.stderr_tail))
+}
+
+fn run_recipe_phases_impl(
+    recipe: &Recipe,
+    ctx: &BuildContext,
+    phase_logs: &mut Vec<(Phase, String)>,
+) -> PkgResult<()> {
+    let prepared = prepare_recipe_workspace(recipe, ctx)?;
 
     // -- prepare / build / check / install ----------------------------
     for phase in PHASES {
-        let Some(script) = materialize_phase(recipe, phase, ctx, &work_dir)? else {
-            let required = matches!(phase, Phase::Install)
-                || (matches!(phase, Phase::Build)
-                    && !recipe.manifest.binary
-                    && recipe.manifest.build_system == BuildSystem::Custom);
-            if required {
-                return Err(PkgError::Build(format!(
-                    "recipe {} has no `{}` script or generated phase",
-                    recipe.dir.display(),
-                    phase.script_name()
-                )));
-            }
-            continue;
-        };
-        let cmd = vec![
-            "/bin/sh".to_string(),
-            "-e".to_string(),
-            script.display().to_string(),
-        ];
-        let outcome = run_sandboxed_with_binds(&profile, &dep_binds, &cmd, &ctx.scratch_dir, &env)?;
-        phase_logs.push((phase, outcome.stderr_tail.clone()));
-        if !outcome.success() {
-            return Err(PkgError::Build(format!(
-                "{} {}: `{}` phase failed ({})",
-                recipe.manifest.name, recipe.manifest.version, phase, outcome.status
-            )));
+        if let Some(log) = run_recipe_phase(recipe, ctx, &prepared, phase)? {
+            phase_logs.push((phase, log));
         }
     }
 

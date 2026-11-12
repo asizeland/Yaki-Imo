@@ -687,6 +687,7 @@ dependencies = [
  "pkg-sandbox",
  "pkg-scanner",
  "rusqlite",
+ "serde",
  "serde_json",
  "sha2",
  "tar",

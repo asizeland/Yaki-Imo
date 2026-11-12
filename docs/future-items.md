@@ -1,72 +1,136 @@
-Proposed future items to "flesh out" Yakimo for developers:
+# Future items and accepted developer tooling
 
-Currently, I believe the main hurdles for developers utilizing Yakimo (or the eventual distribution built on Yakimo) are as follows:
+This document records implemented developer tooling and ideas that should wait
+until after the first successful live-system boot. The debug shell and typed
+hooks below are implemented and covered by dedicated end-to-end tests.
 
+## Implemented: interactive debug shell
 
-## Interactive debug shell with incremental builds.
-I believe one of the first items which should be addressed is the lack of a dedicated debugging space for developers/people working on packages. Where through a debugging shell consisting of a interactive shell inside a copy of the environment used by a package build. 
-```
+Package authors need a way to inspect a real build environment, reproduce a
+failure, and test a fix without rebuilding every source file after each edit.
+
+```sh
 pkg debug-shell foobar
-```
-- This sould provide the same declared dependencies, environment variables, paths and sanbox restriction.
-- Access to build log and generated configuration.
-- A way to run commands, inspect files and test proposed fixes.
-- No network access by default, matching ordinary build.
-- No permission to modify the live installed root.
-- Incremental builds only within this interactive shell (as to avoid damaging reproducibility), allowing the user to:
-```
-pkg debug-shell --resume foobar
-```
-Alongside with a manual method of clearing the build tree. 
-```
-pkg debug-shell --remove-tree
-```
-Furthermore, this could be further improved by allowing:
-```
-pkg debug-shell --phase prepare foobar
 pkg debug-shell --phase compile foobar
-pkg debug-shell --phase install foobar
+pkg debug-shell --resume foobar
+pkg debug-shell --export ./fixes --resume foobar
+pkg debug-shell --remove-tree foobar
 ```
-All of this sould allow the user to quickly reach the part of their build which failed, and make changes to the recipe or other files relevant to the build. These changes should be temporary, prior to exit from shell, Yakimo should offer to generate a patch (e.g. foobar-patch package recipe). On exit from this shell the build tree should be discarded entirely to not damage reproducibility.
 
+A debug shell uses the same declared dependencies, environment variables,
+paths, source pins, and sandbox restrictions as an ordinary build. It has no
+network access and cannot modify the live installed root. Build logs and
+generated configuration remain available in its workspace.
 
-## ABI checking
+`--phase` runs successful prerequisite phases and enters the shell before the
+named phase. `compile` is the user-facing name for the internal build phase.
+A failed phase leaves the workspace available for inspection and resume.
 
-A maintainer tool designed to check old and new libraries for removed or added symbols, changed symbol versions, changed function signatures where debug information permits, structure size and layout changes, soname changes, new or removed ELF dependencies. Via the command:
+Workspaces persist after the shell exits. `--resume` neither wipes nor
+refetches them. Only `--remove-tree` deliberately removes the workspace.
+Resuming after package identity, options, dependencies, or recipe inputs have
+changed must produce an error rather than silently using stale state.
+
+Incremental compilation is permitted only inside this development workspace.
+Interactive output must never enter the artifact cache, become an installed
+package, or be published as a verified build. After finding a fix, the author
+must run an ordinary pristine build to validate and package it.
+
+Export produces reviewable unified diffs against the original source and the
+original recipe. Source patches belong in the recipe's `files/` directory and
+must be covered by the normal pinned-source and clean-build path. Export must
+not create a separate patch package.
+
+## Implemented: typed transaction hooks
+
+Packages need shared maintenance operations after their files change. Examples
+include rebuilding font, MIME, and icon caches and refreshing the dynamic
+loader cache. Users, groups, service registration, initramfs generation, and
+arbitrary maintainer commands are not part of the initial implementation.
+
+Recipes declare operations, not shell commands:
+
+```toml
+[hooks]
+operations = ["font-cache", "mime-cache"]
 ```
-pkg abi-diff libfoobar-2.1 libfoobar-2.0
-#or 
+
+Yakimo owns and reviews each operation's implementation. The initial operation
+set is `ldconfig`, `font-cache`, `mime-cache`, and `icon-cache`. Operations are
+idempotent, have a centrally defined order, and run once per transaction or
+build plan even when several packages request them. Activation, removal,
+autoremove, undo, and same-identity rebuilds must all reconcile the relevant
+state.
+
+Hooks run after the package-state commit, without network access. They see the
+selected target root rather than the host root and receive only the filesystem
+write access required by the operation. Standard output, standard error, and
+failures are logged in a readable, persistent location.
+
+A hook failure does **not** roll back an already activated package set or make
+the database pretend that activation did not happen. The transaction command
+reports the failure, Yakimo records the outstanding operation, and later
+operations still run. These commands inspect and retry outstanding work:
+
+```sh
+pkg hooks status
+pkg hooks retry
+```
+
+A successful retry clears the recorded failure and does not create a package
+transaction generation. Undo reruns applicable hooks; it does not attempt to
+reverse arbitrary changes made by hook programs.
+
+## Deferred until after the first live-system boot: ABI checking
+
+A maintainer tool should compare old and new libraries for removed or added
+symbols, changed symbol versions, function signatures where debug information
+permits, public structure layout, sonames, and ELF dependencies:
+
+```sh
 pkg abi-diff libfoobar-2.0 libfoobar-2.1
 ```
-The report should feed into maintainer review and rebuild planning. It should not assume that every added symbol requires a rebuild or that unchanged symbols prove compatibility. Some ABI changes are invisible to simple ELF inspection. Tests and upstream knowledge remain necessary.
 
-Furthermore, there is currently a lack of hooks
+The argument order is always old, then new. The report should distinguish
+probably breaking, probably additive, and uncertain changes. Added symbols do
+not by themselves require rebuilds, and unchanged symbols do not prove
+compatibility. Tests and upstream knowledge remain necessary.
 
-## Transaction hook expansion.
+The existing scanner's soname, symbol-version, and header fingerprints remain
+the lightweight build-time mechanism. For deep analysis, evaluate existing
+tools such as libabigail before implementing DWARF and type-layout analysis in
+Yakimo. The tool may inform maintainer review and rebuild planning, but must
+not automatically suppress a conservative rebuild.
 
-The current build system could probably benefit from a declarative hook system, for actions such as rebuilding font caches, updating MIME data, registering services, creating groups and registering groups and rebuilding stuff like initramfs.
+## Deferred until after the first live-system boot: kernel packages
 
-- These should run after activation, their inputs and order should be deterministic
-- They run with restricted permissions and explicit filesystem access
-- Their output and failiures logged (ensure human readable format)
-- Failed hook means a failed transaction (to avoid a failed hook leave the database with unfinished operations)
+Different users need different kernel policies, but every additional variant
+adds patch, configuration, module, and hardware-testing work. Start with one
+reliably booting kernel. Then consider distinct, parallel-installable packages
+for LTS and current stable kernels. Release candidates belong in an explicitly
+experimental channel. Hardened and CachyOS variants require their own patchset
+maintenance and should follow only when they can be supported and tested.
 
+GRUB and Limine can already present entries for several Linux kernels. Each
+entry must select the matching kernel image, initramfs, microcode, modules,
+and arguments. Keep a known-good entry, protect the running kernel, and never
+remove the last bootable kernel. Test every supported variant with the
+installed DKMS modules on real hardware.
 
-## Kernel packages
+## Rejected: rename recipe metadata to `.pkg` and `.watch`
 
-In my experience different user have different preferences for the exact kernel they are using (regardless of benefits), therefore I would like a few versions of the kernel packaged. LTS, latest, RC (release candidate), Hardened kernel and CachyOS kernel.
+Keep the established layout:
 
-Furthermore, regarding this, I wonder if it would be possible in Linux to implement something similar to how FreeBSD allows you to boot several different kernels, I understand it is different in nature as a monolithic project. However perhaps something similar is possible via the grub2 or Limine bootloaders.
-
-## Package recipe naming convention. 
-
-Considering the previously mentioned patch system from the debug shell, it would be very convenient to change the naming conventions of the actual files to something along the lines:
+```text
+foobar/
+├── pkg-meta.toml
+├── watch.toml
+└── files/
+    └── 0001-fix-something.patch
 ```
-foobar.pkg
-foobar.watch
-```
-This way any patched files can simply appear as:
-```
-foobar-patch.pkg
-foobar-patch.watch
-```
+
+`pkg-meta.toml` and `watch.toml` describe their purpose and format. `.pkg`
+would suggest a package artifact, while `.watch` hides the TOML format.
+Renaming would also require changes to every recipe, parser, repository tool,
+and documentation example without adding capability. Recipe directories and
+`files/` already provide the desired organization for patches.

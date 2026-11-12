@@ -47,6 +47,13 @@
 //! - [MINOR] `GLIBC_PENDING_PROTOCOL` constant, deliberately duplicated
 //!   with pkg-init's `glibc-apply.rs` (see its comment).
 //!
+//! ## v5 changes
+//!
+//! - [MAJOR] Schema-v4 `hook_failures` CRUD: `list_hook_failures`,
+//!   `upsert_hook_failure`, and `clear_hook_failure`. Failure upserts preserve
+//!   the first timestamp and increment attempts; successful retries clear the
+//!   current-state row without creating a package generation.
+//!
 //! ## v4 changes
 //!
 //! - [MAJOR] `DependencyKind` is now three-valued (`Link/Runtime/Build`,
@@ -89,13 +96,15 @@
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use pkg_core::{AbiTag, Arch, Identity, OptTag, PackageId, PkgError, PkgResult, Track, Version};
+use pkg_core::{
+    AbiTag, Arch, HookOperation, Identity, OptTag, PackageId, PkgError, PkgResult, Track, Version,
+};
 use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, Value, ValueRef};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 
 use crate::{
     BuildHistoryRow, DependencyKind, GenerationKind, GenerationPackageRow, GenerationRow,
-    LinkInterfaceRow, PackageOptionRow, PackageRow, ProvenanceRow, SCHEMA_VERSION,
+    HookFailure, LinkInterfaceRow, PackageOptionRow, PackageRow, ProvenanceRow, SCHEMA_VERSION,
 };
 
 /// Pending-flag protocol version recorded in `glibc_pending.protocol`.
@@ -798,6 +807,84 @@ pub fn pkg_clean_glibc_guard(conn: &Connection, running_version: &Version) -> Re
             active.version
         )));
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// hook_failures (schema v4)
+// ---------------------------------------------------------------------
+
+fn map_hook_failure_row(row: &Row) -> rusqlite::Result<HookFailure> {
+    let operation: String = row.get("operation")?;
+    let operation = operation.parse::<HookOperation>().map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    Ok(HookFailure {
+        operation,
+        first_failed_at: row.get("first_failed_at")?,
+        last_failed_at: row.get("last_failed_at")?,
+        attempts: row.get("attempts")?,
+        log_path: row.get("log_path")?,
+        error_summary: row.get("error_summary")?,
+    })
+}
+
+/// Outstanding hook failures in [`HookOperation::ALL`] order.
+pub fn list_hook_failures(conn: &Connection) -> PkgResult<Vec<HookFailure>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT operation, first_failed_at, last_failed_at, attempts, log_path, error_summary
+             FROM hook_failures",
+        )
+        .map_err(|e| PkgError::Db(e.to_string()))?;
+    let rows = stmt
+        .query_map([], map_hook_failure_row)
+        .map_err(|e| PkgError::Db(e.to_string()))?;
+    let mut failures = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| PkgError::Db(e.to_string()))?;
+    failures.sort_by_key(|failure| failure.operation);
+    Ok(failures)
+}
+
+/// Records a failed operation, or updates its outstanding failure state.
+/// The first timestamp and attempt count survive subsequent failures.
+///
+/// Lock precondition (§9.4): mutating; the caller must hold the exclusive
+/// `/var/lib/pkg/lock` for the enclosing critical section.
+pub fn upsert_hook_failure(
+    conn: &Connection,
+    operation: HookOperation,
+    failed_at: i64,
+    log_path: &str,
+    error_summary: &str,
+) -> PkgResult<()> {
+    conn.execute(
+        "INSERT INTO hook_failures
+             (operation, first_failed_at, last_failed_at, attempts, log_path, error_summary)
+         VALUES (?1, ?2, ?2, 1, ?3, ?4)
+         ON CONFLICT(operation) DO UPDATE SET
+             last_failed_at = excluded.last_failed_at,
+             attempts = hook_failures.attempts + 1,
+             log_path = excluded.log_path,
+             error_summary = excluded.error_summary",
+        params![operation.to_string(), failed_at, log_path, error_summary],
+    )
+    .map_err(|e| PkgError::Db(e.to_string()))?;
+    Ok(())
+}
+
+/// Clears an operation's outstanding failure after a successful run.
+/// Clearing an operation with no recorded failure is a no-op.
+///
+/// Lock precondition (§9.4): mutating; the caller must hold the exclusive
+/// `/var/lib/pkg/lock` for the enclosing critical section.
+pub fn clear_hook_failure(conn: &Connection, operation: HookOperation) -> PkgResult<()> {
+    conn.execute(
+        "DELETE FROM hook_failures WHERE operation = ?1",
+        [operation.to_string()],
+    )
+    .map_err(|e| PkgError::Db(e.to_string()))?;
     Ok(())
 }
 
@@ -1888,6 +1975,109 @@ mod tests {
     #[test]
     fn glibc_pending_protocol_constant_is_current() {
         assert_eq!(GLIBC_PENDING_PROTOCOL, 1);
+    }
+
+    // ---- schema v4: hook_failures ----
+
+    #[test]
+    fn hook_failures_round_trip_in_canonical_operation_order() {
+        let conn = fresh_db();
+        assert!(list_hook_failures(&conn).unwrap().is_empty());
+
+        for (operation, failed_at) in [
+            (HookOperation::IconCache, 40),
+            (HookOperation::Ldconfig, 10),
+            (HookOperation::MimeCache, 30),
+            (HookOperation::FontCache, 20),
+        ] {
+            upsert_hook_failure(
+                &conn,
+                operation,
+                failed_at,
+                &format!("/var/log/pkg/hooks/{operation}.log"),
+                "failed",
+            )
+            .unwrap();
+        }
+
+        let failures = list_hook_failures(&conn).unwrap();
+        assert_eq!(
+            failures.iter().map(|row| row.operation).collect::<Vec<_>>(),
+            HookOperation::ALL
+        );
+        assert_eq!(failures[0].first_failed_at, 10);
+        assert_eq!(failures[0].last_failed_at, 10);
+        assert_eq!(failures[0].attempts, 1);
+        assert_eq!(failures[0].log_path, "/var/log/pkg/hooks/ldconfig.log");
+        assert_eq!(failures[0].error_summary, "failed");
+    }
+
+    #[test]
+    fn repeated_hook_failure_preserves_first_timestamp_and_increments_attempts() {
+        let conn = fresh_db();
+        upsert_hook_failure(
+            &conn,
+            HookOperation::FontCache,
+            100,
+            "/logs/first.log",
+            "first error",
+        )
+        .unwrap();
+        upsert_hook_failure(
+            &conn,
+            HookOperation::FontCache,
+            200,
+            "/logs/latest.log",
+            "latest error",
+        )
+        .unwrap();
+
+        let failures = list_hook_failures(&conn).unwrap();
+        assert_eq!(
+            failures,
+            vec![HookFailure {
+                operation: HookOperation::FontCache,
+                first_failed_at: 100,
+                last_failed_at: 200,
+                attempts: 2,
+                log_path: "/logs/latest.log".to_string(),
+                error_summary: "latest error".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn successful_hook_clears_only_its_failure_and_clear_is_idempotent() {
+        let conn = fresh_db();
+        upsert_hook_failure(&conn, HookOperation::Ldconfig, 1, "/logs/ld", "failed").unwrap();
+        upsert_hook_failure(&conn, HookOperation::MimeCache, 2, "/logs/mime", "failed").unwrap();
+
+        clear_hook_failure(&conn, HookOperation::Ldconfig).unwrap();
+        clear_hook_failure(&conn, HookOperation::Ldconfig).unwrap();
+
+        let failures = list_hook_failures(&conn).unwrap();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].operation, HookOperation::MimeCache);
+    }
+
+    #[test]
+    fn hook_failure_schema_rejects_unknown_operations_and_zero_attempts() {
+        let conn = fresh_db();
+        let unknown = conn.execute(
+            "INSERT INTO hook_failures
+                 (operation, first_failed_at, last_failed_at, attempts, log_path, error_summary)
+             VALUES ('unknown', 1, 1, 1, '/log', 'failed')",
+            [],
+        );
+        assert!(unknown.is_err());
+
+        let zero_attempts = conn.execute(
+            "INSERT INTO hook_failures
+                 (operation, first_failed_at, last_failed_at, attempts, log_path, error_summary)
+             VALUES ('ldconfig', 1, 1, 0, '/log', 'failed')",
+            [],
+        );
+        assert!(zero_attempts.is_err());
     }
 
     // ---- v4: opt_tag identity ----

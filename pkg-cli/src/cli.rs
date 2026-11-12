@@ -286,6 +286,28 @@ pub enum Command {
         no_cache: bool,
     },
 
+    /// Enter a retained, isolated build workspace for recipe development.
+    DebugShell {
+        /// Package name, local recipe directory, or pkg-meta.toml file.
+        name: String,
+        #[arg(long = "opt", value_name = "name=val")]
+        opts: Vec<String>,
+        #[arg(long, value_name = "N")]
+        jobs: Option<u32>,
+        /// Run prerequisites and enter before prepare, compile, check, or install.
+        #[arg(long, value_name = "PHASE")]
+        phase: Option<String>,
+        /// Resume without wiping or fetching the retained workspace.
+        #[arg(long)]
+        resume: bool,
+        /// Permanently remove this package's debug workspace.
+        #[arg(long)]
+        remove_tree: bool,
+        /// Export unified source and recipe diffs to this directory.
+        #[arg(long, value_name = "DIR")]
+        export: Option<std::path::PathBuf>,
+    },
+
     /// Trust-chain management (§10.5.4).
     Key {
         #[command(subcommand)]
@@ -296,6 +318,12 @@ pub enum Command {
     Db {
         #[command(subcommand)]
         action: DbAction,
+    },
+
+    /// Inspect or retry failed post-activation maintenance operations.
+    Hooks {
+        #[command(subcommand)]
+        action: HooksAction,
     },
 
     /// First-boot bootstrap checks (v13 §9 exposes --verify-layout).
@@ -387,4 +415,12 @@ pub enum DbAction {
     Check,
     /// Rebuild the database from the installed store (§16.1).
     Regenerate,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HooksAction {
+    /// Show operations that still need a successful retry.
+    Status,
+    /// Retry all outstanding operations without changing the package set.
+    Retry,
 }

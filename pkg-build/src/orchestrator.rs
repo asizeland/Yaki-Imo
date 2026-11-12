@@ -531,6 +531,8 @@ pub struct Report {
     pub failed: Vec<FailedBuild>,
     pub blocked: Vec<String>,
     pub pruned: Vec<String>,
+    pub hooks: BTreeSet<pkg_core::HookOperation>,
+    pub hook_failures: Vec<pkg_core::HookOperation>,
     /// Wall time of the whole plan.
     pub wall: Duration,
     /// §4.6(2) notices ("took 5.2× its median"), display-only.
@@ -952,6 +954,7 @@ pub fn execute_plan(conn: &Connection, plan: &BuildPlan, cfg: &SchedConfig) -> P
         }
     }
 
+    report.hook_failures = crate::hooks::run_hooks(conn, &report.hooks)?;
     crate::dkms::reconcile_after_plan(conn, cfg, &mut report, &kernels_before);
     report.wall = wall_clock.elapsed();
     Ok(report)
@@ -1006,6 +1009,46 @@ fn spawn_worker(
 /// by the time this build runs. Runs on the scheduler thread (DB
 /// access); failures degrade to a partial/empty view with a warning
 /// rather than failing the build.
+/// Resolves the same dependency closure as a build, but refuses to create a
+/// debug session with missing concrete dependencies.
+pub fn debug_deps_for(
+    conn: &Connection,
+    plan: &BuildPlan,
+    node: &PlanNode,
+    cfg: &SchedConfig,
+) -> PkgResult<(Vec<DeclaredDep>, Vec<DeclaredDep>)> {
+    let resolved = gate_deps_for(conn, plan, node, cfg);
+    let available: BTreeSet<&str> = resolved
+        .0
+        .iter()
+        .chain(resolved.1.iter())
+        .map(|dep| dep.name.as_str())
+        .collect();
+    let filtered = node.recipe.manifest.filter_selection(&node.selection);
+    let declared = node
+        .recipe
+        .manifest
+        .dep_set(&filtered)?
+        .into_iter()
+        .chain(node.recipe.manifest.build_dep_set(&filtered)?);
+    let mut missing = BTreeSet::new();
+    for dep in declared {
+        if let pkg_core::Dependency::Package { name, .. } = dep {
+            if !available.contains(name.as_str()) {
+                missing.insert(name);
+            }
+        }
+    }
+    if missing.is_empty() {
+        Ok(resolved)
+    } else {
+        Err(PkgError::NotFound(format!(
+            "debug shell requires installed dependencies: {}",
+            missing.into_iter().collect::<Vec<_>>().join(", ")
+        )))
+    }
+}
+
 fn gate_deps_for(
     conn: &Connection,
     plan: &BuildPlan,
@@ -1421,7 +1464,8 @@ fn handle_worker_done(
                 cfg.cascade_id.as_deref(),
             );
             match outcome {
-                Ok(()) => {
+                Ok(activation) => {
+                    report.hooks.extend(activation.hooks);
                     // Post-activation recording (§9.2.1, §7.7.2) and
                     // cascade narrowing both read the ACTIVATED tree:
                     // staging moved the pkgdir into the store.

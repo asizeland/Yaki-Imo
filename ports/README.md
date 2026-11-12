@@ -13,8 +13,9 @@ it against the packaged glibc is the stage-2 bootstrap.
 
 ```
 <category>/<name>/
-  pkg-meta.toml    # metadata, [[source]] pins, [build], and optional [scripts]
+  pkg-meta.toml    # metadata, [[source]] pins, [build], [scripts], typed [hooks]
   watch.toml       # optional upstream-version policy
+  files/           # optional reviewed source patches and other local inputs
 ```
 
 A managed `build.system` (`autotools`, `meson`, `cmake`, or `make`) supplies the
@@ -101,7 +102,15 @@ error.
 | app-arch/zstd | compressor + library | Makefiles | extracts NVIDIA run archives; gzip/xz support declared |
 | sys-kernel/linux | kernel + modules | kernel Kbuild | configured 6.19.14-yakimo kernel and external-module build tree |
 | sys-firmware/intel-microcode | CPU firmware | install-only payload | cumulative normal Intel microcode set; no caveats directory |
-| x11-drivers/nvidia-drivers | proprietary GPU driver | vendor run archive + Kbuild | RTX 4070-capable 595.112.07; modules matched to the packaged kernel |
+| x11-base/xorgproto, xorg-macros, xcb-proto | X11 build metadata | meson/autotools | protocol and macro packages for the X11 stack |
+| x11-base/xorg-server | X display server | meson | Xorg and Xvfb; GLX/DRI, XKB, udev, and proprietary-driver support |
+| x11-libs/* | X11 client and rendering libraries | autotools/meson | XCB, Xlib and extensions, toolkits, fonts, keyboard and input libraries |
+| media-libs/mesa | OpenGL implementation | meson | compact softpipe fallback; no LLVM, Vulkan, or Wayland in this set |
+| x11-drivers/xf86-input-libinput | Xorg input driver | autotools | mouse, keyboard, and touchpad input through libinput |
+| x11-apps/xinit, xauth, xterm | session tools and terminal | autotools | working `startx` launch path and Xauthority setup |
+| x11-libs/gtk3 | GUI toolkit | meson | GTK 3 X11 backend, accessibility, MIME data, and base icon theme |
+| dev-python/mako, markupsafe, packaging, pyyaml | build-time Python modules | install-only | Mesa's template, version, and YAML build requirements |
+| x11-drivers/nvidia-drivers | proprietary GPU driver | vendor run archive + Kbuild | RTX 4070-capable 595.112.07; kernel modules, Xorg driver, and GLX extension |
 
 The **chrootable set** (bash through xz above): with
 them installed, the root can be chrooted into (`arch-chroot`-style,
@@ -120,6 +129,12 @@ the physical machine. NVIDIA modules are built through DKMS after package
 activation. A driver change rebuilds every installed kernel; a new kernel
 rebuilds every installed DKMS driver. Logs are kept under `/var/log/pkg/`.
 Module signing and removal/undo cleanup are not implemented yet.
+
+The desktop section builds the X11 and GTK3 stack and runs a real headless
+session through `startx` and `xauth`. Xterm and a compiled GTK window run
+under Xvfb, with Mesa's softpipe renderer. This validates the recipes,
+activation, caches, compiler, and client libraries without claiming that a
+physical display or NVIDIA GPU has been tested.
 
 ## Testing one recipe directly
 

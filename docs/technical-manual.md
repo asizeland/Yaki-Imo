@@ -241,6 +241,8 @@ The generated environment supplies:
 
 `pkg build-env <name>` prints the environment for an installed recipe. `--resolve` is different: it prints a hypothetical version solution rather than a build environment.
 
+`pkg debug-shell` opens a retained workspace with this same environment and Build profile. A fresh session enters before prepare; `--phase` runs prerequisites up to the selected entry point. Resume validates the recorded recipe, options, and dependencies and does not wipe or refetch. The editable recipe is copied under scratch, and source/recipe baselines support unified-diff export. Interactive output bypasses artifact caching, store staging, activation, provenance, build history, and generation recording; a fresh ordinary build remains necessary.
+
 The sandbox is not yet a complete syscall confinement system. No seccomp-BPF program or per-phase timeout is currently installed. Also, when `pkg` runs as root, the namespace's unprivileged inner UID maps to the invoking host UID unless external subuid machinery is used; the mount restrictions and `no_new_privs` are the compensating controls.
 
 ### 2.9 Tree normalization and post-build verification
@@ -280,6 +282,10 @@ This is **honest atomicity, not a claim that the whole multi-package cascade is 
 
 After commit, recording of measured interfaces and provenance is best-effort; a metadata-write failure warns rather than pretending the already-committed activation did not happen. Provenance includes the recipe commit, source hashes, index version, attestation fingerprints, build host, builder/profile version, timestamps, and any self-match result.
 
+Typed `[hooks] operations` are collected from incoming and outgoing recipe sidecars and coalesced in fixed order across a build plan. Removal, autoremove, undo, and same-identity rebuilds use the same reconciliation. `ldconfig`, `font-cache`, `mime-cache`, and `icon-cache` run fixed commands in a no-network namespace with the selected root at `/` and only operation-specific writable paths. Logs go to the target's `/var/log/pkg/`.
+
+Hook failure happens after the package commit and never rolls it back. The schema-v4 `hook_failures` table records outstanding operations, attempts, timestamps, log paths, and bounded summaries. The transaction command returns failure after other post-commit work, while `pkg hooks status` and `pkg hooks retry` inspect and reconcile it. Retry creates no generation. Because v4 only adds this table, undo accepts compatible v3 and v4 generation package sets.
+
 ### 2.12 Failures, retries, and DKMS follow-up
 
 A failed node and its transitive in-plan dependents are marked failed/blocked; independent branches continue. The report includes the first part of the failing phase log. A build whose log resembles an out-of-memory kill gets one retry with half the original job grant.
@@ -301,6 +307,8 @@ Exact per-kernel resolver edges, module signing, initramfs regeneration, and mod
 ### 3.1 `pkg build` and forced rebuilds
 
 `pkg build <name>` creates a one-node plan, computes current options and identity, and runs the same cache/build/verify/stage/activate path as install. It is not a dependency-solving substitute for install: its plan has no in-cascade dependency edges. It is useful when the package's dependencies are already present or when deliberately exercising one recipe.
+
+`pkg debug-shell` shares the single-package setup but switches to persistent debug-session execution. It requires concrete dependencies to be installed, drops the DB lock before entering the shell, and never changes the installed set. `--remove-tree` alone deletes the named workspace; `--export` writes reviewed source and recipe diffs.
 
 `pkg rebuild --affected` handles provider switching. It finds installed packages whose recipes reference a virtual with a preferred provider that is not currently installed, re-resolves those packages at their installed versions, and builds the resulting plan. Because the DB does not record which provider satisfied each historical virtual edge, this is an approximation based on provider installedness, not proof of the old resolution.
 
@@ -334,6 +342,7 @@ These commands expose different layers of the system; they are not interchangeab
 - **`pkg explain <constraint>`** asks why a repository constraint fails and renders PubGrub's derivation tree. It exists because “no solution” hides which requirements conflicted.
 - **`pkg options [name]`** explains option configuration and origins, preventing an option from becoming invisible recipe customization.
 - **`pkg build-env <name>`** exposes the generated build environment for debugging; `--resolve` shows a hypothetical selected version set instead.
+- **`pkg hooks status`** lists current failed maintenance operations; **`pkg hooks retry`** reruns only those operations under the exclusive lock and does not record a generation.
 
 Commands use process status 0 for success, 1 for resolution failures, 2 for build failures, 3 for verification/gate failures, and 70 for other errors. Supply-chain audit deliberately has its own 0/1/2 result convention.
 

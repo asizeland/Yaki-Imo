@@ -201,7 +201,7 @@ pub fn run_sandboxed_with_binds(
         })
         .cloned()
         .collect();
-    let argv = build_argv_impl(&data, &binds, cmd, scratch_dir, env);
+    let argv = build_argv_impl(&data, &binds, cmd, scratch_dir, scratch_dir, env);
 
     let mut child = Command::new(&argv[0])
         .args(&argv[1..])
@@ -241,6 +241,143 @@ pub fn run_sandboxed_with_binds(
         status,
         stderr_tail: tail.tail_string(),
     })
+}
+
+/// Runs an interactive command with the ordinary Build sandbox contract.
+/// Unlike a build phase, the shell inherits the caller's terminal and starts
+/// in `work_dir`; scratch and `$PKGDIR` remain the only writable locations.
+pub fn run_sandboxed_interactive_with_binds(
+    profile: &SandboxProfile,
+    extra_binds_ro: &[(PathBuf, PathBuf)],
+    cmd: &[String],
+    scratch_dir: &Path,
+    work_dir: &Path,
+    env: &[(String, String)],
+) -> PkgResult<SandboxOutcome> {
+    if cmd.is_empty() {
+        return Err(PkgError::Build(
+            "interactive sandbox: empty command".to_string(),
+        ));
+    }
+    let pkgdir = env
+        .iter()
+        .find(|(k, _)| k == "PKGDIR")
+        .map(|(_, v)| PathBuf::from(v));
+    let mut data = profile.resolve(scratch_dir, pkgdir.as_deref());
+    data.bind_ro.retain(|path| path.exists());
+    let argv = build_argv_impl(&data, extra_binds_ro, cmd, scratch_dir, work_dir, env);
+    let status = Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|e| PkgError::Build(format!("failed to spawn interactive bwrap: {e}")))?;
+    Ok(SandboxOutcome {
+        status,
+        stderr_tail: String::new(),
+    })
+}
+
+#[derive(Debug)]
+pub struct TargetCommandOutcome {
+    pub status: ExitStatus,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// Runs a fixed maintenance command with the selected package root mounted
+/// at `/`. Only listed root-relative paths and scratch are writable.
+pub fn run_target_root_command(
+    root: &Path,
+    scratch_dir: &Path,
+    writable: &[PathBuf],
+    cmd: &[String],
+) -> PkgResult<TargetCommandOutcome> {
+    if cmd.is_empty() {
+        return Err(PkgError::Build("target-root command is empty".into()));
+    }
+    let argv = target_root_argv(root, scratch_dir, writable, cmd)?;
+    let output = Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| PkgError::Build(format!("failed to spawn hook bwrap: {e}")))?;
+    Ok(TargetCommandOutcome {
+        status: output.status,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    })
+}
+
+fn target_root_argv(
+    root: &Path,
+    scratch_dir: &Path,
+    writable: &[PathBuf],
+    cmd: &[String],
+) -> PkgResult<Vec<String>> {
+    let scratch_relative = scratch_dir.strip_prefix(root).map_err(|_| {
+        PkgError::Build("hook scratch directory must be inside the target root".into())
+    })?;
+    let scratch_dest = Path::new("/").join(scratch_relative);
+    let mut argv = vec![
+        "bwrap".into(),
+        "--die-with-parent".into(),
+        "--unshare-user".into(),
+        "--uid".into(),
+        "0".into(),
+        "--gid".into(),
+        "0".into(),
+        "--unshare-net".into(),
+        "--unshare-pid".into(),
+        "--unshare-ipc".into(),
+        "--unshare-uts".into(),
+        "--new-session".into(),
+        "--ro-bind".into(),
+        root.display().to_string(),
+        "/".into(),
+        "--proc".into(),
+        "/proc".into(),
+        "--dev".into(),
+        "/dev".into(),
+        "--tmpfs".into(),
+        "/tmp".into(),
+    ];
+    for relative in writable {
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(PkgError::Build(format!(
+                "hook write path must be root-relative: {}",
+                relative.display()
+            )));
+        }
+        argv.push("--bind".into());
+        argv.push(root.join(relative).display().to_string());
+        argv.push(Path::new("/").join(relative).display().to_string());
+    }
+    argv.push("--bind".into());
+    argv.push(scratch_dir.display().to_string());
+    argv.push(scratch_dest.display().to_string());
+    argv.extend([
+        "--chdir".into(),
+        scratch_dest.display().to_string(),
+        "--clearenv".into(),
+        "--setenv".into(),
+        "HOME".into(),
+        scratch_dest.display().to_string(),
+        "--setenv".into(),
+        "LC_ALL".into(),
+        "C".into(),
+        "--setenv".into(),
+        "PATH".into(),
+        "/usr/bin:/usr/sbin:/bin:/sbin".into(),
+        "--".into(),
+    ]);
+    argv.extend(cmd.iter().cloned());
+    Ok(argv)
 }
 
 /// Constructs the full `bwrap` argv for a resolved profile. Pure —
@@ -294,7 +431,7 @@ pub fn build_argv(
     scratch_dir: &Path,
     env: &[(String, String)],
 ) -> Vec<String> {
-    build_argv_impl(data, &[], cmd, scratch_dir, env)
+    build_argv_impl(data, &[], cmd, scratch_dir, scratch_dir, env)
 }
 
 /// [`build_argv`] plus aliased read-only binds: `(host source,
@@ -304,7 +441,8 @@ fn build_argv_impl(
     data: &ProfileData,
     binds_ro: &[(PathBuf, PathBuf)],
     cmd: &[String],
-    scratch_dir: &Path,
+    _scratch_dir: &Path,
+    work_dir: &Path,
     env: &[(String, String)],
 ) -> Vec<String> {
     let mut argv: Vec<String> = vec!["bwrap".to_string()];
@@ -347,7 +485,7 @@ fn build_argv_impl(
     }
 
     argv.push("--chdir".into());
-    argv.push(scratch_dir.display().to_string());
+    argv.push(work_dir.display().to_string());
 
     argv.push("--clearenv".into());
     // Deterministic ordering: caller pairs first (sorted by key for a
@@ -505,7 +643,14 @@ mod tests {
                 PathBuf::from("/var/lib/pkg/store/libfoo-abc123"),
             ),
         ];
-        let argv = build_argv_impl(&build_data(scratch, None), &binds, &cmd, scratch, &[]);
+        let argv = build_argv_impl(
+            &build_data(scratch, None),
+            &binds,
+            &cmd,
+            scratch,
+            scratch,
+            &[],
+        );
         let pairs: Vec<(&str, &str)> = argv
             .windows(3)
             .filter(|w| w[0] == "--ro-bind")
@@ -516,6 +661,58 @@ mod tests {
             "/var/lib/pkg/store/libfoo-abc123",
             "/var/lib/pkg/store/libfoo-abc123"
         )));
+    }
+
+    #[test]
+    fn debug_argv_uses_source_workdir_without_widening_writes() {
+        let scratch = Path::new("/var/lib/pkg/build/debug/foo/scratch");
+        let work = scratch.join("foo-1");
+        let argv = build_argv_impl(
+            &build_data(scratch, None),
+            &[],
+            &["/bin/sh".into()],
+            scratch,
+            &work,
+            &[],
+        );
+        let chdir = argv.windows(2).find(|pair| pair[0] == "--chdir").unwrap();
+        assert_eq!(chdir[1], work.display().to_string());
+        let rw: Vec<&str> = argv
+            .windows(3)
+            .filter(|args| args[0] == "--bind")
+            .map(|args| args[1].as_str())
+            .collect();
+        assert_eq!(rw, [scratch.display().to_string()]);
+    }
+
+    #[test]
+    fn target_root_argv_exposes_only_the_selected_root_and_write_paths() {
+        let root = Path::new("/tmp/target");
+        let scratch = root.join("var/lib/pkg/hooks/scratch");
+        let argv = target_root_argv(
+            root,
+            &scratch,
+            &[PathBuf::from("var/cache/fontconfig")],
+            &["/usr/bin/fc-cache".into()],
+        )
+        .unwrap();
+        assert!(argv
+            .windows(3)
+            .any(|args| args == ["--ro-bind", "/tmp/target", "/"]));
+        assert!(argv.windows(3).any(|args| args
+            == [
+                "--bind",
+                "/tmp/target/var/cache/fontconfig",
+                "/var/cache/fontconfig"
+            ]));
+        assert!(argv.contains(&"--unshare-net".to_string()));
+        assert!(argv
+            .windows(2)
+            .any(|args| args == ["--chdir", "/var/lib/pkg/hooks/scratch"]));
+        assert!(target_root_argv(root, Path::new("/tmp/outside"), &[], &["true".into()]).is_err());
+        assert!(
+            target_root_argv(root, &scratch, &[PathBuf::from("/etc")], &["true".into()]).is_err()
+        );
     }
 
     #[test]

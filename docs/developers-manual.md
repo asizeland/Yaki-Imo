@@ -446,6 +446,15 @@ wrappers. Dependencies appear read-only at their real store paths and at stable
 `/pkg/deps/<name>` aliases. Build-only dependencies are visible but do not count
 as providers for the runtime linkage gate.
 
+`debug_shell.rs` reuses `prepare_recipe_workspace`, `run_recipe_phase`, and the
+same `BuildContext`, but owns session lifetime. Versioned `session.json` records
+identity inputs, dependency store paths, source working directory, and completed
+phases. `baseline/` retains pristine source/recipe copies; `scratch/` contains
+the editable `.pkg-debug-recipe`. Resume validates inputs and never calls source
+fetch or workspace wiping. Export invokes `diff -ruN` and rewrites patch headers
+to `a/` and `b/`. This module deliberately has no cache, store, generation,
+provenance, or build-history call.
+
 ### Sandbox
 
 `pkg-sandbox/src/profile.rs` defines built-in `Build`, `Fetch`, `Hook`, and
@@ -462,6 +471,19 @@ environment, read-only toolchain/dependency binds, and writable scratch plus
 When invoked by root, the inner unprivileged UID still maps to the invoking
 host UID without external subuid setup; read `run.rs` before strengthening or
 making claims about this boundary.
+
+`run_sandboxed_interactive_with_binds` inherits the terminal and accepts a
+separate working directory without changing Build's writable set.
+`run_target_root_command` instead mounts a selected package root at `/`, applies
+mapped writable paths, disables networking, and captures output. Typed hooks use
+this target-root runner, not the legacy host-facing `Hook` profile.
+
+`pkg-build/src/hooks.rs` maps each `HookOperation` to fixed commands and writable
+paths. `staging.rs` collects operations from incoming/outgoing recipe sidecars;
+`orchestrator.rs` unions them across a plan and runs them before DKMS. Failure
+rows use `pkg_db::queries::{list_hook_failures, upsert_hook_failure,
+clear_hook_failure}`. They are current retry state, not activation failures.
+The v4 schema migration is additive and undo accepts v3/v4 package-set rows.
 
 ### Scanner
 
@@ -714,6 +736,8 @@ sandboxed builds, SQLite, and activation together:
 | `e2e/lifecycle.sh` | Removal/autoremove, store tamper detection, cascade undo, index/source rollback or tamper refusal, mirror failover |
 | `e2e/options.sh` | Option identities and environment, config precedence/includes, GC/undo interaction, parallelism config |
 | `e2e/dkms.sh` | Driver/new-kernel reconciliation, job propagation, nonfatal module-build failure, persistent logs |
+| `e2e/debug-shell.sh` | Real sandbox shell, retained edits, phase advance, source/recipe patch export, no canonical artifacts |
+| `e2e/hooks.sh` | Coalesced target-root hooks, persistent failure/log/retry, remove/undo/rebuild, v3-generation compatibility |
 | `e2e/real-package.sh` | Real pinned zlib and a linked consumer; needs network on a cache miss |
 | `e2e/real-binary.sh` | Real Discord vendor-blob repackaging and relaxed linkage warnings; needs network on a cache miss |
 | `e2e/ports.sh` | Long from-scratch ports build, real program/chroot/init/self-hosting and hardware-package checks; network and substantial time/disk required |

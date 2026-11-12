@@ -60,7 +60,7 @@ use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
 use crate::cli::{
-    AlternativesAction, Cli, Command, DbAction, EnvAction, KeyAction, ProfileAction,
+    AlternativesAction, Cli, Command, DbAction, EnvAction, HooksAction, KeyAction, ProfileAction,
     TransactionFlags,
 };
 use crate::options;
@@ -716,8 +716,26 @@ pub fn dispatch(cli: Cli) -> PkgResult<()> {
             jobs,
             no_cache,
         } => cmd_build(&name, opts, jobs, no_cache),
+        Command::DebugShell {
+            name,
+            opts,
+            jobs,
+            phase,
+            resume,
+            remove_tree,
+            export,
+        } => cmd_debug_shell(
+            &name,
+            opts,
+            jobs,
+            phase.as_deref(),
+            resume,
+            remove_tree,
+            export.as_deref(),
+        ),
         Command::Key { action } => cmd_key(action),
         Command::Db { action } => cmd_db(action),
+        Command::Hooks { action } => cmd_hooks(action),
         Command::Bootstrap { verify_layout } => cmd_bootstrap(verify_layout),
         Command::ApplyPendingRestarts { assume_yes } => cmd_apply_pending_restarts(assume_yes),
         Command::Cascade {
@@ -1117,7 +1135,7 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
             }
         }
     }
-    Ok(())
+    hook_failure_result(&report.hook_failures)
 }
 
 // ---------------------------------------------------------------------
@@ -1544,6 +1562,27 @@ fn print_report(report: &orchestrator::Report) {
     if !report.failed.is_empty() {
         eprint!("{}", report.format_failures());
     }
+    if !report.hook_failures.is_empty() {
+        eprintln!(
+            "post-activation hooks need attention: {}",
+            report
+                .hook_failures
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+}
+
+fn hook_failure_result(failed: &[pkg_core::HookOperation]) -> PkgResult<()> {
+    if failed.is_empty() {
+        return Ok(());
+    }
+    Err(PkgError::Build(format!(
+        "package state committed, but hooks failed: {}; inspect `pkg hooks status` and retry with `pkg hooks retry`",
+        failed.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+    )))
 }
 
 // ---------------------------------------------------------------------
@@ -1614,7 +1653,7 @@ fn cmd_remove(name: &str, recursive: bool, force: bool, assume_yes: bool) -> Pkg
     // `command` is borrowed by activate_identities AND consumed by the
     // generation closure — give the closure its own clone.
     let cmd_for_gen = command.clone();
-    staging::activate_identities(&conn, &target, &store_roots(), move |c| {
+    let activation = staging::activate_identities(&conn, &target, &store_roots(), move |c| {
         queries::record_generation(
             c,
             &cmd_for_gen,
@@ -1623,7 +1662,8 @@ fn cmd_remove(name: &str, recursive: bool, force: bool, assume_yes: bool) -> Pkg
         )
     })?;
     println!("removed {}", listing.join(", "));
-    Ok(())
+    let failed = pkg_build::hooks::run_hooks(&conn, &activation.hooks)?;
+    hook_failure_result(&failed)
 }
 
 fn cmd_autoremove(assume_yes: bool) -> PkgResult<()> {
@@ -1673,7 +1713,7 @@ fn cmd_autoremove(assume_yes: bool) -> PkgResult<()> {
     target.members.retain(|(n, _), _| !doomed.contains(n));
     let command = "pkg autoremove".to_string();
     let cmd_for_gen = command.clone();
-    staging::activate_identities(&conn, &target, &store_roots(), move |c| {
+    let activation = staging::activate_identities(&conn, &target, &store_roots(), move |c| {
         queries::record_generation(
             c,
             &cmd_for_gen,
@@ -1681,7 +1721,8 @@ fn cmd_autoremove(assume_yes: bool) -> PkgResult<()> {
             None,
         )
     })?;
-    Ok(())
+    let failed = pkg_build::hooks::run_hooks(&conn, &activation.hooks)?;
+    hook_failure_result(&failed)
 }
 
 // ---------------------------------------------------------------------
@@ -1811,7 +1852,8 @@ fn cmd_undo(
     for note in &report.notes {
         println!("note: {note}");
     }
-    Ok(())
+    let failed = pkg_build::hooks::run_hooks(&conn, &report.hooks)?;
+    hook_failure_result(&failed)
 }
 
 fn cmd_history(generation: Option<i64>, json: bool) -> PkgResult<()> {
@@ -2616,7 +2658,7 @@ fn cmd_rebuild(affected: bool, assume_yes: bool) -> PkgResult<()> {
     let report = orchestrator::execute_plan(&conn, &plan, &cfg)?;
     print_report(&report);
     if report.is_clean() {
-        Ok(())
+        hook_failure_result(&report.hook_failures)
     } else {
         Err(PkgError::Build(format!(
             "{} failed, {} blocked (progress is checkpointed — retry resumes at the failure)",
@@ -3643,14 +3685,14 @@ fn cmd_fetch(target: &str) -> PkgResult<()> {
     Ok(())
 }
 
-fn cmd_build(target: &str, opts: Vec<String>, jobs: Option<u32>, no_cache: bool) -> PkgResult<()> {
+fn single_package_setup(
+    target: &str,
+    opts: Vec<String>,
+    jobs: Option<u32>,
+) -> PkgResult<(Connection, String, PlanNode, SchedConfig)> {
     let cli_opts = parse_opts(&opts)?;
-    let _lock = lock_exclusive()?;
     let conn = open_db()?;
     let (name, recipe) = load_recipe_target(target)?;
-    // Single package, so the effective selection is just config under
-    // --opt; an --opt key the recipe doesn't declare is a hard error
-    // here (effective_selections' typo protection).
     let option_config = options::option_config_from(&at(options::OPTIONS_PATH))?;
     let manifest_lookup = |n: &str| {
         if n == name {
@@ -3672,42 +3714,129 @@ fn cmd_build(target: &str, opts: Vec<String>, jobs: Option<u32>, no_cache: bool)
         .manifest
         .opt_tag(&selection)
         .map_err(PkgError::from)?;
-
-    let mut plan = BuildPlan::default();
-    plan.nodes.insert(
-        name.clone(),
-        PlanNode {
-            name: name.clone(),
-            version: recipe.manifest.version.clone(),
-            abi_tag,
-            arch: Arch::Amd64,
-            opt_tag,
-            selection,
-            recipe,
-            deps_in_cascade: BTreeSet::new(),
-            consumed_hash_at_plan: None,
-            requested: true,
-        },
-    );
+    let node = PlanNode {
+        name: name.clone(),
+        version: recipe.manifest.version.clone(),
+        abi_tag,
+        arch: Arch::Amd64,
+        opt_tag,
+        selection,
+        recipe,
+        deps_in_cascade: BTreeSet::new(),
+        consumed_hash_at_plan: None,
+        requested: true,
+    };
     let mut cfg = SchedConfig::with_defaults();
     apply_parallelism(&mut cfg, jobs)?;
     apply_opt_level(&mut cfg)?;
-    cfg.command_line = format!("pkg build {target}");
-    cfg.cascade_id = None; // standalone build (Issue 4.2.5)
+    cfg.cascade_id = None;
     cfg.store_roots = store_roots();
     cfg.host_glibc = running_glibc_version();
     cfg.repo_cache = at(INDEX_CACHE);
     cfg.source_cache = at(SOURCE_CACHE);
+    Ok((conn, name, node, cfg))
+}
+
+fn cmd_build(target: &str, opts: Vec<String>, jobs: Option<u32>, no_cache: bool) -> PkgResult<()> {
+    let _lock = lock_exclusive()?;
+    let (conn, name, node, mut cfg) = single_package_setup(target, opts, jobs)?;
+    let mut plan = BuildPlan::default();
+    plan.nodes.insert(name.clone(), node);
+    cfg.command_line = format!("pkg build {target}");
     if no_cache {
-        cfg.cache = None; // Issue 4.5: "exists for paranoia"
+        cfg.cache = None;
     }
     let report = orchestrator::execute_plan(&conn, &plan, &cfg)?;
     print_report(&report);
     if report.is_clean() {
-        Ok(())
+        hook_failure_result(&report.hook_failures)
     } else {
         Err(PkgError::Build(format!("build of {name} failed")))
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_debug_shell(
+    target: &str,
+    opts: Vec<String>,
+    jobs: Option<u32>,
+    phase: Option<&str>,
+    resume: bool,
+    remove_tree: bool,
+    export: Option<&Path>,
+) -> PkgResult<()> {
+    if remove_tree {
+        if resume || phase.is_some() || export.is_some() || !opts.is_empty() || jobs.is_some() {
+            return Err(PkgError::Parse(
+                "--remove-tree cannot be combined with resume, phase, export, jobs, or options"
+                    .into(),
+            ));
+        }
+        let name = if looks_like_recipe_path(target) {
+            load_recipe_target(target)?.0
+        } else {
+            target.to_string()
+        };
+        let root = SchedConfig::with_defaults().build_root.join("debug");
+        let path = pkg_build::debug_shell::remove_debug_workspace(&root, &name)?;
+        println!("removed debug workspace {}", path.display());
+        return Ok(());
+    }
+    let phase = match phase {
+        None => None,
+        Some("prepare") => Some(pkg_build::Phase::Prepare),
+        Some("compile" | "build") => Some(pkg_build::Phase::Build),
+        Some("check") => Some(pkg_build::Phase::Check),
+        Some("install") => Some(pkg_build::Phase::Install),
+        Some(other) => {
+            return Err(PkgError::Parse(format!(
+                "unknown debug phase {other:?}; use prepare, compile, check, or install"
+            )))
+        }
+    };
+    let lock = lock_shared()?;
+    let (conn, name, node, cfg) = single_package_setup(target, opts, jobs)?;
+    let mut plan = BuildPlan::default();
+    plan.nodes.insert(name.clone(), node.clone());
+    let (gate_deps, build_deps) = orchestrator::debug_deps_for(&conn, &plan, &node, &cfg)?;
+    let recipe_manifest = if node.recipe.local_manifest.is_some() {
+        pkg_repo::RecipeManifest {
+            packages: Vec::new(),
+        }
+    } else {
+        pkg_repo::load_cached_recipe_manifest(&cfg.repo_cache)?
+    };
+    let debug_root = cfg.build_root.join("debug");
+    let workspace = debug_root.join(&name);
+    let ctx = pkg_build::BuildContext {
+        scratch_dir: workspace.join("scratch"),
+        pkgdir: workspace.join("pkgdir"),
+        selection: node.selection.clone(),
+        inner_jobs: cfg.max_pkg_jobs.min(cfg.sched_tokens).max(1),
+        source_cache: cfg.source_cache.clone(),
+        compiler_wrapper: cfg.compiler_wrapper.clone(),
+        opt_level: cfg.opt_level,
+        host_glibc: cfg.host_glibc.clone(),
+        recipe_manifest: std::sync::Arc::new(recipe_manifest),
+        gate_deps,
+        build_deps,
+        host_lib_dirs: pkg_build::recipe::foreign_lib_dirs(),
+    };
+    drop(lock);
+    drop(conn);
+    let result = pkg_build::debug_shell::run_debug_shell(
+        &node.recipe,
+        &ctx,
+        &debug_root,
+        phase,
+        resume,
+        export,
+    )?;
+    println!("debug workspace retained at {}", result.workspace.display());
+    for path in result.exported {
+        println!("exported {}", path.display());
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------
@@ -3788,6 +3917,41 @@ fn cmd_key(action: KeyAction) -> PkgResult<()> {
             pkg_repo::TrustStore::import_root_manifest(&at(TRUST_DIR), &bytes)?;
             println!("imported root trust anchor v{}", manifest.version);
             Ok(())
+        }
+    }
+}
+
+fn cmd_hooks(action: HooksAction) -> PkgResult<()> {
+    match action {
+        HooksAction::Status => {
+            let _lock = lock_shared()?;
+            let conn = open_db()?;
+            let failures = queries::list_hook_failures(&conn)?;
+            if failures.is_empty() {
+                println!("no failed hooks");
+                return Ok(());
+            }
+            for failure in failures {
+                println!(
+                    "{}: {} attempt(s), last failed at {}\n  log: {}\n  error: {}",
+                    failure.operation,
+                    failure.attempts,
+                    failure.last_failed_at,
+                    failure.log_path,
+                    failure.error_summary
+                );
+            }
+            Ok(())
+        }
+        HooksAction::Retry => {
+            let _lock = lock_exclusive()?;
+            let conn = open_db()?;
+            let operations = queries::list_hook_failures(&conn)?
+                .into_iter()
+                .map(|failure| failure.operation)
+                .collect();
+            let failed = pkg_build::hooks::run_hooks(&conn, &operations)?;
+            hook_failure_result(&failed)
         }
     }
 }

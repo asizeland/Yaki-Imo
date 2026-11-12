@@ -20,6 +20,13 @@
 //! `queries.rs`'s job, not this file's; `schema.rs` only defines what a
 //! row *means*.
 //!
+//! ## v5 changes
+//!
+//! - [MAJOR] `SCHEMA_VERSION` bumped from 3 to 4. The additive
+//!   `hook_failures` table records current failed typed hook operations;
+//!   successful retries delete their rows. Existing v3 databases need only
+//!   the normal `DDL` batch and version re-stamp.
+//!
 //! ## v2 changes
 //!
 //! - [MINOR] `schema_meta` now enforces a singleton row
@@ -103,7 +110,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use pkg_core::{AbiTag, Arch, PkgError, PkgResult, Track, Version, VirtualName};
+use pkg_core::{AbiTag, Arch, HookOperation, PkgError, PkgResult, Track, Version, VirtualName};
 use rusqlite::Connection;
 
 /// Current schema version.
@@ -129,7 +136,10 @@ use rusqlite::Connection;
 /// now runs `migrate_v1v2_to_v3` (table rebuild + copy) against any
 /// database stamped below 3 before re-stamping. Fresh databases get the
 /// v3 shapes directly from `DDL` and skip the rebuild entirely.
-pub const SCHEMA_VERSION: i64 = 3;
+///
+/// Migration note (v5): schema v4 adds only `hook_failures`, so the normal
+/// `DDL` batch performs the v3-to-v4 migration before re-stamping.
+pub const SCHEMA_VERSION: i64 = 4;
 
 // NOTE on two deliberate storage choices in this DDL:
 //
@@ -317,6 +327,19 @@ CREATE TABLE IF NOT EXISTS link_interface (
     link_interface_hash TEXT NOT NULL,
     UNIQUE(package_id, soname)
 );
+
+-- Current failed typed hook operations. Presence means the operation still
+-- needs a successful retry; hook failures never roll back package state.
+CREATE TABLE IF NOT EXISTS hook_failures (
+    operation TEXT PRIMARY KEY CHECK (
+        operation IN ('ldconfig', 'font-cache', 'mime-cache', 'icon-cache')
+    ),
+    first_failed_at INTEGER NOT NULL,
+    last_failed_at INTEGER NOT NULL,
+    attempts INTEGER NOT NULL CHECK (attempts > 0),
+    log_path TEXT NOT NULL,
+    error_summary TEXT NOT NULL
+);
 "#;
 
 /// Creates every table if it doesn't already exist, and stamps
@@ -332,7 +355,8 @@ CREATE TABLE IF NOT EXISTS link_interface (
 /// (`migrate_v1v2_to_v3`): the `packages`/`dependencies` table rebuild
 /// that the new `opt_tag` column, wider UNIQUE constraint, and
 /// three-kind CHECK require, all of which `CREATE TABLE IF NOT EXISTS`
-/// alone cannot apply to tables that already exist.
+/// alone cannot apply to tables that already exist. On an existing v3
+/// database, only the additive `hook_failures` creation and v4 re-stamp run.
 ///
 /// Also turns on `PRAGMA foreign_keys`. SQLite ships with foreign key
 /// *enforcement* off by default, per connection, even though the syntax
@@ -782,6 +806,17 @@ pub struct LinkInterfaceRow {
     pub link_interface_hash: String,
 }
 
+/// Current failure state for one typed hook operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookFailure {
+    pub operation: HookOperation,
+    pub first_failed_at: i64,
+    pub last_failed_at: i64,
+    pub attempts: i64,
+    pub log_path: String,
+    pub error_summary: String,
+}
+
 // Note: `alternative_prefs` has no dedicated row type here. Its shape —
 // a virtual name paired with a preferred provider — is exactly
 // `pkg_core::AlternativePreference` (`virtual_pkg.rs`), so `queries.rs`
@@ -826,6 +861,8 @@ mod tests {
             "provenance",
             "build_history",
             "link_interface",
+            // schema v4
+            "hook_failures",
         ];
         for table in expected {
             let count: i64 = conn
@@ -850,6 +887,30 @@ mod tests {
         let conn = fresh_db();
         init_schema(&conn).unwrap();
         assert_eq!(current_schema_version(&conn).unwrap(), Some(SCHEMA_VERSION));
+        assert_eq!(SCHEMA_VERSION, 4);
+    }
+
+    #[test]
+    fn init_schema_migrates_v3_by_adding_hook_failures() {
+        let conn = fresh_db();
+        init_schema(&conn).unwrap();
+        conn.execute_batch(
+            "DROP TABLE hook_failures;
+             UPDATE schema_meta SET version = 3 WHERE id = 1;",
+        )
+        .unwrap();
+
+        init_schema(&conn).unwrap();
+
+        assert_eq!(current_schema_version(&conn).unwrap(), Some(4));
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'hook_failures'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]

@@ -116,9 +116,8 @@ pub enum SandboxProfile {
     /// bwrap itself cannot express a DNS/origin allowlist, and does not
     /// try to.
     Fetch,
-    /// Hook profile for maintainer scripts (post-install hooks, §7.8):
-    /// no network, no home, RW limited to system config/state the hook
-    /// legitimately maintains.
+    /// Legacy host-hook profile, also used by `pkg isolate`. Typed
+    /// transaction hooks instead use the target-root command runner.
     Hook,
     /// Out-of-tree module build for one installed kernel (§7.8.3).
     KernelModule {
