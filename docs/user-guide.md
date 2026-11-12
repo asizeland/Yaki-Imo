@@ -232,12 +232,21 @@ For example:
 ::1 localhost ip6-localhost
 ```
 
-After changing fonts or MIME data, update their caches as root:
+Recipes for fontconfig, shared MIME data, and GTK declare typed maintenance
+hooks. Yakimo runs the corresponding cache tools automatically after package
+activation, removal, rebuild, or undo. Each operation runs once per build plan,
+without network access, against the selected target root. To inspect or retry a
+failed operation:
 
+```sh
+pkg hooks status
+pkg hooks retry
 ```
-# fc-cache -f
-# update-mime-database /usr/share/mime
-```
+
+A failed hook does not roll back an already committed package set. Its log is
+under `/var/log/pkg/`; `pkg hooks retry` does not create a new generation.
+Manual `fc-cache -f` and `update-mime-database /usr/share/mime` commands remain
+available for diagnosing upstream tool problems.
 
 The `e2e/desktop.sh` test runs the complete path without a physical display:
 it compiles a GTK application and opens it and xterm under Xvfb through
@@ -894,6 +903,19 @@ optional; supply an install phase that unpacks and places the vendor files.
 The linkage check reports undeclared vendor-library references as warnings
 instead of errors.
 
+If the package's installed content requires a shared cache, declare a typed
+operation rather than writing a post-install command:
+
+```toml
+[hooks]
+operations = ["font-cache", "mime-cache", "icon-cache", "ldconfig"]
+```
+
+Declare only applicable operations. The package's runtime dependencies must
+provide the corresponding tool: `fc-cache`, `update-mime-database`,
+`gtk-update-icon-cache`, or `ldconfig`. Unknown operations are rejected. Hook
+programs are implemented by Yakimo, not supplied by the recipe.
+
 ### 11.4 Test and improve a recipe
 
 Pass the recipe directory or its `pkg-meta.toml` file directly. You do not need
@@ -912,6 +934,37 @@ pkg build --no-cache ./myrepo/app-misc/hello
 # Resolve dependencies from the local tree and install the result.
 pkg install --recipe-tree ./myrepo ./myrepo/app-misc/hello/pkg-meta.toml
 ```
+
+To inspect a build interactively, use a debug shell:
+
+```sh
+pkg debug-shell ./myrepo/app-misc/hello
+pkg debug-shell --phase compile ./myrepo/app-misc/hello
+pkg debug-shell --resume ./myrepo/app-misc/hello
+pkg debug-shell --resume --export ./fixes ./myrepo/app-misc/hello
+pkg debug-shell --remove-tree hello
+```
+
+A fresh shell has verified sources and the same dependency, option, compiler,
+and sandbox environment as a build. Dependencies must already be installed;
+use `pkg install` first when they also need building. By default the shell
+enters before `prepare`. `--phase compile` runs the successful prerequisite
+phases and enters before compilation. `check` and `install` select later entry
+points. A failed prerequisite leaves the workspace available for `--resume`.
+
+The source tree and `$PKGDIR` are writable; dependencies remain read-only and
+there is no network or live-root write access. `PKG_DEBUG_RECIPE` points to an
+editable copy of the recipe inside the workspace. The original checkout is not
+modified. Workspaces persist after exit under `/var/lib/pkg/build/debug/`;
+per-phase diagnostics are in the workspace's `logs/` directory. Workspaces
+are removed only by `--remove-tree`. Resume refuses changed package inputs
+instead of reusing a tree under a different contract.
+
+`--export` writes `<name>-source.patch` and `<name>-recipe.patch` when those
+files differ from their pristine baselines. Review these diffs and copy source
+patches into the recipe's `files/` directory. Nothing built interactively enters
+the store, artifact cache, or build history. Always validate the result with a
+fresh `pkg build` or `pkg install` afterward.
 
 The path may be relative or absolute. Yakimo reads the package name and version
 from `pkg-meta.toml`, so the recipe directory itself does not need a particular
@@ -1207,6 +1260,8 @@ sh e2e/run.sh           # smoke: signed repo, install, build gate
 sh e2e/lifecycle.sh     # remove/autoremove, upgrade, undo, mirrors
 sh e2e/options.sh       # build options, store GC, undo interplay
 sh e2e/dkms.sh          # kernel-triggered modules and nonfatal failure
+sh e2e/debug-shell.sh   # persistent build debugging and patch export
+sh e2e/hooks.sh         # typed caches, failure state, and retry
 sh e2e/real-package.sh  # a real autotools package from the internet
 sh e2e/real-binary.sh   # a repackaged binary blob (needs network)
 sh e2e/ports.sh         # the whole ports tree from scratch — hours
