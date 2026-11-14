@@ -165,6 +165,8 @@ tar xzf hello-1.0.tar.gz
 cd hello-1.0
 # Deps are RO-bound into the sandbox at the stable alias
 # /pkg/deps/<name> (no .store/<identity> globbing needed).
+echo "building hello.c"
+echo "compiler diagnostics stream" >&2
 cc -O2 -o hello hello.c -I /pkg/deps/libfoo/usr/include \
    -L /pkg/deps/libfoo/usr/lib -lfoo -Wl,-rpath,/usr/lib
 EOF
@@ -341,6 +343,40 @@ pass "installed hello binary runs (linked against libfoo)"
 out=$("$PKG" build hello 2>&1) || fail "pkg build hello (cache)"
 echo "$out" | grep -q "1 from cache" && pass "rebuild of identical identity is a cache hit" \
     || { echo "$out" >&2; fail "cache hit"; }
+
+out=$("$PKG" build --no-cache hello 2>&1) || fail "default build output"
+echo "$out" | grep -q '\[1/1\] hello: building' \
+    || { echo "$out" >&2; fail "default package counter"; }
+if echo "$out" | grep -q 'building hello.c\|compiler diagnostics stream'; then
+    fail "default output leaked compiler streams"
+fi
+pass "default output is concise and numbered"
+
+out=$("$PKG" build --quiet --no-cache hello 2>&1) || fail "quiet build"
+if echo "$out" | grep -q 'building hello.c\|compiler diagnostics stream\|\[1/1\] hello:'; then
+    fail "quiet output contained routine build output"
+fi
+pass "--quiet suppresses compiler output and package progress"
+
+out=$("$PKG" build --verbose --no-cache hello 2>&1) || fail "verbose build"
+echo "$out" | grep -q '^\[1/1\] building hello.c$' \
+    || { echo "$out" >&2; fail "verbose stdout prefix"; }
+echo "$out" | grep -q '^\[1/1\] compiler diagnostics stream$' \
+    || { echo "$out" >&2; fail "verbose stderr prefix"; }
+pass "--verbose prefixes stdout and stderr"
+
+cp "$ROOT/var/lib/pkg/recipes/hello/build" "$E2E/hello-build.good"
+printf 'echo compiler-stdout-failure\necho compiler-stderr-failure >&2\nexit 1\n' \
+    >> "$ROOT/var/lib/pkg/recipes/hello/build"
+if out=$("$PKG" build --quiet --no-cache hello 2>&1); then
+    fail "deliberately failing quiet build succeeded"
+fi
+cp "$E2E/hello-build.good" "$ROOT/var/lib/pkg/recipes/hello/build"
+echo "$out" | grep -q 'compiler-stdout-failure' \
+    || { echo "$out" >&2; fail "quiet failure lost stdout diagnostics"; }
+echo "$out" | grep -q 'compiler-stderr-failure' \
+    || { echo "$out" >&2; fail "quiet failure lost stderr diagnostics"; }
+pass "quiet failures retain stdout and stderr diagnostics"
 
 # ---------------------------------------------------------------
 # 11. Upgrade cascade: bump libfoo 1.0 -> 1.1 (interface change

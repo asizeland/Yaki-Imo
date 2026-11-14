@@ -23,6 +23,7 @@
 
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -545,6 +546,7 @@ fn unpack_tar_zst(artifact: &Path, dest_dir: &Path) -> PkgResult<()> {
     let file = BufReader::new(File::open(artifact).map_err(PkgError::Io)?);
     let decoder = zstd::Decoder::new(file).map_err(PkgError::Io)?;
     let mut archive = tar::Archive::new(decoder);
+    let mut directory_modes = Vec::new();
     for entry in archive.entries().map_err(PkgError::Io)? {
         let mut entry = entry.map_err(PkgError::Io)?;
         let rel = entry.path().map_err(PkgError::Io)?.into_owned();
@@ -565,12 +567,19 @@ fn unpack_tar_zst(artifact: &Path, dest_dir: &Path) -> PkgResult<()> {
         let target = dest_dir.join(&clean);
         if entry.header().entry_type().is_dir() {
             fs::create_dir_all(&target).map_err(PkgError::Io)?;
+            let mode = entry.header().mode().map_err(PkgError::Io)? & 0o7777;
+            directory_modes.push((target, mode));
         } else {
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).map_err(PkgError::Io)?;
             }
             entry.unpack(&target).map_err(PkgError::Io)?;
         }
+    }
+    // Apply restrictive modes only after their children have been unpacked.
+    directory_modes.sort_by(|a, b| b.0.components().count().cmp(&a.0.components().count()));
+    for (path, mode) in directory_modes {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(PkgError::Io)?;
     }
     Ok(())
 }
@@ -717,5 +726,34 @@ mod tests {
         );
         assert!(dest.path().join("usr/lib/libfoo.so.1").is_symlink());
         verify_manifest(dest.path()).unwrap();
+    }
+
+    #[test]
+    fn cache_roundtrip_preserves_empty_directory_modes() {
+        let src = tempfile::tempdir().unwrap();
+        for (rel, mode) in [("usr/lib/private", 0o700), ("var/tmp/sticky", 0o1777)] {
+            let path = src.path().join(rel);
+            fs::create_dir_all(&path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let cache_root = tempfile::tempdir().unwrap();
+        let cache = ArtifactCache::new(cache_root.path().join("cache"), DEFAULT_CAP_BYTES);
+        let key = key("");
+        cache.store(&key, src.path()).unwrap();
+        let dest_root = tempfile::tempdir().unwrap();
+        let dest = dest_root.path().join("dest");
+
+        assert!(cache.fetch_into(&key, &dest).unwrap());
+
+        for (rel, expected) in [("usr/lib/private", 0o700), ("var/tmp/sticky", 0o1777)] {
+            let path = dest.join(rel);
+            assert!(path.is_dir());
+            assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o7777,
+                expected
+            );
+        }
+        verify_manifest(&dest).unwrap();
     }
 }

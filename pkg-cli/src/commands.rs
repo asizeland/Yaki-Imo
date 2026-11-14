@@ -60,8 +60,8 @@ use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
 use crate::cli::{
-    AlternativesAction, Cli, Command, DbAction, EnvAction, HooksAction, KeyAction, ProfileAction,
-    TransactionFlags,
+    AlternativesAction, Cli, Command, DbAction, EnvAction, HooksAction, KeyAction, OutputFlags,
+    ProfileAction, TransactionFlags,
 };
 use crate::options;
 use crate::preview::{format_dry_run_preview, DryRunPlan};
@@ -561,6 +561,16 @@ fn apply_parallelism(cfg: &mut SchedConfig, cli_jobs: Option<u32>) -> PkgResult<
     Ok(())
 }
 
+fn apply_output_mode(cfg: &mut SchedConfig, flags: OutputFlags) {
+    cfg.output_mode = if flags.quiet {
+        pkg_build::output::BuildOutputMode::Quiet
+    } else if flags.verbose {
+        pkg_build::output::BuildOutputMode::Verbose
+    } else {
+        pkg_build::output::BuildOutputMode::Normal
+    };
+}
+
 /// Applies the declared `[build] opt_level` optimization profile
 /// (§4.3's bounded flag knob) strictly: an invalid value is a hard
 /// error here, matching what `compute_abi_tag` mixes into identity, so
@@ -680,7 +690,8 @@ pub fn dispatch(cli: Cli) -> PkgResult<()> {
         Command::Rebuild {
             affected,
             assume_yes,
-        } => cmd_rebuild(affected, assume_yes),
+            output,
+        } => cmd_rebuild(affected, assume_yes, output),
         Command::Check {
             target,
             verbose,
@@ -715,7 +726,8 @@ pub fn dispatch(cli: Cli) -> PkgResult<()> {
             opts,
             jobs,
             no_cache,
-        } => cmd_build(&name, opts, jobs, no_cache),
+            output,
+        } => cmd_build(&name, opts, jobs, no_cache, output),
         Command::DebugShell {
             name,
             opts,
@@ -1098,6 +1110,7 @@ fn run_transaction(kind: &str, specs: Vec<String>, flags: &TransactionFlags) -> 
     // -- execute ------------------------------------------------------
     let mut cfg = SchedConfig::with_defaults();
     apply_parallelism(&mut cfg, flags.jobs)?;
+    apply_output_mode(&mut cfg, flags.output);
     apply_opt_level(&mut cfg)?;
     cfg.command_line = format!("pkg {kind} {}", specs.join(" "));
     cfg.cascade_id = Some(new_cascade_id());
@@ -2513,7 +2526,7 @@ fn cmd_profile(action: ProfileAction) -> PkgResult<()> {
 /// `alternative_prefs`) is not the provider currently satisfying it —
 /// the state an `alternatives set` switch leaves behind until the
 /// dependents are rebuilt against the new provider.
-fn cmd_rebuild(affected: bool, assume_yes: bool) -> PkgResult<()> {
+fn cmd_rebuild(affected: bool, assume_yes: bool, output: OutputFlags) -> PkgResult<()> {
     if !affected {
         return Err(PkgError::Parse(
             "pkg rebuild: nothing to do without --affected (rebuild packages whose \
@@ -2648,6 +2661,7 @@ fn cmd_rebuild(affected: bool, assume_yes: bool) -> PkgResult<()> {
 
     let mut cfg = SchedConfig::with_defaults();
     apply_parallelism(&mut cfg, None)?;
+    apply_output_mode(&mut cfg, output);
     apply_opt_level(&mut cfg)?;
     cfg.command_line = "pkg rebuild --affected".to_string();
     cfg.cascade_id = Some(new_cascade_id());
@@ -3449,6 +3463,7 @@ fn cmd_build_env(name: &str, resolve: bool) -> PkgResult<()> {
         // The env printout should show what a real build on this host
         // would see, foreign lib dirs included.
         host_lib_dirs: pkg_build::recipe::foreign_lib_dirs(),
+        output: None,
     };
     for (k, v) in pkg_build::recipe::build_env(&ctx, &recipe)? {
         println!("{k}={v}");
@@ -3737,11 +3752,18 @@ fn single_package_setup(
     Ok((conn, name, node, cfg))
 }
 
-fn cmd_build(target: &str, opts: Vec<String>, jobs: Option<u32>, no_cache: bool) -> PkgResult<()> {
+fn cmd_build(
+    target: &str,
+    opts: Vec<String>,
+    jobs: Option<u32>,
+    no_cache: bool,
+    output: OutputFlags,
+) -> PkgResult<()> {
     let _lock = lock_exclusive()?;
     let (conn, name, node, mut cfg) = single_package_setup(target, opts, jobs)?;
     let mut plan = BuildPlan::default();
     plan.nodes.insert(name.clone(), node);
+    apply_output_mode(&mut cfg, output);
     cfg.command_line = format!("pkg build {target}");
     if no_cache {
         cfg.cache = None;
@@ -3821,6 +3843,7 @@ fn cmd_debug_shell(
         gate_deps,
         build_deps,
         host_lib_dirs: pkg_build::recipe::foreign_lib_dirs(),
+        output: None,
     };
     drop(lock);
     drop(conn);
@@ -4197,6 +4220,7 @@ fn cmd_cascade(at: Option<String>, execute_pending: bool, ignore_power: bool) ->
         println!("executing pending cascade (deferred rebuilds resume; cache hits are free)");
         fs::remove_file(pending).map_err(PkgError::Io)?;
         let flags = TransactionFlags {
+            output: OutputFlags::default(),
             opts: Vec::new(),
             recipe_tree: None,
             dry_run: false,

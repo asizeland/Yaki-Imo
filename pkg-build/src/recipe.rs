@@ -25,16 +25,24 @@
 //!   T7 guard needs the manifest entry, not the recipe dir; a missing
 //!   entry points at `pkg sync`. The gate call passes `&[DeclaredDep]`
 //!   (store dirs to scan for provided sonames), not bare names.
+//!
+//! ## v3
+//!
+//! - Recipe phases can use line-aware output callbacks and retain both stdout
+//!   and stderr for diagnostics; interactive debug sessions remain unchanged.
 
 use std::collections::BTreeMap;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pkg_core::manifest::{BuildSystem, PackageManifest};
 use pkg_core::{AbiTag, PkgError, PkgResult, Version};
 use pkg_db::queries::{self, BuildRecord};
-use pkg_sandbox::{run_sandboxed_with_binds, SandboxProfile};
+use pkg_sandbox::{
+    run_sandboxed_with_binds, run_sandboxed_with_binds_output, SandboxOutcome, SandboxProfile,
+};
 use rusqlite::Connection;
 
 /// Recipe phase names, in execution order after `Fetch`.
@@ -181,6 +189,9 @@ pub struct BuildContext {
     /// may need, appended to `LD_LIBRARY_PATH` after the dep dirs (see
     /// [`foreign_lib_dirs`]). Empty on yakimo-native systems.
     pub host_lib_dirs: Vec<String>,
+    /// Foreground build output and progress; absent for environment
+    /// inspection and interactive debug sessions.
+    pub output: Option<std::sync::Arc<crate::output::BuildProgress>>,
 }
 
 /// Foreign library directories a host tool inside the build sandbox may
@@ -304,6 +315,28 @@ pub fn build_env(ctx: &BuildContext, recipe: &Recipe) -> PkgResult<Vec<(String, 
     if !dep_pc_path.is_empty() {
         env.push(("PKG_CONFIG_PATH".into(), dep_pc_path.join(":")));
     }
+    if ctx
+        .gate_deps
+        .iter()
+        .chain(ctx.build_deps.iter())
+        .any(|dep| dep.name == "gettext")
+    {
+        env.push((
+            "GETTEXTDATADIR".into(),
+            "/pkg/deps/gettext/usr/share/gettext".into(),
+        ));
+    }
+    if ctx
+        .gate_deps
+        .iter()
+        .chain(ctx.build_deps.iter())
+        .any(|dep| dep.name == "polkit")
+    {
+        env.push((
+            "GETTEXTDATADIRS".into(),
+            "/pkg/deps/polkit/usr/share/gettext".into(),
+        ));
+    }
     // Issue 1 §2.4: one PKG_OPT_<NAME>=0|1 per declared option,
     // including unmentioned options at their defaults. The selection is
     // transaction-wide, so filter it down to the options this package
@@ -406,9 +439,8 @@ pub fn run_recipe(
     })
 }
 
-/// The phases-only result: the overall result plus every executed
-/// phase's stderr tail (kept even on failure — the orchestrator's
-/// Issue 4.2.6 failure report needs the failing log).
+/// The phases-only result: the overall result plus every executed phase's
+/// bounded output tail (kept even on failure for the orchestrator's report).
 #[derive(Debug)]
 pub struct PhaseOutcome {
     pub result: PkgResult<()>,
@@ -502,6 +534,50 @@ pub(crate) fn prepare_recipe_workspace(
     })
 }
 
+fn run_build_command(
+    ctx: &BuildContext,
+    dep_binds: &[(PathBuf, PathBuf)],
+    cmd: &[String],
+    env: &[(String, String)],
+) -> PkgResult<SandboxOutcome> {
+    if let Some(progress) = &ctx.output {
+        let callback = |stream: pkg_sandbox::SandboxStream, line: &str| {
+            progress.output_line(stream, line);
+        };
+        run_sandboxed_with_binds_output(
+            &SandboxProfile::Build,
+            dep_binds,
+            cmd,
+            &ctx.scratch_dir,
+            env,
+            &callback,
+        )
+    } else {
+        run_sandboxed_with_binds(
+            &SandboxProfile::Build,
+            dep_binds,
+            cmd,
+            &ctx.scratch_dir,
+            env,
+        )
+    }
+}
+
+fn output_tail(outcome: &SandboxOutcome) -> String {
+    match (
+        outcome.stdout_tail.is_empty(),
+        outcome.stderr_tail.is_empty(),
+    ) {
+        (true, true) => String::new(),
+        (false, true) => outcome.stdout_tail.clone(),
+        (true, false) => outcome.stderr_tail.clone(),
+        (false, false) => format!(
+            "stdout:\n{}\nstderr:\n{}",
+            outcome.stdout_tail, outcome.stderr_tail
+        ),
+    }
+}
+
 pub(crate) fn run_recipe_phase(
     recipe: &Recipe,
     ctx: &BuildContext,
@@ -527,13 +603,7 @@ pub(crate) fn run_recipe_phase(
         "-e".to_string(),
         script.display().to_string(),
     ];
-    let outcome = run_sandboxed_with_binds(
-        &SandboxProfile::Build,
-        &prepared.dep_binds,
-        &cmd,
-        &ctx.scratch_dir,
-        &prepared.env,
-    )?;
+    let outcome = run_build_command(ctx, &prepared.dep_binds, &cmd, &prepared.env)?;
     if !outcome.success() {
         return Err(PkgError::Build(format!(
             "{} {}: `{}` phase failed ({}): {}",
@@ -541,10 +611,10 @@ pub(crate) fn run_recipe_phase(
             recipe.manifest.version,
             phase,
             outcome.status,
-            outcome.stderr_tail
+            output_tail(&outcome)
         )));
     }
-    Ok(Some(outcome.stderr_tail))
+    Ok(Some(output_tail(&outcome)))
 }
 
 fn run_recipe_phases_impl(
@@ -614,17 +684,14 @@ fn prepare_managed_source(
     let archive = staged_sources.first().filter(|name| is_tar_archive(name));
     if let Some(archive) = archive {
         let cmd = vec!["tar".into(), "-xf".into(), archive.clone()];
-        let outcome = run_sandboxed_with_binds(
-            &SandboxProfile::Build,
-            dep_binds,
-            &cmd,
-            &ctx.scratch_dir,
-            env,
-        )?;
+        let outcome = run_build_command(ctx, dep_binds, &cmd, env)?;
         if !outcome.success() {
             return Err(PkgError::Build(format!(
                 "{} {}: source unpack failed ({}): {}",
-                recipe.manifest.name, recipe.manifest.version, outcome.status, outcome.stderr_tail
+                recipe.manifest.name,
+                recipe.manifest.version,
+                outcome.status,
+                output_tail(&outcome)
             )));
         }
     }
@@ -801,7 +868,15 @@ fn fixup_pkgconfig_prefixes(pkgdir: &Path) -> PkgResult<()> {
             }
         }
         if changed {
-            fs::write(&pc, out).map_err(PkgError::Io)?;
+            let original = fs::metadata(&pc).map_err(PkgError::Io)?.permissions();
+            let mut owner_writable = original.clone();
+            owner_writable.set_mode(original.mode() | 0o200);
+            if owner_writable.mode() != original.mode() {
+                fs::set_permissions(&pc, owner_writable).map_err(PkgError::Io)?;
+            }
+            let result = fs::write(&pc, out);
+            fs::set_permissions(&pc, original).map_err(PkgError::Io)?;
+            result.map_err(PkgError::Io)?;
         }
     }
     Ok(())
@@ -930,6 +1005,27 @@ mod tests {
     }
 
     #[test]
+    fn pkgconfig_fixup_preserves_read_only_modes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pcdir = tmp.path().join("usr/lib/pkgconfig");
+        fs::create_dir_all(&pcdir).unwrap();
+        let pc = pcdir.join("devmapper.pc");
+        fs::write(&pc, "prefix=/usr\n").unwrap();
+        fs::set_permissions(&pc, fs::Permissions::from_mode(0o444)).unwrap();
+
+        fixup_pkgconfig_prefixes(tmp.path()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&pc).unwrap(),
+            "prefix=${pcfiledir}/../..\n"
+        );
+        assert_eq!(
+            fs::metadata(&pc).unwrap().permissions().mode() & 0o7777,
+            0o444
+        );
+    }
+
+    #[test]
     fn pkgconfig_fixup_rewrites_hardcoded_usr_variables() {
         let tmp = tempfile::tempdir().unwrap();
         let pcdir = tmp.path().join("usr/lib/pkgconfig");
@@ -1013,6 +1109,7 @@ default = false
             gate_deps: Vec::new(),
             build_deps: Vec::new(),
             host_lib_dirs: Vec::new(),
+            output: None,
         }
     }
 
@@ -1115,6 +1212,40 @@ default = false
         assert_eq!(
             get("LIBRARY_PATH").as_deref(),
             Some("/pkg/deps/zlib/usr/lib")
+        );
+    }
+
+    #[test]
+    fn env_relocates_gettext_data_when_declared() {
+        let recipe = Recipe {
+            manifest: manifest_with_options(),
+            dir: PathBuf::from("/recipe"),
+            recipe_commit: "abc".into(),
+            local_manifest: None,
+        };
+        let mut c = ctx(BTreeMap::new());
+        c.build_deps = vec![
+            pkg_scanner::DeclaredDep {
+                name: "gettext".into(),
+                store_dir: PathBuf::from("/store/gettext-0.26+ab1"),
+            },
+            pkg_scanner::DeclaredDep {
+                name: "polkit".into(),
+                store_dir: PathBuf::from("/store/polkit-128+ab1"),
+            },
+        ];
+        let env = build_env(&c, &recipe).unwrap();
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "GETTEXTDATADIR")
+                .map(|(_, value)| value.as_str()),
+            Some("/pkg/deps/gettext/usr/share/gettext")
+        );
+        assert_eq!(
+            env.iter()
+                .find(|(key, _)| key == "GETTEXTDATADIRS")
+                .map(|(_, value)| value.as_str()),
+            Some("/pkg/deps/polkit/usr/share/gettext")
         );
     }
 

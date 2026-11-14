@@ -332,7 +332,10 @@ CREATE TABLE IF NOT EXISTS link_interface (
 -- needs a successful retry; hook failures never roll back package state.
 CREATE TABLE IF NOT EXISTS hook_failures (
     operation TEXT PRIMARY KEY CHECK (
-        operation IN ('ldconfig', 'font-cache', 'mime-cache', 'icon-cache')
+        operation IN (
+            'ldconfig', 'font-cache', 'mime-cache', 'icon-cache',
+            'desktop-database', 'glib-schemas'
+        )
     ),
     first_failed_at INTEGER NOT NULL,
     last_failed_at INTEGER NOT NULL,

@@ -52,11 +52,12 @@ Recipes declare operations, not shell commands:
 
 ```toml
 [hooks]
-operations = ["font-cache", "mime-cache"]
+operations = ["font-cache", "mime-cache", "desktop-database", "glib-schemas"]
 ```
 
-Yakimo owns and reviews each operation's implementation. The initial operation
-set is `ldconfig`, `font-cache`, `mime-cache`, and `icon-cache`. Operations are
+Yakimo owns and reviews each operation's implementation. The operation set is
+`ldconfig`, `font-cache`, `mime-cache`, `icon-cache`, `desktop-database`, and
+`glib-schemas`. Operations are
 idempotent, have a centrally defined order, and run once per transaction or
 build plan even when several packages request them. Activation, removal,
 autoremove, undo, and same-identity rebuilds must all reconcile the relevant

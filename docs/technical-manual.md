@@ -197,6 +197,10 @@ This is a personal reuse mechanism, not a binary repository: there is no artifac
 
 A cache hit returns before recipe phases and before the critical-set double-build. The cached tree still goes through store staging, activation, and post-activation metadata measurement.
 
+Recipe builds pipe both stdout and stderr through line-aware readers. The normal mode retains bounded tails for diagnostics but forwards no routine compiler lines; verbose mode forwards both streams, and quiet mode also suppresses package start/completion messages. A transaction-wide lock keeps forwarded lines intact when workers run in parallel.
+
+The scheduler fixes the denominator from the effective plan and assigns an ordinal at worker launch. These ordinals identify concurrent workers, not completion order. Verbose prefixes recognize Ninja's `[done/total]` and CMake's `[percent]` markers. Other builds can use the scaled historical ETA as a tilde-marked elapsed-time estimate, capped at 99% until completion; without history the percentage is omitted. Output and estimates never affect package identity, scheduling, or correctness.
+
 ### 2.7 Fetching and verifying sources
 
 For a repository recipe, a build first finds the exact package name/version in `/var/cache/pkg/index/recipe-manifest.toml`. Only sources declared in that entry can be fetched. Each source URL must use HTTP or HTTPS and has a pinned SHA-256 digest.
@@ -272,9 +276,9 @@ A recipe marked `[build] critical = true` is built a second time by default. The
 
 ### 2.11 Store staging, activation, and the database commit
 
-A completed `$PKGDIR` is moved beneath the store's `.stage/` directory, with a copy fallback for cross-filesystem test/build layouts. Yakimo writes and verifies a manifest of regular-file hashes, then renames the tree to its identity-derived store name. The recipe manifest is retained as a hidden store sidecar for later inspection and DKMS reconciliation.
+A completed `$PKGDIR` is moved beneath the store's `.stage/` directory, with a copy fallback for cross-filesystem test/build layouts. The fallback and artifact-cache extraction both preserve directory permission modes. Yakimo writes and verifies a manifest of regular-file hashes, then renames the tree to its identity-derived store name. The recipe manifest is retained as a hidden store sidecar for later inspection and DKMS reconciliation.
 
-Activation computes the difference between the current and target package sets. For each incoming store tree it derives one symlink operation per file or symlink; directories become real directories in the live tree. New links are created at a temporary sibling and renamed over the destination, making each individual link replacement atomic. Removal is guarded so Yakimo does not unlink a path that has since been re-pointed elsewhere. If glibc supplies `ldconfig`, cache regeneration is attempted and failures are warnings.
+Activation computes the difference between the current and target package sets. For each incoming store tree it derives sorted real-directory operations plus one symlink operation per file or symlink. Empty directories are included. Missing directories are created before links and receive their store modes, including sticky or set-id bits; existing real directories keep their modes and contents. A file or symlink collision at a package directory path is rejected. Deactivation removes only owned links and deliberately leaves directories for other packages and user data. The same directory-aware path handles normal activation, same-identity rebuilds, undo, and named-environment materialization. New links are created at a temporary sibling and renamed over the destination, making each individual link replacement atomic. Removal is guarded so Yakimo does not unlink a path that has since been re-pointed elsewhere. If glibc supplies `ldconfig`, cache regeneration is attempted and failures are warnings.
 
 Only after filesystem operations does Yakimo open the SQLite transaction. Package deletion/insertion, resolved dependency edges, and the generation snapshot commit together. If that DB transaction fails, it rolls back as a unit.
 
@@ -282,7 +286,7 @@ This is **honest atomicity, not a claim that the whole multi-package cascade is 
 
 After commit, recording of measured interfaces and provenance is best-effort; a metadata-write failure warns rather than pretending the already-committed activation did not happen. Provenance includes the recipe commit, source hashes, index version, attestation fingerprints, build host, builder/profile version, timestamps, and any self-match result.
 
-Typed `[hooks] operations` are collected from incoming and outgoing recipe sidecars and coalesced in fixed order across a build plan. Removal, autoremove, undo, and same-identity rebuilds use the same reconciliation. `ldconfig`, `font-cache`, `mime-cache`, and `icon-cache` run fixed commands in a no-network namespace with the selected root at `/` and only operation-specific writable paths. Logs go to the target's `/var/log/pkg/`.
+Typed `[hooks] operations` are collected from incoming and outgoing recipe sidecars and coalesced in fixed order across a build plan. Removal, autoremove, undo, and same-identity rebuilds use the same reconciliation. `ldconfig`, `font-cache`, `mime-cache`, `icon-cache`, `desktop-database`, and `glib-schemas` run fixed commands in a no-network namespace with the selected root at `/` and only operation-specific writable paths. The desktop hook updates `/usr/share/applications`; the schema hook compiles `/usr/share/glib-2.0/schemas`. Logs go to the target's `/var/log/pkg/`.
 
 Hook failure happens after the package commit and never rolls it back. The schema-v4 `hook_failures` table records outstanding operations, attempts, timestamps, log paths, and bounded summaries. The transaction command returns failure after other post-commit work, while `pkg hooks status` and `pkg hooks retry` inspect and reconcile it. Retry creates no generation. Because v4 only adds this table, undo accepts compatible v3 and v4 generation package sets.
 

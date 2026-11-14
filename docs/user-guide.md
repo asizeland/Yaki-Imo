@@ -157,6 +157,40 @@ If one package fails to build, packages that do not depend on it can still
 finish. Completed builds are saved. Fix the problem and run the same command
 again; Yakimo does not rebuild those completed packages.
 
+### Build output and progress
+
+Compiler output is hidden by default. Yakimo prints one line when a package
+starts and another when it finishes:
+
+```
+[1/28] linux-headers: building
+[1/28] linux-headers: built
+[2/28] glibc: building
+```
+
+The numbers are the package's position in the transaction and the total number
+of packages in the effective plan. When packages build in parallel, a larger
+number can finish before a smaller one; the counter is not a completion count.
+
+Use `--verbose` on `pkg install`, `pkg upgrade`, `pkg build`, or `pkg rebuild`
+to see every compiler output line. Each line belongs to the numbered package:
+
+```
+[2/28 | 53%] [112/210] Building CXX object src/example.cc
+```
+
+Ninja and CMake provide actual completion percentages. For Make and custom
+builds, which do not provide a general total, Yakimo can estimate progress from
+previous build times. A tilde marks that estimate: `~53%`. If no dependable
+percentage is available, Yakimo prints only `[2/28]`. An estimate never reaches
+100% before the build finishes.
+
+Use `--quiet` to suppress package progress as well as compiler output. Warnings,
+the final result, and failure diagnostics remain visible. A failed build keeps
+both standard output and error output in its diagnostic tail even in quiet mode;
+you do not need to repeat the build with `--verbose` just to see the error.
+`--quiet` and `--verbose` cannot be used together.
+
 ### Pins: preventing unwanted upgrades
 
 A pin keeps a package on a chosen version or upgrade track:
@@ -203,16 +237,54 @@ it and run it later:
 
 ---
 
-### X11 and GTK3
+### Base filesystem
 
-The recipe tree includes Xorg, libinput, `startx` and `xauth`, xterm, a
-software OpenGL fallback, and GTK 3. Install the initial set with:
+Install `base-files` before the rest of a new target system:
+
+```sh
+pkg install base-files
+```
+
+It creates the standard Linux directory hierarchy, including mount points under
+`/proc`, `/sys`, and `/dev`. `/root` is mode `0700`; `/tmp` and `/var/tmp` are
+mode `1777`. It also installs Yakimo's `os-release` identity and the standard
+`/etc/os-release`, `/etc/mtab`, and `/var/run` links.
+
+The package provides locked `root`, `messagebus`, and `nobody` accounts, basic
+system groups, locked-password databases, `/etc/shells`, and file-based
+NSS configuration. These accounts cannot be used for password login. Create and
+configure a normal user separately before using the system as a workstation.
+
+Yakimo creates missing package-owned directories and preserves their modes in
+the store and artifact cache. It does not change the mode of an existing shared
+directory or remove directories during package removal. `base-files` deliberately
+does not supply machine-specific files such as `fstab`, `hostname`, `hosts`,
+normal login accounts, or network configuration.
+
+### X11, GTK3, and XFCE
+
+The recipe tree includes Xorg, libinput, `startx` and `xauth`, a software
+OpenGL fallback, GTK 3, and the XFCE 4.20 desktop. Install the complete desktop
+set with:
 
 ```
-# pkg install xinit xf86-input-libinput xterm gtk3
+# pkg install xfce4-meta
 ```
 
-Start an X session as the user who should own it:
+The meta-package selects the XFCE session, window manager, panel, desktop,
+settings daemon, file manager, application finder, terminal, task manager,
+notifications, power manager, screensaver, thumbnail service, and the supporting
+D-Bus, Polkit, UPower, UDisks2, and GVfs packages. It also selects `startx`,
+Xauth, fonts, MIME data, and icon themes. This is an X11 desktop; Wayland and a
+graphical display manager are not included.
+
+To start XFCE from a console, put this line in the session owner's `~/.xinitrc`:
+
+```sh
+exec startxfce4
+```
+
+Then start the session as that same user:
 
 ```
 $ startx
@@ -220,8 +292,7 @@ $ startx
 
 The NVIDIA recipe installs its Xorg driver and GLX extension. Mesa provides
 the `softpipe` software renderer when hardware acceleration is unavailable.
-This first set does not include a desktop environment, display manager,
-Wayland, JPEG/TIFF image loaders, or hardware Mesa drivers.
+JPEG and PNG image loading are included; TIFF and hardware Mesa drivers are not.
 
 Make sure `/etc/hosts` contains the machine's hostname next to its local
 address. `xauth` uses that name when it creates the session's access cookie.
@@ -232,8 +303,25 @@ For example:
 ::1 localhost ip6-localhost
 ```
 
-Recipes for fontconfig, shared MIME data, and GTK declare typed maintenance
-hooks. Yakimo runs the corresponding cache tools automatically after package
+For desktop services under OpenRC, enable D-Bus first and then the desktop
+authorization, power, and storage services:
+
+```sh
+rc-update add dbus default
+rc-update add polkit default
+rc-update add upower default
+rc-update add udisks default
+```
+
+The screensaver uses PAM for authentication. The supplied PAM rules reject empty
+passwords and unknown services fail closed; they do not provide passwordless
+login. Until Yakimo has system-account lifecycle support, `polkitd` runs as root
+instead of dropping to a separate unprivileged account. Physical screen locking,
+active-session policy, suspend, and removable media mounting still need testing
+on the live machine.
+
+Recipes for fontconfig, shared MIME data, desktop entries, GLib schemas, and GTK
+declare typed maintenance hooks. Yakimo runs the corresponding cache tools automatically after package
 activation, removal, rebuild, or undo. Each operation runs once per build plan,
 without network access, against the selected target root. To inspect or retry a
 failed operation:
@@ -248,10 +336,15 @@ under `/var/log/pkg/`; `pkg hooks retry` does not create a new generation.
 Manual `fc-cache -f` and `update-mime-database /usr/share/mime` commands remain
 available for diagnosing upstream tool problems.
 
-The `e2e/desktop.sh` test runs the complete path without a physical display:
-it compiles a GTK application and opens it and xterm under Xvfb through
-`startx`. This checks the installed root; it does not test a real monitor,
-keyboard, or GPU.
+The `e2e/desktop.sh` test runs the complete path without a physical display.
+It starts XFCE under Xvfb through `startx` with private session and system
+D-Bus buses, runs a command in Xfce Terminal, sends a notification, generates
+a PNG thumbnail through Tumbler, and exercises the desktop service clients
+without mounting a device. It also compiles and opens a GTK application and
+runs xterm. The single-UID test namespace runs its private system services as
+root; a live OpenRC boot uses the normal `messagebus` account and D-Bus
+activation helper. This checks the installed root, not a real monitor,
+keyboard, GPU, active login session, or physical storage operation.
 
 ---
 
@@ -908,13 +1001,14 @@ operation rather than writing a post-install command:
 
 ```toml
 [hooks]
-operations = ["font-cache", "mime-cache", "icon-cache", "ldconfig"]
+operations = ["font-cache", "mime-cache", "icon-cache", "desktop-database", "glib-schemas", "ldconfig"]
 ```
 
 Declare only applicable operations. The package's runtime dependencies must
 provide the corresponding tool: `fc-cache`, `update-mime-database`,
-`gtk-update-icon-cache`, or `ldconfig`. Unknown operations are rejected. Hook
-programs are implemented by Yakimo, not supplied by the recipe.
+`gtk-update-icon-cache`, `update-desktop-database`, `glib-compile-schemas`, or
+`ldconfig`. Unknown operations are rejected. Hook programs are implemented by
+Yakimo, not supplied by the recipe.
 
 ### 11.4 Test and improve a recipe
 

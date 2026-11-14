@@ -24,6 +24,11 @@
 //! - `debug_shell` provides retained, non-canonical interactive workspaces;
 //!   `hooks` provides typed, target-root maintenance with persistent retry state.
 //!
+//! ## v4 changes
+//!
+//! - `output` provides concise default output, optional verbose line prefixes,
+//!   and transaction/package progress without changing scheduler semantics.
+//!
 //! Public modules are re-exported flat (`pub use x::*`).
 
 pub mod build_system;
@@ -34,6 +39,7 @@ pub mod dkms;
 pub mod glibc;
 pub mod hooks;
 pub mod orchestrator;
+pub mod output;
 pub mod recipe;
 pub mod repro;
 pub mod staging;

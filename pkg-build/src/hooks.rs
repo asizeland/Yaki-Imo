@@ -141,6 +141,20 @@ fn operation_plan(
             ]],
             vec![PathBuf::from("usr/share/mime")],
         )),
+        HookOperation::DesktopDatabase => Ok((
+            vec![vec![
+                "/usr/bin/update-desktop-database".into(),
+                "/usr/share/applications".into(),
+            ]],
+            vec![PathBuf::from("usr/share/applications")],
+        )),
+        HookOperation::GlibSchemas => Ok((
+            vec![vec![
+                "/usr/bin/glib-compile-schemas".into(),
+                "/usr/share/glib-2.0/schemas".into(),
+            ]],
+            vec![PathBuf::from("usr/share/glib-2.0/schemas")],
+        )),
         HookOperation::IconCache => {
             let icons = root.join("usr/share/icons");
             let mut themes = Vec::new();
@@ -192,17 +206,52 @@ mod tests {
 
     #[test]
     fn operation_order_is_fixed() {
-        let requested = [HookOperation::IconCache, HookOperation::FontCache]
-            .into_iter()
-            .collect::<BTreeSet<_>>();
+        let requested = [
+            HookOperation::GlibSchemas,
+            HookOperation::IconCache,
+            HookOperation::DesktopDatabase,
+            HookOperation::FontCache,
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
         let ordered: Vec<_> = HookOperation::ALL
             .into_iter()
             .filter(|operation| requested.contains(operation))
             .collect();
         assert_eq!(
             ordered,
-            [HookOperation::FontCache, HookOperation::IconCache]
+            [
+                HookOperation::FontCache,
+                HookOperation::IconCache,
+                HookOperation::DesktopDatabase,
+                HookOperation::GlibSchemas,
+            ]
         );
+    }
+
+    #[test]
+    fn desktop_and_schema_hooks_have_fixed_target_root_plans() {
+        let (commands, writable) =
+            operation_plan(Path::new("/target"), HookOperation::DesktopDatabase).unwrap();
+        assert_eq!(
+            commands,
+            [vec![
+                "/usr/bin/update-desktop-database".to_string(),
+                "/usr/share/applications".to_string(),
+            ]]
+        );
+        assert_eq!(writable, [PathBuf::from("usr/share/applications")]);
+
+        let (commands, writable) =
+            operation_plan(Path::new("/target"), HookOperation::GlibSchemas).unwrap();
+        assert_eq!(
+            commands,
+            [vec![
+                "/usr/bin/glib-compile-schemas".to_string(),
+                "/usr/share/glib-2.0/schemas".to_string(),
+            ]]
+        );
+        assert_eq!(writable, [PathBuf::from("usr/share/glib-2.0/schemas")]);
     }
 
     #[test]

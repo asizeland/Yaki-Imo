@@ -1984,12 +1984,8 @@ mod tests {
         let conn = fresh_db();
         assert!(list_hook_failures(&conn).unwrap().is_empty());
 
-        for (operation, failed_at) in [
-            (HookOperation::IconCache, 40),
-            (HookOperation::Ldconfig, 10),
-            (HookOperation::MimeCache, 30),
-            (HookOperation::FontCache, 20),
-        ] {
+        for (failed_at, operation) in HookOperation::ALL.into_iter().enumerate().rev() {
+            let failed_at = failed_at as i64 * 10 + 10;
             upsert_hook_failure(
                 &conn,
                 operation,

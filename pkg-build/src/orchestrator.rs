@@ -1,6 +1,11 @@
 //! pkg-build/src/orchestrator.rs — DAG-level parallel executor
 //! (SPEC "pkg-build"; design doc Issue 4.2, 4.5, 4.6).
 //!
+//! ## v5 changes
+//!
+//! - Workers receive stable effective-plan ordinals and output policy; native
+//!   build markers and scaled history drive verbose per-package percentages.
+//!
 //! ## v1 changes
 //!
 //! - Initial implementation of `execute_plan`: topological-level sweep
@@ -255,6 +260,8 @@ pub struct SchedConfig {
     pub cascade_id: Option<String>,
     /// The store roots activation symlinks point into, per arch tree.
     pub store_roots: Vec<PathBuf>,
+    /// Foreground compiler output and package progress policy.
+    pub output_mode: crate::output::BuildOutputMode,
 }
 
 impl SchedConfig {
@@ -297,6 +304,7 @@ impl SchedConfig {
             command_line: String::new(),
             cascade_id: None,
             store_roots: vec![pkg_core::paths::at("/usr/lib/pkg/.store")],
+            output_mode: crate::output::BuildOutputMode::Normal,
         }
     }
 }
@@ -810,6 +818,9 @@ pub fn execute_plan(conn: &Connection, plan: &BuildPlan, cfg: &SchedConfig) -> P
         }
     };
     let recipe_manifest = Arc::new(recipe_manifest);
+    let terminal = Arc::new(std::sync::Mutex::new(()));
+    let total = plan.nodes.len();
+    let mut next_ordinal = 1;
 
     let mut pool = TokenPool::new(cfg.sched_tokens);
     let mut states: BTreeMap<String, NodeState> = plan
@@ -882,7 +893,11 @@ pub fn execute_plan(conn: &Connection, plan: &BuildPlan, cfg: &SchedConfig) -> P
             .collect();
         for name in prunable {
             states.insert(name.clone(), NodeState::Pruned);
-            report.pruned.push(name);
+            report.pruned.push(name.clone());
+            if cfg.output_mode != crate::output::BuildOutputMode::Quiet {
+                let _guard = terminal.lock().unwrap_or_else(|e| e.into_inner());
+                println!("pkg: {name}: dependency interfaces unchanged; skipping rebuild");
+            }
         }
 
         // -- launch ready nodes --------------------------------------
@@ -911,7 +926,19 @@ pub fn execute_plan(conn: &Connection, plan: &BuildPlan, cfg: &SchedConfig) -> P
             };
             states.insert(name.clone(), NodeState::Running);
             running.insert(name.clone(), tokens);
-            spawn_worker(conn, &tx, plan, cfg, name, tokens, &recipe_manifest);
+            spawn_worker(
+                conn,
+                &tx,
+                plan,
+                cfg,
+                name,
+                tokens,
+                &recipe_manifest,
+                next_ordinal,
+                total,
+                &terminal,
+            );
+            next_ordinal += 1;
         }
 
         if running.is_empty() {
@@ -981,14 +1008,34 @@ fn spawn_worker(
     name: String,
     tokens: u32,
     recipe_manifest: &Arc<pkg_repo::RecipeManifest>,
+    ordinal: usize,
+    total: usize,
+    terminal: &Arc<std::sync::Mutex<()>>,
 ) {
     let node = plan.nodes.get(&name).expect("node exists").clone();
     let (gate_deps, build_deps) = gate_deps_for(conn, plan, &node, cfg);
+    let estimate = scaled_eta(conn, &name, tokens).unwrap_or(None);
+    let progress = crate::output::BuildProgress::new(
+        name,
+        ordinal,
+        total,
+        cfg.output_mode,
+        estimate,
+        terminal.clone(),
+    );
     let cfg = cfg.clone();
     let tx = tx.clone();
     let recipe_manifest = recipe_manifest.clone();
     thread::spawn(move || {
-        let done = build_node(&node, &cfg, tokens, recipe_manifest, gate_deps, build_deps);
+        let done = build_node(
+            &node,
+            &cfg,
+            tokens,
+            recipe_manifest,
+            gate_deps,
+            build_deps,
+            progress,
+        );
         let _ = tx.send(done);
     });
 }
@@ -1244,7 +1291,9 @@ fn build_node(
     recipe_manifest: Arc<pkg_repo::RecipeManifest>,
     gate_deps: Vec<DeclaredDep>,
     build_deps: Vec<DeclaredDep>,
+    progress: Arc<crate::output::BuildProgress>,
 ) -> WorkerDone {
+    progress.start();
     let started_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -1265,6 +1314,7 @@ fn build_node(
         );
         match cache.fetch_into(&key, &pkgdir) {
             Ok(true) => {
+                progress.finish("restored from cache");
                 return WorkerDone {
                     name: node.name.clone(),
                     tokens_held: tokens,
@@ -1303,6 +1353,7 @@ fn build_node(
             gate_deps: gate_deps.clone(),
             build_deps: build_deps.clone(),
             host_lib_dirs: crate::recipe::foreign_lib_dirs(),
+            output: Some(progress.clone()),
         };
         let outcome = run_recipe_phases(&node.recipe, &ctx);
         let tail = outcome
@@ -1347,6 +1398,7 @@ fn build_node(
             gate_deps: gate_deps.clone(),
             build_deps: build_deps.clone(),
             host_lib_dirs: crate::recipe::foreign_lib_dirs(),
+            output: Some(progress.clone()),
         };
         match crate::repro::double_build(
             &node.recipe,
@@ -1387,6 +1439,7 @@ fn build_node(
         }
     }
 
+    progress.finish(if result.is_ok() { "built" } else { "failed" });
     WorkerDone {
         name: node.name.clone(),
         tokens_held: tokens,

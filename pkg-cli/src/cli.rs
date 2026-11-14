@@ -12,10 +12,24 @@ pub struct Cli {
     pub command: Command,
 }
 
+#[derive(Debug, Clone, Copy, Default, Args)]
+pub struct OutputFlags {
+    /// Suppress routine build progress as well as compiler output
+    #[arg(long, conflicts_with = "verbose")]
+    pub quiet: bool,
+
+    /// Stream all compiler output with per-package progress prefixes
+    #[arg(long, conflicts_with = "quiet")]
+    pub verbose: bool,
+}
+
 /// Flags shared by every transaction that can trigger builds/cascades
 /// (install, upgrade; `build` takes the build-relevant subset).
 #[derive(Debug, Clone, Args)]
 pub struct TransactionFlags {
+    #[command(flatten)]
+    pub output: OutputFlags,
+
     /// Declared-option override for this transaction, `name=0|1`
     /// (Issue 1 §5: per-command precedence; not persisted). Repeatable.
     #[arg(long = "opt", value_name = "name=val")]
@@ -155,6 +169,8 @@ pub enum Command {
         affected: bool,
         #[arg(short = 'y', long)]
         assume_yes: bool,
+        #[command(flatten)]
+        output: OutputFlags,
     },
 
     /// Run scanner diagnostics (§8.6).
@@ -284,6 +300,8 @@ pub enum Command {
         /// paranoia").
         #[arg(long)]
         no_cache: bool,
+        #[command(flatten)]
+        output: OutputFlags,
     },
 
     /// Enter a retained, isolated build workspace for recipe development.
@@ -423,4 +441,37 @@ pub enum HooksAction {
     Status,
     /// Retry all outstanding operations without changing the package set.
     Retry,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_output_is_concise_by_default_and_flags_are_mutually_exclusive() {
+        let cli = Cli::try_parse_from(["pkg", "install", "hello"]).unwrap();
+        let Command::Install { flags, .. } = cli.command else {
+            panic!("expected install");
+        };
+        assert!(!flags.output.quiet);
+        assert!(!flags.output.verbose);
+
+        assert!(Cli::try_parse_from(["pkg", "install", "--quiet", "--verbose", "hello",]).is_err());
+        assert!(Cli::try_parse_from(["pkg", "build", "--quiet", "--verbose", "hello",]).is_err());
+        assert!(
+            Cli::try_parse_from(["pkg", "rebuild", "--affected", "--quiet", "--verbose",]).is_err()
+        );
+    }
+
+    #[test]
+    fn build_output_flags_are_available_on_every_build_entry_point() {
+        for args in [
+            &["pkg", "install", "--verbose", "hello"][..],
+            &["pkg", "upgrade", "--quiet"][..],
+            &["pkg", "build", "--verbose", "hello"][..],
+            &["pkg", "rebuild", "--affected", "--quiet"][..],
+        ] {
+            Cli::try_parse_from(args).unwrap();
+        }
+    }
 }

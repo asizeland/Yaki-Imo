@@ -325,14 +325,18 @@ pub enum HookOperation {
     FontCache,
     MimeCache,
     IconCache,
+    DesktopDatabase,
+    GlibSchemas,
 }
 
 impl HookOperation {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 6] = [
         Self::Ldconfig,
         Self::FontCache,
         Self::MimeCache,
         Self::IconCache,
+        Self::DesktopDatabase,
+        Self::GlibSchemas,
     ];
 }
 
@@ -343,6 +347,8 @@ impl fmt::Display for HookOperation {
             Self::FontCache => "font-cache",
             Self::MimeCache => "mime-cache",
             Self::IconCache => "icon-cache",
+            Self::DesktopDatabase => "desktop-database",
+            Self::GlibSchemas => "glib-schemas",
         };
         write!(f, "{s}")
     }
@@ -357,6 +363,8 @@ impl std::str::FromStr for HookOperation {
             "font-cache" => Ok(Self::FontCache),
             "mime-cache" => Ok(Self::MimeCache),
             "icon-cache" => Ok(Self::IconCache),
+            "desktop-database" => Ok(Self::DesktopDatabase),
+            "glib-schemas" => Ok(Self::GlibSchemas),
             other => Err(ManifestError::UnknownHookOperation(other.to_string())),
         }
     }
@@ -1159,7 +1167,7 @@ mod tests {
             category = "app-misc"
 
             [hooks]
-            operations = ["icon-cache", "ldconfig", "font-cache", "icon-cache", "mime-cache", "ldconfig"]
+            operations = ["glib-schemas", "icon-cache", "desktop-database", "ldconfig", "font-cache", "icon-cache", "mime-cache", "desktop-database", "ldconfig", "glib-schemas"]
         "#;
         let manifest = PackageManifest::from_toml_str(raw_toml).unwrap();
         assert_eq!(manifest.hooks, HookOperation::ALL);

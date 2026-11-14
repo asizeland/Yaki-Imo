@@ -2,6 +2,11 @@
 //!
 //! - Initial implementation (SPEC: pkg-sandbox; design doc Issue 3.4,
 //!   v14 §4).
+//!
+//! ## v2 changes
+//!
+//! - Output-aware builds stream complete stdout/stderr lines through callbacks
+//!   while retaining bounded diagnostic tails.
 
 //! Sandboxed execution: turn a [`SandboxProfile`] plus a command into a
 //! `bwrap` argv, spawn it, and report the outcome.
@@ -48,7 +53,7 @@
 //!    host environment. Nothing else leaks.
 
 use std::collections::VecDeque;
-use std::io::Read as _;
+use std::io::{BufRead as _, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 
@@ -56,12 +61,10 @@ use pkg_core::{PkgError, PkgResult};
 
 use crate::profile::{ProfileData, SandboxProfile};
 
-/// Bytes of trailing stderr retained in [`SandboxOutcome::stderr_tail`]
-/// for error reports. Sized to cover the tail of a failing compile —
-/// the last error block plus context — without holding a whole build
-/// log in memory. (The *first* 40 lines of a failing log that Issue
-/// 4.2.6's report wants are captured by pkg-build's log file; this
-/// tail is the in-memory fallback for error messages.)
+/// Bytes of trailing output retained per stream for error reports. Sized to
+/// cover the last error block plus context without holding a whole build log in
+/// memory. Output-aware callers receive lines as they arrive and still retain
+/// these bounded tails when routine output is hidden.
 pub const STDERR_TAIL_CAP: usize = 8 * 1024;
 
 /// The unprivileged uid/gid the sandboxed command runs as (nobody).
@@ -86,8 +89,15 @@ pub const STDERR_TAIL_CAP: usize = 8 * 1024;
 pub const SANDBOX_UID: u32 = 65534;
 pub const SANDBOX_GID: u32 = 65534;
 
+/// Identifies which child output stream produced a callback line.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SandboxStream {
+    Stdout,
+    Stderr,
+}
+
 /// The result of one sandboxed invocation: the process exit status
-/// plus the trailing stderr retained for error reporting.
+/// plus bounded tails of its captured output.
 #[derive(Debug)]
 pub struct SandboxOutcome {
     /// Raw exit status of the bwrap child. Note bwrap itself exits 1
@@ -95,6 +105,9 @@ pub struct SandboxOutcome {
     /// missing); callers distinguish "sandbox broke" from "build
     /// failed" via `stderr_tail` content, not the code.
     pub status: ExitStatus,
+    /// Last up-to-[`STDERR_TAIL_CAP`] bytes of captured stdout, lossily
+    /// decoded. Empty for runners that inherit stdout.
+    pub stdout_tail: String,
     /// Last up-to-[`STDERR_TAIL_CAP`] bytes of the child's stderr,
     /// lossily decoded. Intended for `PkgError::Build` messages and
     /// Issue 4.2.6's blocked-subtree report.
@@ -206,8 +219,8 @@ pub fn run_sandboxed_with_binds(
     let mut child = Command::new(&argv[0])
         .args(&argv[1..])
         .stdin(Stdio::null())
-        // stdout inherits: build logs stream to the caller's log
-        // capture (pkg-build's per-node log file) unbuffered.
+        // Legacy callers inherit stdout; recipe builds use the output-aware
+        // variant below when they need capture, prefixes, or quiet mode.
         .stdout(Stdio::inherit())
         .stderr(Stdio::piped())
         .spawn()
@@ -239,8 +252,117 @@ pub fn run_sandboxed_with_binds(
 
     Ok(SandboxOutcome {
         status,
+        stdout_tail: String::new(),
         stderr_tail: tail.tail_string(),
     })
+}
+
+/// [`run_sandboxed_with_binds`] with both output streams piped and delivered
+/// to `output` one complete line at a time. Callbacks for the two streams may
+/// run concurrently. Newline terminators are omitted, and a final unterminated
+/// line is delivered at EOF.
+pub fn run_sandboxed_with_binds_output(
+    profile: &SandboxProfile,
+    extra_binds_ro: &[(PathBuf, PathBuf)],
+    cmd: &[String],
+    scratch_dir: &Path,
+    env: &[(String, String)],
+    output: &(dyn Fn(SandboxStream, &str) + Sync),
+) -> PkgResult<SandboxOutcome> {
+    if cmd.is_empty() {
+        return Err(PkgError::Build("run_sandboxed: empty command".to_string()));
+    }
+    let pkgdir = env
+        .iter()
+        .find(|(k, _)| k == "PKGDIR")
+        .map(|(_, v)| PathBuf::from(v));
+    let mut data = profile.resolve(scratch_dir, pkgdir.as_deref());
+    data.bind_ro.retain(|p| {
+        let exists = p.exists();
+        if !exists {
+            eprintln!(
+                "pkg: sandbox: bind source {} does not exist; skipping",
+                p.display()
+            );
+        }
+        exists
+    });
+    let binds: Vec<(PathBuf, PathBuf)> = extra_binds_ro
+        .iter()
+        .filter(|(src, _)| {
+            let exists = src.exists();
+            if !exists {
+                eprintln!(
+                    "pkg: sandbox: bind source {} does not exist; skipping",
+                    src.display()
+                );
+            }
+            exists
+        })
+        .cloned()
+        .collect();
+    let argv = build_argv_impl(&data, &binds, cmd, scratch_dir, scratch_dir, env);
+
+    let mut child = Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            PkgError::Build(format!(
+                "failed to spawn bwrap (is bubblewrap installed?): {e}"
+            ))
+        })?;
+
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let stderr = child.stderr.take().expect("stderr was piped");
+    std::thread::scope(|scope| {
+        let stdout_reader =
+            scope.spawn(move || drain_output(stdout, SandboxStream::Stdout, output));
+        let stderr_reader =
+            scope.spawn(move || drain_output(stderr, SandboxStream::Stderr, output));
+
+        let status = child.wait();
+        let stdout_tail = stdout_reader.join().unwrap_or_else(|_| TailBuffer::new(0));
+        let stderr_tail = stderr_reader.join().unwrap_or_else(|_| TailBuffer::new(0));
+
+        status
+            .map(|status| SandboxOutcome {
+                status,
+                stdout_tail: stdout_tail.tail_string(),
+                stderr_tail: stderr_tail.tail_string(),
+            })
+            .map_err(PkgError::Io)
+    })
+}
+
+fn drain_output<R: Read>(
+    reader: R,
+    stream: SandboxStream,
+    output: &(dyn Fn(SandboxStream, &str) + Sync),
+) -> TailBuffer {
+    let mut reader = BufReader::new(reader);
+    let mut tail = TailBuffer::new(STDERR_TAIL_CAP);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                tail.push(&line);
+                if line.last() == Some(&b'\n') {
+                    line.pop();
+                    if line.last() == Some(&b'\r') {
+                        line.pop();
+                    }
+                }
+                output(stream, String::from_utf8_lossy(&line).as_ref());
+            }
+            Err(_) => break,
+        }
+    }
+    tail
 }
 
 /// Runs an interactive command with the ordinary Build sandbox contract.
@@ -275,6 +397,7 @@ pub fn run_sandboxed_interactive_with_binds(
         .map_err(|e| PkgError::Build(format!("failed to spawn interactive bwrap: {e}")))?;
     Ok(SandboxOutcome {
         status,
+        stdout_tail: String::new(),
         stderr_tail: String::new(),
     })
 }
@@ -797,6 +920,89 @@ mod tests {
         let argv = build_argv(&build_data(scratch, None), &cmd, scratch, &[]);
         let sep = argv.iter().position(|a| a == "--").unwrap();
         assert_eq!(&argv[sep + 1..], cmd.as_slice());
+    }
+
+    struct FragmentedReader {
+        bytes: Vec<u8>,
+        position: usize,
+        fragment_size: usize,
+    }
+
+    impl FragmentedReader {
+        fn new(bytes: Vec<u8>, fragment_size: usize) -> Self {
+            Self {
+                bytes,
+                position: 0,
+                fragment_size,
+            }
+        }
+    }
+
+    impl Read for FragmentedReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let remaining = self.bytes.len() - self.position;
+            let count = remaining.min(self.fragment_size).min(buf.len());
+            buf[..count].copy_from_slice(&self.bytes[self.position..self.position + count]);
+            self.position += count;
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn output_reader_reassembles_fragmented_lines_and_flushes_eof() {
+        let input = b"caf\xC3\xA9\nsecond\r\nlast".to_vec();
+        let lines = std::sync::Mutex::new(Vec::new());
+        let tail = drain_output(
+            FragmentedReader::new(input.clone(), 1),
+            SandboxStream::Stdout,
+            &|stream, line| {
+                lines.lock().unwrap().push((stream, line.to_string()));
+            },
+        );
+
+        assert_eq!(
+            lines.into_inner().unwrap(),
+            vec![
+                (SandboxStream::Stdout, "caf\u{e9}".to_string()),
+                (SandboxStream::Stdout, "second".to_string()),
+                (SandboxStream::Stdout, "last".to_string()),
+            ]
+        );
+        assert_eq!(tail.tail(), input);
+    }
+
+    #[test]
+    fn output_reader_emits_empty_lines_without_an_extra_eof_line() {
+        let lines = std::sync::Mutex::new(Vec::new());
+        drain_output(
+            FragmentedReader::new(b"\n\n".to_vec(), 1),
+            SandboxStream::Stderr,
+            &|stream, line| {
+                lines.lock().unwrap().push((stream, line.to_string()));
+            },
+        );
+
+        assert_eq!(
+            lines.into_inner().unwrap(),
+            vec![
+                (SandboxStream::Stderr, String::new()),
+                (SandboxStream::Stderr, String::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn output_reader_retains_a_bounded_tail() {
+        let mut input = b"discarded\n".to_vec();
+        input.extend(vec![b'x'; STDERR_TAIL_CAP]);
+        input.extend(b"tail");
+        let tail = drain_output(
+            FragmentedReader::new(input.clone(), 127),
+            SandboxStream::Stderr,
+            &|_, _| {},
+        );
+
+        assert_eq!(tail.tail(), input[input.len() - STDERR_TAIL_CAP..]);
     }
 
     #[test]

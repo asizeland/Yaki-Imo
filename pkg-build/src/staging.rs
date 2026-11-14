@@ -43,6 +43,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use pkg_core::{Arch, HookOperation, Identity, PkgError, PkgResult, Track};
@@ -59,15 +60,15 @@ use crate::orchestrator::PlanNode;
 pub const STAGE_DIR_NAME: &str = ".stage";
 
 // ---------------------------------------------------------------------
-// Symlink planning — the derived activation model (Issue 5 §5.2)
+// Activation planning — the derived filesystem model (Issue 5 §5.2)
 // ---------------------------------------------------------------------
 
-/// One symlink swap in the FHS tree. Both the normal and the undo path
-/// are sequences of these; the DB commit that follows them is always
-/// last (§7.5 Phase B).
+/// One real-directory creation or symlink swap in the FHS tree. Normal,
+/// undo, and named-environment activation all apply this shared operation
+/// list; the DB commit follows it in system transactions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymlinkOp {
-    /// Absolute FHS path of the link, e.g. `/usr/lib/libfoo.so.1`.
+    /// Absolute physical FHS path of the directory or link.
     pub link_path: PathBuf,
     /// What the link pointed at before (`None` = link created), in the
     /// raw form `read_link` returned.
@@ -78,6 +79,16 @@ pub struct SymlinkOp {
     /// dangling every link the moment the root is entered via chroot or
     /// booted as `/`.
     pub new_target: Option<PathBuf>,
+    /// Present for a real-directory entry; absent for a symlink swap.
+    directory_mode: Option<u32>,
+}
+
+/// One package-owned real directory in the FHS tree, with the permission
+/// bits (including sticky/set-id bits) from its store directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryOp {
+    pub dir_path: PathBuf,
+    pub mode: u32,
 }
 
 /// Computes the link text for a symlink at `link` pointing at `target`
@@ -164,10 +175,22 @@ fn physical_link_path(link_path: &Path) -> PathBuf {
     out
 }
 
-/// Computes the symlink ops that make `identity`'s store dir live under
-/// `fhs_root` (`/` for the system; an env root for `pkg env`). One
-/// symlink per file/symlink in the store dir; directories become real
-/// directories in the FHS tree.
+/// Extracts the sorted real-directory ops from the shared activation plan.
+pub fn plan_directory_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec<DirectoryOp>> {
+    Ok(plan_activation_ops(store_dir, fhs_root)?
+        .into_iter()
+        .filter_map(|op| {
+            op.directory_mode.map(|mode| DirectoryOp {
+                dir_path: op.link_path,
+                mode,
+            })
+        })
+        .collect())
+}
+
+/// Computes the operations that make `identity`'s store dir live under
+/// `fhs_root` (`/` for the system; an env root for `pkg env`). Every real
+/// directory and every file/symlink has an entry, sorted by physical path.
 pub fn plan_activation_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec<SymlinkOp>> {
     let mut ops = Vec::new();
     let mut stack = vec![store_dir.to_path_buf()];
@@ -189,6 +212,17 @@ pub fn plan_activation_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec<S
             }
             let ftype = entry.file_type().map_err(PkgError::Io)?;
             if ftype.is_dir() {
+                let mode = entry.metadata().map_err(PkgError::Io)?.permissions().mode() & 0o7777;
+                let dir_path = physical_link_path(&fhs_root.join(rel));
+                // An existing directory symlink (notably a usrmerge alias)
+                // denotes its real target, not a collision to replace.
+                let dir_path = fs::canonicalize(&dir_path).unwrap_or(dir_path);
+                ops.push(SymlinkOp {
+                    link_path: dir_path,
+                    old_target: None,
+                    new_target: None,
+                    directory_mode: Some(mode),
+                });
                 stack.push(path);
             } else {
                 // Plan at the link's PHYSICAL location: the relative
@@ -200,6 +234,7 @@ pub fn plan_activation_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec<S
                     new_target: Some(relative_target(&link_path, &path)),
                     link_path,
                     old_target: None, // filled by `with_old_targets`
+                    directory_mode: None,
                 });
             }
         }
@@ -229,6 +264,9 @@ pub fn plan_deactivation_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec
     let planned = plan_activation_ops(store_dir, fhs_root)?;
     let mut ops = Vec::new();
     for mut op in planned {
+        if op.directory_mode.is_some() {
+            continue;
+        }
         let current = fs::read_link(&op.link_path).ok();
         let owned = match (&current, &op.new_target) {
             (Some(cur), Some(new)) => {
@@ -248,16 +286,55 @@ pub fn plan_deactivation_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec
     Ok(ops)
 }
 
-/// Applies symlink ops: for creations/updates, the new link is created
-/// at `<path>.pkg-new` and `rename(2)`d over the destination — the swap
-/// itself is atomic per link; for removals the link is unlinked. Parent
-/// directories are created as real directories.
+/// Creates package directories in path order. Existing real directories
+/// are shared and left untouched; only newly created directories receive
+/// the store mode. A file or symlink at the directory path is a collision.
+pub fn apply_directory_ops(ops: &[DirectoryOp]) -> PkgResult<()> {
+    let mut ops: Vec<&DirectoryOp> = ops.iter().collect();
+    ops.sort_by(|a, b| a.dir_path.cmp(&b.dir_path));
+    for op in ops {
+        match fs::symlink_metadata(&op.dir_path) {
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => {
+                return Err(PkgError::Build(format!(
+                    "cannot activate directory {}: path exists and is not a directory",
+                    op.dir_path.display()
+                )))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&op.dir_path).map_err(PkgError::Io)?;
+                fs::set_permissions(&op.dir_path, fs::Permissions::from_mode(op.mode))
+                    .map_err(PkgError::Io)?;
+            }
+            Err(e) => return Err(PkgError::Io(e)),
+        }
+    }
+    Ok(())
+}
+
+/// Applies activation ops: all real directories are created first, then
+/// each new link is created at `<path>.pkg-new` and `rename(2)`d over the
+/// destination. Removals unlink only the expected link and never remove a
+/// directory. This shared entry point also serves named environments.
 ///
 /// Interruption leaves a *consistent* (if stale-link) tree: either the
 /// old link or the new one, never a half-written one. Recovery is the
 /// next transaction's staging, exactly like §7.5.
 pub fn apply_symlink_ops(ops: &[SymlinkOp]) -> PkgResult<()> {
+    let directories: Vec<DirectoryOp> = ops
+        .iter()
+        .filter_map(|op| {
+            op.directory_mode.map(|mode| DirectoryOp {
+                dir_path: op.link_path.clone(),
+                mode,
+            })
+        })
+        .collect();
+    apply_directory_ops(&directories)?;
     for op in ops {
+        if op.directory_mode.is_some() {
+            continue;
+        }
         match &op.new_target {
             Some(target) => {
                 if let Some(parent) = op.link_path.parent() {
@@ -343,6 +420,7 @@ pub fn stage_into_store(
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> PkgResult<()> {
+    let permissions = fs::metadata(src).map_err(PkgError::Io)?.permissions();
     fs::create_dir_all(dst).map_err(PkgError::Io)?;
     for entry in fs::read_dir(src).map_err(PkgError::Io)? {
         let entry = entry.map_err(PkgError::Io)?;
@@ -359,6 +437,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> PkgResult<()> {
             fs::copy(&path, &target).map_err(PkgError::Io)?;
         }
     }
+    fs::set_permissions(dst, permissions).map_err(PkgError::Io)?;
     Ok(())
 }
 
@@ -507,6 +586,7 @@ pub fn plan_resync_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec<Symli
                         link_path: path,
                         old_target: Some(target),
                         new_target: None,
+                        directory_mode: None,
                     });
                 }
             }
@@ -591,7 +671,8 @@ where
         )?);
     }
 
-    // (2) Symlink swaps.
+    // (2) Real directories first, then symlink swaps. Deactivation is
+    // link-only: package directories remain available to other packages.
     let mut ops = Vec::new();
     for identity in &activate {
         let root = store_root_for(identity.arch, store_roots)?;
@@ -706,7 +787,7 @@ where
             Ok(ActivationReport {
                 activated: activate.iter().map(|i| i.store_dir_name()).collect(),
                 deactivated: deactivate.iter().map(|(i, _)| i.store_dir_name()).collect(),
-                symlink_ops: ops.len(),
+                symlink_ops: ops.iter().filter(|op| op.directory_mode.is_none()).count(),
                 generation_id: gen_id,
                 hooks,
             })
@@ -769,10 +850,8 @@ pub fn activate_built_package(
 
     stage_into_store(pkgdir, &identity, &root)?;
     if rebuild_in_place {
-        apply_symlink_ops(&plan_resync_ops(
-            &root.join(identity.store_dir_name()),
-            pkg_core::paths::root(),
-        )?)?;
+        let store_dir = root.join(identity.store_dir_name());
+        apply_symlink_ops(&plan_resync_ops(&store_dir, pkg_core::paths::root())?)?;
     }
 
     // The target set = current set with this identity swapped in.
@@ -1055,6 +1134,10 @@ mod tests {
         }
     }
 
+    fn mode(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
     #[test]
     fn diff_reports_both_directions() {
         let current = set(vec![
@@ -1128,7 +1211,8 @@ mod tests {
         fs::write(store2.join("usr/lib/libfoo.so.1"), b"elf2").unwrap();
         let mut ops2 = plan_activation_ops(&store2, &fhs).unwrap();
         with_old_targets(&mut ops2);
-        assert_eq!(ops2[0].old_target, Some(text));
+        let file_op = ops2.iter().find(|op| op.link_path == link).unwrap();
+        assert_eq!(file_op.old_target.as_deref(), Some(text.as_path()));
         apply_symlink_ops(&ops2).unwrap();
         let text2 = fs::read_link(&link).unwrap();
         assert_eq!(
@@ -1152,16 +1236,19 @@ mod tests {
         // (/lib64/…) would dangle the loader link and kill every exec.
         let tmp = tempfile::tempdir().unwrap();
         let store = tmp.path().join("store/glibc-2.42+ab1");
-        fs::create_dir_all(store.join("lib64")).unwrap();
+        fs::create_dir_all(store.join("lib64/empty")).unwrap();
+        fs::set_permissions(store.join("lib64/empty"), fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(store.join("lib64/ld-linux-x86-64.so.2"), b"elf").unwrap();
         let fhs = tmp.path().join("fhs");
         fs::create_dir_all(fhs.join("usr/lib64")).unwrap();
         std::os::unix::fs::symlink("usr/lib64", fhs.join("lib64")).unwrap();
 
         let mut ops = plan_activation_ops(&store, &fhs).unwrap();
-        assert_eq!(ops.len(), 1);
-        // The op targets the physical location, not the lexical one.
-        assert_eq!(ops[0].link_path, fhs.join("usr/lib64/ld-linux-x86-64.so.2"));
+        let link_path = fhs.join("usr/lib64/ld-linux-x86-64.so.2");
+        assert!(ops.iter().any(|op| op.link_path == link_path));
+        assert!(ops
+            .iter()
+            .any(|op| op.link_path == fhs.join("usr/lib64/empty")));
         with_old_targets(&mut ops);
         apply_symlink_ops(&ops).unwrap();
 
@@ -1172,6 +1259,7 @@ mod tests {
             fs::canonicalize(&via_alias).unwrap(),
             fs::canonicalize(store.join("lib64/ld-linux-x86-64.so.2")).unwrap()
         );
+        assert_eq!(mode(&fhs.join("lib64/empty")), 0o700);
     }
 
     #[test]
@@ -1209,12 +1297,92 @@ mod tests {
     }
 
     #[test]
-    fn resync_adds_new_removes_stale_keeps_working() {
-        // Simulate a rebuild-in-place: the store dir is replaced with
-        // different content under the SAME name.
+    fn empty_directories_activate_with_store_modes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store/empty-1.0+ab1");
+        for (rel, dir_mode) in [("usr/lib/private", 0o700), ("var/tmp/sticky", 0o1777)] {
+            let path = store.join(rel);
+            fs::create_dir_all(&path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(dir_mode)).unwrap();
+        }
+        let fhs = tmp.path().join("fhs");
+        fs::create_dir_all(&fhs).unwrap();
+
+        let directory_ops = plan_directory_ops(&store, &fhs).unwrap();
+        assert!(directory_ops
+            .windows(2)
+            .all(|pair| pair[0].dir_path < pair[1].dir_path));
+        apply_symlink_ops(&plan_activation_ops(&store, &fhs).unwrap()).unwrap();
+
+        assert!(fhs.join("usr/lib/private").is_dir());
+        assert_eq!(mode(&fhs.join("usr/lib/private")), 0o700);
+        assert!(fhs.join("var/tmp/sticky").is_dir());
+        assert_eq!(mode(&fhs.join("var/tmp/sticky")), 0o1777);
+    }
+
+    #[test]
+    fn activation_preserves_existing_directory_modes_and_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store/dirs-1.0+ab1");
+        fs::create_dir_all(store.join("usr/lib/existing")).unwrap();
+        fs::create_dir_all(store.join("usr/lib/new")).unwrap();
+        fs::set_permissions(
+            store.join("usr/lib/existing"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::set_permissions(
+            store.join("usr/lib/new"),
+            fs::Permissions::from_mode(0o1777),
+        )
+        .unwrap();
+        let fhs = tmp.path().join("fhs");
+        fs::create_dir_all(fhs.join("usr/lib/existing")).unwrap();
+        fs::set_permissions(
+            fhs.join("usr/lib/existing"),
+            fs::Permissions::from_mode(0o751),
+        )
+        .unwrap();
+        fs::write(fhs.join("usr/lib/existing/keep"), b"local").unwrap();
+
+        apply_symlink_ops(&plan_activation_ops(&store, &fhs).unwrap()).unwrap();
+
+        assert_eq!(mode(&fhs.join("usr/lib/existing")), 0o751);
+        assert_eq!(
+            fs::read(fhs.join("usr/lib/existing/keep")).unwrap(),
+            b"local"
+        );
+        assert_eq!(mode(&fhs.join("usr/lib/new")), 0o1777);
+    }
+
+    #[test]
+    fn activation_rejects_non_directory_collisions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = tmp.path().join("usr/lib");
+        fs::create_dir_all(&parent).unwrap();
+        let file = parent.join("file-collision");
+        fs::write(&file, b"keep").unwrap();
+        let symlink = parent.join("symlink-collision");
+        std::os::unix::fs::symlink("missing-target", &symlink).unwrap();
+
+        for path in [&file, &symlink] {
+            let err = apply_directory_ops(&[DirectoryOp {
+                dir_path: path.clone(),
+                mode: 0o700,
+            }])
+            .unwrap_err();
+            assert!(err.to_string().contains("not a directory"));
+        }
+        assert_eq!(fs::read(file).unwrap(), b"keep");
+        assert_eq!(fs::read_link(symlink).unwrap(), Path::new("missing-target"));
+    }
+
+    #[test]
+    fn resync_adds_empty_dirs_and_deactivation_leaves_dirs() {
         let tmp = tempfile::tempdir().unwrap();
         let store = tmp.path().join("store/foo-1.0+ab1");
         fs::create_dir_all(store.join("usr/bin")).unwrap();
+        fs::create_dir_all(store.join("usr/share/old-empty")).unwrap();
         fs::write(store.join("usr/bin/keep"), b"k").unwrap();
         fs::write(store.join("usr/bin/dropped"), b"d").unwrap();
         let fhs = tmp.path().join("fhs");
@@ -1222,27 +1390,68 @@ mod tests {
         apply_symlink_ops(&plan_activation_ops(&store, &fhs).unwrap()).unwrap();
         assert!(fhs.join("usr/bin/dropped").is_symlink());
 
-        // The "rebuild": replace the store dir — keep `keep`, drop
-        // `dropped`, add `added`.
         fs::remove_dir_all(&store).unwrap();
         fs::create_dir_all(store.join("usr/bin")).unwrap();
+        fs::create_dir_all(store.join("usr/share/new-private")).unwrap();
+        fs::create_dir_all(store.join("usr/share/new-sticky")).unwrap();
+        fs::set_permissions(
+            store.join("usr/share/new-private"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::set_permissions(
+            store.join("usr/share/new-sticky"),
+            fs::Permissions::from_mode(0o1777),
+        )
+        .unwrap();
         fs::write(store.join("usr/bin/keep"), b"k2").unwrap();
         fs::write(store.join("usr/bin/added"), b"a").unwrap();
 
-        let ops = plan_resync_ops(&store, &fhs).unwrap();
-        apply_symlink_ops(&ops).unwrap();
-        assert!(fhs.join("usr/bin/added").is_symlink(), "new file linked");
-        assert!(
-            !fhs.join("usr/bin/dropped").exists() && !fhs.join("usr/bin/dropped").is_symlink(),
-            "stale link removed"
-        );
+        apply_symlink_ops(&plan_resync_ops(&store, &fhs).unwrap()).unwrap();
+        assert!(fhs.join("usr/bin/added").is_symlink());
+        assert!(!fhs.join("usr/bin/dropped").is_symlink());
+        assert_eq!(mode(&fhs.join("usr/share/new-private")), 0o700);
+        assert_eq!(mode(&fhs.join("usr/share/new-sticky")), 0o1777);
+        assert!(fhs.join("usr/share/old-empty").is_dir());
         assert_eq!(
             resolve_link_target(
                 &fhs.join("usr/bin/keep"),
                 &fs::read_link(fhs.join("usr/bin/keep")).unwrap()
             ),
-            store.join("usr/bin/keep"),
-            "kept link still resolves into the store"
+            store.join("usr/bin/keep")
         );
+
+        apply_symlink_ops(&plan_deactivation_ops(&store, &fhs).unwrap()).unwrap();
+        assert!(!fhs.join("usr/bin/keep").is_symlink());
+        assert!(!fhs.join("usr/bin/added").is_symlink());
+        assert!(fhs.join("usr/share/old-empty").is_dir());
+        assert!(fhs.join("usr/share/new-private").is_dir());
+        assert!(fhs.join("usr/share/new-sticky").is_dir());
+    }
+
+    #[test]
+    fn staging_copy_preserves_empty_directory_modes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(src.join("usr/lib/private")).unwrap();
+        fs::create_dir_all(src.join("var/tmp/sticky")).unwrap();
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o750)).unwrap();
+        fs::set_permissions(
+            src.join("usr/lib/private"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::set_permissions(
+            src.join("var/tmp/sticky"),
+            fs::Permissions::from_mode(0o1777),
+        )
+        .unwrap();
+        let dst = tmp.path().join("dst");
+
+        copy_dir_recursive(&src, &dst).unwrap();
+
+        assert_eq!(mode(&dst), 0o750);
+        assert_eq!(mode(&dst.join("usr/lib/private")), 0o700);
+        assert_eq!(mode(&dst.join("var/tmp/sticky")), 0o1777);
     }
 }
