@@ -118,6 +118,30 @@ and arguments. Keep a known-good entry, protect the running kernel, and never
 remove the last bootable kernel. Test every supported variant with the
 installed DKMS modules on real hardware.
 
+## Deferred until after the first live-system boot: base images and installer
+
+Build the installer from a known-working system, not as a substitute for proving
+the bootstrap. First produce a complete `PKG_ROOT` in the recommended container
+and verify it in a VM and on the test machine. Export that root as a versioned
+base archive. It must include the activated relative symlinks, package store,
+package database, and installed recipes; copying only `/usr/bin` would leave a
+broken system. Exclude build workspaces, disposable caches, machine-specific
+configuration, and credentials. Record the package-manager and recipe-tree
+revisions and sign the image manifest.
+
+A FreeBSD-style installer can then offer a short text flow: identify the target
+disk, show the destructive plan and require confirmation, partition and mount,
+extract the base image, configure accounts, hostname and networking, select
+services and optional packages, generate the required initramfs/microcode setup,
+and install a bootloader entry while preserving a recovery entry. A small live
+image must supply the installer and its base payload. Include a rescue shell and
+clear error reporting.
+
+Do not compile the distribution on every installing machine by default. A source
+build can remain a developer mode, but normal installation should consume the
+verified base image. Extend the same image-building path to produce VM images
+and installation ISOs so all three formats test the same package set.
+
 ## Rejected: rename recipe metadata to `.pkg` and `.watch`
 
 Keep the established layout:

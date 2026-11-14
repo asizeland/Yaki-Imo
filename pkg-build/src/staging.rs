@@ -153,7 +153,7 @@ fn resolve_link_target(link: &Path, target: &Path) -> PathBuf {
 /// every exec fails ENOENT). Canonicalizing only the existing prefix
 /// leaves store-introduced directories (which apply_symlink_ops creates
 /// as real dirs) untouched.
-fn physical_link_path(link_path: &Path) -> PathBuf {
+fn physical_link_path(link_path: &Path, fhs_root: &Path) -> PkgResult<PathBuf> {
     let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
     let mut cursor: &Path = link_path;
     // Always strip at least the final component: the link itself may
@@ -172,7 +172,20 @@ fn physical_link_path(link_path: &Path) -> PathBuf {
     for name in tail.iter().rev() {
         out.push(name);
     }
-    out
+    ensure_activation_contained(out, fhs_root)
+}
+
+fn ensure_activation_contained(path: PathBuf, fhs_root: &Path) -> PkgResult<PathBuf> {
+    let canonical_root = fs::canonicalize(fhs_root).unwrap_or_else(|_| fhs_root.to_path_buf());
+    if path.starts_with(&canonical_root) {
+        Ok(path)
+    } else {
+        Err(PkgError::Build(format!(
+            "activation destination {} escapes configured root {}; refusing to modify outside the target",
+            path.display(),
+            canonical_root.display()
+        )))
+    }
 }
 
 /// Extracts the sorted real-directory ops from the shared activation plan.
@@ -213,10 +226,11 @@ pub fn plan_activation_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec<S
             let ftype = entry.file_type().map_err(PkgError::Io)?;
             if ftype.is_dir() {
                 let mode = entry.metadata().map_err(PkgError::Io)?.permissions().mode() & 0o7777;
-                let dir_path = physical_link_path(&fhs_root.join(rel));
+                let dir_path = physical_link_path(&fhs_root.join(rel), fhs_root)?;
                 // An existing directory symlink (notably a usrmerge alias)
                 // denotes its real target, not a collision to replace.
                 let dir_path = fs::canonicalize(&dir_path).unwrap_or(dir_path);
+                let dir_path = ensure_activation_contained(dir_path, fhs_root)?;
                 ops.push(SymlinkOp {
                     link_path: dir_path,
                     old_target: None,
@@ -229,7 +243,7 @@ pub fn plan_activation_ops(store_dir: &Path, fhs_root: &Path) -> PkgResult<Vec<S
                 // target must resolve from the directory the kernel
                 // actually sees (usrmerge symlinked parents), not the
                 // lexical store-relative one. See physical_link_path.
-                let link_path = physical_link_path(&fhs_root.join(rel));
+                let link_path = physical_link_path(&fhs_root.join(rel), fhs_root)?;
                 ops.push(SymlinkOp {
                     new_target: Some(relative_target(&link_path, &path)),
                     link_path,
@@ -1260,6 +1274,24 @@ mod tests {
             fs::canonicalize(store.join("lib64/ld-linux-x86-64.so.2")).unwrap()
         );
         assert_eq!(mode(&fhs.join("lib64/empty")), 0o700);
+    }
+
+    #[test]
+    fn activation_rejects_absolute_symlinked_parent_outside_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path().join("store/glibc-2.43+ab1");
+        fs::create_dir_all(store.join("lib64/empty")).unwrap();
+        fs::write(store.join("lib64/ld-linux-x86-64.so.2"), b"elf").unwrap();
+        let fhs = tmp.path().join("fhs");
+        fs::create_dir_all(&fhs).unwrap();
+        let outside = tmp.path().join("outside/usr/lib64");
+        fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, fhs.join("lib64")).unwrap();
+
+        let error = plan_activation_ops(&store, &fhs).unwrap_err();
+        assert!(error.to_string().contains("escapes configured root"));
+        assert!(!outside.join("ld-linux-x86-64.so.2").exists());
+        assert!(!outside.join("empty").exists());
     }
 
     #[test]

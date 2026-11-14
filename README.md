@@ -22,7 +22,7 @@ sandboxed reproducible builds with provenance, atomic store-and-symlink
 activation, generations and undo, dependency-directed provider hints for
 packagers — and it has been proven on real upstream software from glibc to 
 bash, plus repackaged binary blobs like Discord, Steam ... The first bootstrap 
-stage is done: Yaki Imo builds real glibc 2.42 from source on 
+stage is done: Yaki Imo builds real glibc 2.43 from source on
 top of kernel headers and more, installed correctly and working. 
 I am currently progressing in this area, packaging more software 
 to create a live system. Works correctly in containers. 

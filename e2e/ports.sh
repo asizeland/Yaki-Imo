@@ -78,7 +78,7 @@ cp "$(readlink -f "$LD_PATH")" "$SEED/lib64/ld-linux-x86-64.so.2"
 # installed, a build whose sandbox binds /pkg/deps/glibc gets the
 # packaged libc.so.6 injected via LD_LIBRARY_PATH. The HOST loader
 # (seeded above) paired with the packaged libc is a mismatched pair and
-# segfaults even trivial tools (Debian trixie: 2.41 loader + 2.42 libc
+# segfaults even trivial tools (Debian trixie: 2.41 loader + 2.43 libc
 # kills tar at startup — every post-glibc build died at `tar xf`). The
 # consistent pair is packaged loader + packaged libc, so the shim below
 # swaps the /lib64 bind to a copy of the activated packaged loader for
@@ -149,16 +149,34 @@ ln -sf "$(readlink -f "$(command -v dash)")" "$TOOLBIN/sh"
 # /nix/store interpreter into every binary, which would make the
 # installed root depend on /nix/store forever. Stamp the PACKAGED
 # loader instead, on final links only (compile/assemble/shared-object
-# invocations embed no interpreter). On a normal FHS host the system
-# gcc already targets /lib64/ld-linux and none of this exists.
+# invocations embed no interpreter). Once packaged glibc is bound, use
+# the raw compiler as well: Nix's wrapper otherwise puts the host libc
+# ahead of /pkg/deps/glibc at link time. Early builds still need the
+# wrapper's host headers and startup files. On a normal FHS host the
+# system gcc already targets /lib64/ld-linux and none of this exists.
 for cc_tool in cc gcc g++ c++; do
     real=$(readlink -f "$(command -v "$cc_tool")")
+    raw=$real
+    raw_name=gcc
+    case "$cc_tool" in g++|c++) raw_name=g++ ;; esac
+    cc1=$("$real" -print-prog-name=cc1)
+    case "$cc1" in
+        /nix/store/*/libexec/gcc/*) raw=${cc1%%/libexec/gcc/*}/bin/$raw_name ;;
+    esac
+    gcc_lib=$("$real" -print-file-name=libgcc_s.so)
+    gcc_libdir=
+    case "$gcc_lib" in /*) gcc_libdir=${gcc_lib%/*} ;; esac
     cat > "$TOOLBIN/$cc_tool" <<EOF
 #!/bin/sh
-case " \$* " in
-    *" -c "*|*" -E "*|*" -S "*|*" -shared "*|*" -r "*|*" -print-"*) exec $real "\$@" ;;
+compiler=$real
+extra=
+case ":\${LIBRARY_PATH:-}:" in
+    *:/pkg/deps/glibc/*) compiler=$raw; extra=${gcc_libdir:+-L$gcc_libdir} ;;
 esac
-exec $real "\$@" -Wl,--dynamic-linker=/lib64/ld-linux-x86-64.so.2
+case " \$* " in
+    *" -c "*|*" -E "*|*" -S "*|*" -shared "*|*" -r "*|*" -print-"*) exec "\$compiler" \$extra "\$@" ;;
+esac
+exec "\$compiler" \$extra "\$@" -Wl,--dynamic-linker=/lib64/ld-linux-x86-64.so.2
 EOF
     chmod +x "$TOOLBIN/$cc_tool"
 done
@@ -344,11 +362,11 @@ pass "installed the tree ($(ls "$ROOT/var/lib/pkg/recipes" | wc -l) recipes; tre
 # --- smoke tests -------------------------------------------------
 [ -x "$ROOT/lib64/ld-linux-x86-64.so.2" ] && [ -e "$RLIBS/libc.so.6" ] \
     || fail "glibc: loader + libc activated"
-[ "$($ROOT/lib64/ld-linux-x86-64.so.2 --version | head -1 | awk '{print $NF}')" = "2.42." ] \
-    || fail "glibc: packaged loader reports 2.42"
+[ "$($ROOT/lib64/ld-linux-x86-64.so.2 --version | head -1 | awk '{print $NF}')" = "2.43." ] \
+    || fail "glibc: packaged loader reports 2.43"
 [ ! -e "$ROOT/usr/bin/memusagestat" ] \
     || fail "glibc: optional host-libgd-dependent memusagestat was built"
-pass "glibc: built from source, loader runs (2.42), no host libgd probe"
+pass "glibc: built from source, loader runs (2.43), no host libgd probe"
 
 [ -d "$ROOT/proc" ] && [ -d "$ROOT/sys" ] && [ -d "$ROOT/dev" ] \
     || fail "base-files: kernel filesystem mount points"
