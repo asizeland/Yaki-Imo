@@ -118,24 +118,25 @@ and arguments. Keep a known-good entry, protect the running kernel, and never
 remove the last bootable kernel. Test every supported variant with the
 installed DKMS modules on real hardware.
 
-## Deferred until after the first live-system boot: base images and installer
+## Base images and installer
 
-Build the installer from a known-working system, not as a substitute for proving
-the bootstrap. First produce a complete `PKG_ROOT` in the recommended container
-and verify it in a VM and on the test machine. Export that root as a versioned
-base archive. It must include the activated relative symlinks, package store,
-package database, and installed recipes; copying only `/usr/bin` would leave a
-broken system. Exclude build workspaces, disposable caches, machine-specific
-configuration, and credentials. Record the package-manager and recipe-tree
-revisions and sign the image manifest.
+A development stage 3 path now exists. `image/build-stage3.sh` builds a fresh
+67-package root in the Debian container, including the static package manager,
+package store and database, recipes, base userspace, compiler, networking, Git,
+and init system. It excludes build workspaces, runtime state, and external cache
+links. `e2e/stage3.sh` verifies and extracts the archive, uses its own `pkg` to
+install Linux and wireless regulatory firmware, and boots the result in QEMU.
+The archive has a SHA-256 checksum, not yet a signed release manifest. A
+physical-machine boot remains outstanding.
 
-A FreeBSD-style installer can then offer a short text flow: identify the target
-disk, show the destructive plan and require confirmation, partition and mount,
-extract the base image, configure accounts, hostname and networking, select
-services and optional packages, generate the required initramfs/microcode setup,
-and install a bootloader entry while preserving a recovery entry. A small live
-image must supply the installer and its base payload. Include a rescue shell and
-clear error reporting.
+Build the installer from this known-working base rather than as a substitute for
+proving the bootstrap. A FreeBSD-style installer can offer a short text flow:
+identify the target disk, show the destructive plan and require confirmation,
+partition and mount, extract the base image, configure accounts, hostname and
+networking, select services and optional packages, generate the required
+initramfs/microcode setup, and install a bootloader entry while preserving a
+recovery entry. A small live image must supply the installer and its base
+payload. Include a rescue shell and clear error reporting.
 
 Do not compile the distribution on every installing machine by default. A source
 build can remain a developer mode, but normal installation should consume the

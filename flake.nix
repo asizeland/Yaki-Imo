@@ -12,11 +12,14 @@
         pkgs = nixpkgs.legacyPackages.${system};
         # Read the file relative to the flake's root
         overrides = (builtins.fromTOML (builtins.readFile (self + "/rust-toolchain.toml")));
+        muslCc = pkgs.pkgsCross.musl64.stdenv.cc;
       in
       {
         devShells.default = pkgs.mkShell rec {
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = with pkgs; [
+            qemu
+            python3
             cargo
             clang
             llvmPackages.bintools
@@ -24,6 +27,9 @@
           ];
 
           RUSTC_VERSION = overrides.toolchain.channel;
+
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER = "${muslCc}/bin/x86_64-unknown-linux-musl-gcc";
+          CC_x86_64_unknown_linux_musl = "${muslCc}/bin/x86_64-unknown-linux-musl-gcc";
 
           # https://github.com/rust-lang/rust-bindgen#environment-variables
           LIBCLANG_PATH = pkgs.lib.makeLibraryPath [ pkgs.llvmPackages_latest.libclang.lib ];

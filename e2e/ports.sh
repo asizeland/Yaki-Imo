@@ -174,7 +174,7 @@ case ":\${LIBRARY_PATH:-}:" in
     *:/pkg/deps/glibc/*) compiler=$raw; extra=${gcc_libdir:+-L$gcc_libdir} ;;
 esac
 case " \$* " in
-    *" -c "*|*" -E "*|*" -S "*|*" -shared "*|*" -r "*|*" -print-"*) exec "\$compiler" \$extra "\$@" ;;
+    *" -c "*|*" -E "*|*" -S "*|*" -shared "*|*" -r "*|*" -print-"*|*" -static "*|*" -static-pie "*) exec "\$compiler" \$extra "\$@" ;;
 esac
 exec "\$compiler" \$extra "\$@" -Wl,--dynamic-linker=/lib64/ld-linux-x86-64.so.2
 EOF
@@ -766,7 +766,7 @@ ln -sf ../../init.d/yakimo-test "$ROOT/etc/runlevels/default/yakimo-test"
 cat > "$ROOT/etc/inittab" <<'EOF'
 id:3:initdefault:
 si::sysinit:/sbin/openrc sysinit
-bo::boot:/sbin/openrc boot
+bo::bootwait:/sbin/openrc boot
 rc:3:wait:/sbin/openrc default
 EOF
 rm -f "$ROOT/boot-marker"

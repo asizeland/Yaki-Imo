@@ -29,15 +29,18 @@ cargo fmt --check
 ```
 
 The Cargo binary is named `pkg-cli`, so the debug executable is
-`target/debug/pkg-cli`. The installed/user-facing name is `pkg`. The release
-command in `README.md` builds static musl binaries:
+`target/debug/pkg-cli`. The installed/user-facing name is `pkg`. Build the
+static musl release through the Nix development shell:
 
 ```sh
-cargo build --release --target x86_64-unknown-linux-musl
+nix develop -c cargo build --locked --release --target x86_64-unknown-linux-musl
 ```
 
-This requires the musl Rust target and a suitable static build environment.
-The Cargo outputs are named `pkg-cli` and `pkg-init`; deployment installs them
+`rust-toolchain.toml` declares the musl Rust target, and the development shell
+selects a musl C cross-compiler for bundled native dependencies such as SQLite
+and Zstd. Outside Nix, install both the Rust target and a suitable musl C
+cross-toolchain first. The Cargo outputs are named `pkg-cli` and `pkg-init`;
+deployment installs them
 as `pkg` and `glibc-apply` respectively. The workspace release profile enables
 LTO, one codegen unit, stripping, and abort-on-panic.
 

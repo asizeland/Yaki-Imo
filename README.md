@@ -42,7 +42,9 @@ are deferred in favor of a local double-build of the critical set (optional).
 or for longer builds, cutting down compilation/installation times.
 
 The number of packages should be fairly easy to increase and in the 
-future maintain due to Yaki-Imo's packaging mechanics.
+future maintain due to Yaki-Imo's packaging mechanics. As it offers a debug
+shell, warnings for undeclared builds, and watch files which allow easy
+upgrading of package versions.
 
 ## Why it might be worth your attention
 
@@ -139,3 +141,6 @@ The build pipeline helps you get it right: dependencies appear at stable paths,
 options arrive as `PKG_OPT_*` variables, and if your binary links
 something you didn't declare, the build fails and names the package
 that provides it.
+
+## Consider supporting the projects which led me to creating this one: Gentoo
+## and FreeBSD are wonderful operating systems/projects and deserve the support.

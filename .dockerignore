@@ -4,6 +4,7 @@
 target/
 .git/
 live/
+image/out/
 old/
 sandbox/
 Dockerfile.template

@@ -63,7 +63,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sed grep gawk diffutils nano\
     bison flex gperf gettext \
     curl file ca-certificates \
-    git openssh-client kmod \
+    git openssh-client kmod e2fsprogs \
     && rm -rf /var/lib/apt/lists/*
 
 # The built workspace (including target/) and the rustup/cargo homes
